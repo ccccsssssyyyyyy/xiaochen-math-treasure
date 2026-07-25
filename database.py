@@ -1,0 +1,219 @@
+import datetime
+import json
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+# SQLite Database URL
+SQLALCHEMY_DATABASE_URL = "sqlite:///./math_question_bank.db"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+class Question(Base):
+    __tablename__ = "questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    content = Column(Text, nullable=False)  # 题干 (LaTeX + markdown)
+    question_type = Column(String(50), default="single_choice", index=True)  # single_choice, multi_choice, fill_in_blank, detailed_answer
+    category_compulsory = Column(String(100), default="", index=True)  # 必修/选修/选择性必修
+    category_chapter = Column(String(100), default="", index=True)  # 章节
+    category_knowledge = Column(String(100), default="", index=True)  # 知识点
+    difficulty = Column(String(50), default="medium", index=True)  # easy, medium, hard
+    source = Column(String(200), default="")  # 来源
+    answer_markdown = Column(Text, default="")  # 答案与解析 (LaTeX + markdown)
+    review = Column(Text, default="")  # 评述 (允许空白)
+    association_group_id = Column(String(100), default="", index=True)  # 关联题目分组ID (支持传递关系)
+    _image_paths = Column(Text, default="[]", name="image_paths")  # 以JSON字符串形式存储相对路径列表
+    tikz_code = Column(Text, default="")  # TikZ 几何绘图源代码
+    figure_align = Column(String(50), default="right")  # 插图排版位置: right (题干右侧), center (下方居中), bottom_right (下方居右)
+    tags = Column(Text, default="")  # 自定义标签 (逗号分隔或字符串)
+    usage_count = Column(Integer, default=0, index=True)  # 组卷引用次数
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    @property
+    def image_paths(self):
+        try:
+            return json.loads(self._image_paths)
+        except Exception:
+            return []
+
+    @image_paths.setter
+    def image_paths(self, value):
+        if isinstance(value, list):
+            self._image_paths = json.dumps(value)
+        else:
+            self._image_paths = "[]"
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "content": self.content,
+            "question_type": self.question_type,
+            "category_compulsory": self.category_compulsory,
+            "category_chapter": self.category_chapter,
+            "category_knowledge": self.category_knowledge,
+            "difficulty": self.difficulty,
+            "source": self.source,
+            "answer_markdown": self.answer_markdown,
+            "review": self.review,
+            "association_group_id": self.association_group_id,
+            "image_paths": self.image_paths,
+            "tikz_code": self.tikz_code,
+            "figure_align": self.figure_align or "right",
+            "tags": self.tags,
+            "usage_count": self.usage_count or 0,
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
+        }
+
+    def to_summary_dict(self):
+        return {
+            "id": self.id,
+            "content": self.content,
+            "question_type": self.question_type,
+            "category_compulsory": self.category_compulsory,
+            "category_chapter": self.category_chapter,
+            "category_knowledge": self.category_knowledge,
+            "difficulty": self.difficulty,
+            "source": self.source,
+            "association_group_id": self.association_group_id,
+            "image_paths": self.image_paths,
+            "tikz_code": self.tikz_code,
+            "figure_align": self.figure_align or "right",
+            "tags": self.tags,
+            "usage_count": self.usage_count or 0,
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
+        }
+
+class QuestionCurriculum(Base):
+    __tablename__ = "question_curriculums"
+
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, index=True, nullable=False)
+    version_code = Column(String(50), index=True, nullable=False)  # 'A', 'B', 'S'
+    compulsory = Column(String(100), default="", index=True)
+    chapter = Column(String(100), default="", index=True)
+    knowledge = Column(String(100), default="", index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "question_id": self.question_id,
+            "version_code": self.version_code,
+            "compulsory": self.compulsory,
+            "chapter": self.chapter,
+            "knowledge": self.knowledge
+        }
+
+class Paper(Base):
+    __tablename__ = "papers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    subtitle = Column(String(200), default="")
+    paper_type = Column(String(50), default="exam")  # exam, quiz, handout
+    total_score = Column(Integer, default=150)
+    metadata_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "paper_type": self.paper_type,
+            "total_score": self.total_score,
+            "metadata_json": self.metadata_json,
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
+        }
+
+class PaperQuestion(Base):
+    __tablename__ = "paper_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    paper_id = Column(Integer, index=True, nullable=False)
+    question_id = Column(Integer, index=True, nullable=False)
+    order_index = Column(Integer, default=0)
+    score = Column(Integer, default=5)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "paper_id": self.paper_id,
+            "question_id": self.question_id,
+            "order_index": self.order_index,
+            "score": self.score
+        }
+
+# Dependency to get db session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Create tables
+def init_db():
+    Base.metadata.create_all(bind=engine)
+    # Create indexes manually and execute automatic migrations for SQLite databases to ensure maximum performance at scale
+    try:
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            # Check column existence
+            cursor = conn.execute(text("PRAGMA table_info(questions)"))
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if "review" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN review TEXT DEFAULT ''"))
+                print("Added column 'review' to questions table successfully.")
+                
+            if "association_group_id" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN association_group_id VARCHAR(100) DEFAULT ''"))
+                print("Added column 'association_group_id' to questions table successfully.")
+                
+            if "tikz_code" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN tikz_code TEXT DEFAULT ''"))
+                print("Added column 'tikz_code' to questions table successfully.")
+
+            if "figure_align" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN figure_align VARCHAR(50) DEFAULT 'right'"))
+                print("Added column 'figure_align' to questions table successfully.")
+                
+            if "tags" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN tags TEXT DEFAULT ''"))
+                print("Added column 'tags' to questions table successfully.")
+                
+            if "usage_count" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN usage_count INTEGER DEFAULT 0"))
+                print("Added column 'usage_count' to questions table successfully.")
+                
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_compulsory ON questions (category_compulsory)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_chapter ON questions (category_chapter)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_knowledge ON questions (category_knowledge)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_question_type ON questions (question_type)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_difficulty ON questions (difficulty)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_association_group_id ON questions (association_group_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_tags ON questions (tags)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_usage_count ON questions (usage_count)"))
+
+            # Create indexes on question_curriculums
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_question_curriculums_lookup ON question_curriculums (version_code, compulsory, chapter, knowledge)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_question_curriculums_qid ON question_curriculums (question_id)"))
+
+            # Auto-migrate legacy data to A-version question_curriculums
+            cursor = conn.execute(text("SELECT COUNT(*) FROM question_curriculums"))
+            count = cursor.fetchone()[0]
+            if count == 0:
+                conn.execute(text("""
+                    INSERT INTO question_curriculums (question_id, version_code, compulsory, chapter, knowledge)
+                    SELECT id, 'A', category_compulsory, category_chapter, category_knowledge
+                    FROM questions
+                """))
+                print("Successfully auto-migrated legacy question categories to A-version question_curriculums mapping.")
+    except Exception as e:
+        print(f"Error creating indexes or running migrations: {e}")

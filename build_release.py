@@ -1,0 +1,353 @@
+import os
+import shutil
+import subprocess
+import urllib.request
+import zipfile
+import ssl
+
+# Bypass SSL verification to avoid certificate errors on macOS/Windows
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.join(BASE_DIR, "dist")
+BUILD_DIR = os.path.join(DIST_DIR, "mathbank-windows")
+PYTHON_DIR = os.path.join(BUILD_DIR, "python")
+WHEELS_DIR = os.path.join(DIST_DIR, "wheels")
+SITE_PACKAGES = os.path.join(PYTHON_DIR, "site-packages")
+CACHE_DIR = os.path.join(BASE_DIR, ".build_cache")
+CACHE_WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
+
+PYTHON_ZIP_URL = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip"
+
+def clean_directories():
+    print("🧹 Cleaning old directories...")
+    if os.path.exists(DIST_DIR):
+        shutil.rmtree(DIST_DIR)
+    os.makedirs(DIST_DIR, exist_ok=True)
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    os.makedirs(PYTHON_DIR, exist_ok=True)
+    os.makedirs(WHEELS_DIR, exist_ok=True)
+    os.makedirs(SITE_PACKAGES, exist_ok=True)
+
+def download_python():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(CACHE_DIR, "python_embed.zip")
+    
+    # Check if cached file exists and is valid
+    is_cached_valid = False
+    if os.path.exists(cache_path):
+        try:
+            with zipfile.ZipFile(cache_path, 'r') as zf:
+                if zf.testzip() is None:
+                    is_cached_valid = True
+        except Exception:
+            pass
+            
+    if is_cached_valid:
+        print("💾 Using cached portable Windows Python zip...")
+    else:
+        print(f"📥 Downloading portable Windows Python from {PYTHON_ZIP_URL}...")
+        try:
+            import requests
+            resp = requests.get(PYTHON_ZIP_URL, timeout=30)
+            resp.raise_for_status()
+            with open(cache_path, "wb") as f:
+                f.write(resp.content)
+        except Exception as e:
+            print(f"⚠️ requests failed, falling back to urllib: {e}")
+            urllib.request.urlretrieve(PYTHON_ZIP_URL, cache_path)
+        
+    print("📦 Extracting Python...")
+    with zipfile.ZipFile(cache_path, 'r') as zip_ref:
+        zip_ref.extractall(PYTHON_DIR)
+
+def download_and_extract_sqlite():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(CACHE_DIR, "python_nuget.zip")
+    nuget_url = "https://www.nuget.org/api/v2/package/python/3.10.11"
+    
+    # Check if cached file exists and is valid
+    is_cached_valid = False
+    if os.path.exists(cache_path):
+        try:
+            with zipfile.ZipFile(cache_path, 'r') as zf:
+                if zf.testzip() is None:
+                    is_cached_valid = True
+        except Exception:
+            pass
+            
+    if is_cached_valid:
+        print("💾 Using cached sqlite3 binaries zip...")
+    else:
+        print("📥 Downloading sqlite3 binaries from NuGet...")
+        try:
+            import requests
+            resp = requests.get(nuget_url, timeout=30)
+            resp.raise_for_status()
+            with open(cache_path, "wb") as f:
+                f.write(resp.content)
+        except Exception as e:
+            print(f"⚠️ requests failed, falling back to urllib: {e}")
+            ctx = ssl._create_default_https_context()
+            req = urllib.request.Request(nuget_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ctx) as response:
+                with open(cache_path, "wb") as f:
+                    f.write(response.read())
+                
+    print("📦 Extracting sqlite3 binaries and VC runtime DLLs...")
+    with zipfile.ZipFile(cache_path, 'r') as zip_ref:
+        for member in zip_ref.namelist():
+            if member == "tools/DLLs/_sqlite3.pyd":
+                target_path = os.path.join(PYTHON_DIR, "_sqlite3.pyd")
+                with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+            elif member == "tools/DLLs/sqlite3.dll":
+                target_path = os.path.join(PYTHON_DIR, "sqlite3.dll")
+                with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+            elif member == "tools/vcruntime140.dll":
+                target_path = os.path.join(PYTHON_DIR, "vcruntime140.dll")
+                with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+            elif member == "tools/vcruntime140_1.dll":
+                target_path = os.path.join(PYTHON_DIR, "vcruntime140_1.dll")
+                with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+            elif member.startswith("tools/Lib/sqlite3/"):
+                rel_path = os.path.relpath(member, "tools/Lib")
+                target_path = os.path.join(SITE_PACKAGES, rel_path)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                if not member.endswith("/"):
+                    with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                        shutil.copyfileobj(source, target)
+                        
+    print("✅ sqlite3 binaries and VC runtime DLLs injected successfully!")
+
+def configure_python_path():
+    print("⚙️ Configuring python310._pth...")
+    pth_file = os.path.join(PYTHON_DIR, "python310._pth")
+    if os.path.exists(pth_file):
+        with open(pth_file, "r") as f:
+            content = f.read()
+        
+        lines = content.splitlines()
+        new_lines = []
+        for line in lines:
+            # Uncomment import site
+            if line.strip() == "#import site":
+                new_lines.append("import site")
+            else:
+                new_lines.append(line)
+            
+            # Insert site-packages relative path
+            if line.strip() == ".":
+                new_lines.append("site-packages")
+        
+        with open(pth_file, "w") as f:
+            f.write("\n".join(new_lines) + "\n")
+
+def download_and_extract_wheels():
+    print("📥 Checking and downloading Windows wheels for requirements...")
+    requirements_file = os.path.join(BASE_DIR, "requirements.txt")
+    os.makedirs(CACHE_WHEELS_DIR, exist_ok=True)
+    
+    # Use pip to download windows amd64 wheels, using CACHE_WHEELS_DIR as search links and WHEELS_DIR as output
+    cmd = [
+        "pip", "download",
+        "--only-binary=:all:",
+        "--platform", "win_amd64",
+        "--python-version", "3.10",
+        "--implementation", "cp",
+        "--abi", "cp310",
+        "-d", WHEELS_DIR,
+        "--find-links", CACHE_WHEELS_DIR,
+        "-r", requirements_file
+    ]
+    print(f"Running command: {' '.join(cmd)}")
+    subprocess.check_call(cmd)
+    
+    # Copy new wheels back into CACHE_WHEELS_DIR to save cache
+    print("💾 Updating local wheels cache...")
+    for file in os.listdir(WHEELS_DIR):
+        if file.endswith(".whl"):
+            src = os.path.join(WHEELS_DIR, file)
+            dst = os.path.join(CACHE_WHEELS_DIR, file)
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    
+    print("📦 Extracting wheels into site-packages...")
+    for file in os.listdir(WHEELS_DIR):
+        if file.endswith(".whl"):
+            file_path = os.path.join(WHEELS_DIR, file)
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(SITE_PACKAGES)
+
+def copy_app_files():
+    print("📂 Copying application files...")
+    files_to_copy = [
+        "main.py",
+        "database.py",
+        "sync_helper.py",
+        "search_questions.py",
+        ".env.example"
+    ]
+    for f in files_to_copy:
+        src = os.path.join(BASE_DIR, f)
+        dst = os.path.join(BUILD_DIR, f)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            
+    # Copy static folder
+    shutil.copytree(
+        os.path.join(BASE_DIR, "static"),
+        os.path.join(BUILD_DIR, "static"),
+        dirs_exist_ok=True
+    )
+
+def create_launcher():
+    print("📝 Creating launcher batch file...")
+    launcher_content = """@echo off
+cd /d "%~dp0"
+
+:: 检查是否解压运行（确保当前目录下存在主程序文件）
+if not exist main.py (
+    echo =================================================
+    echo [错误] 启动失败：未在当前目录找到项目关键主程序！
+    echo =================================================
+    echo 出现该错误通常是因为：您直接在 ZIP 压缩包内双击启动了脚本。
+    echo 请务必先将压缩包【全部解压】到一个普通文件夹中，再运行批处理。
+    echo =================================================
+    pause
+    exit /b 1
+)
+
+echo =================================================
+echo      本地数学题库教研系统 (MathBank) 便携版
+echo =================================================
+echo 正在释放端口...
+
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr LISTENING ^| findstr :8000') do (
+    echo 检测到端口 8000 被占用，正在释放端口...
+    taskkill /f /pid %%a >nul 2>&1
+)
+
+echo 正在启动后台服务...
+:: 使用内置的便携式 Python 运行服务，输出重定向到日志文件
+if not exist .system_generated mkdir .system_generated
+del /f /q .system_generated\\server.log >nul 2>&1
+
+:: 使用 PowerShell 在后台静默运行
+powershell -Command "Start-Process cmd -ArgumentList '/c python\\python.exe -m uvicorn main:app --host 127.0.0.1 >.system_generated\\server.log 2>&1' -WindowStyle Hidden"
+
+echo 正在探测服务启动状态...
+set TIMEOUT=10
+set COUNTER=0
+set SERVICE_READY=0
+
+:loop
+if %COUNTER% geq %TIMEOUT% goto end_loop
+
+python\\python.exe -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/questions')" >nul 2>&1
+if not errorlevel 1 (
+    echo [成功] 服务已成功启动！
+    set SERVICE_READY=1
+    goto end_loop
+)
+
+ping 127.0.0.1 -n 2 >nul
+set /a COUNTER=%COUNTER%+1
+goto loop
+
+:end_loop
+if %SERVICE_READY%==0 (
+    echo [错误] 服务启动超时，后台服务启动失败！
+    echo -------------------------------------------------
+    if exist .system_generated\\server.log (
+        type .system_generated\\server.log
+    ) else (
+        echo 未找到日志文件 .system_generated\\server.log
+    )
+    echo -------------------------------------------------
+    echo 请检查上述错误信息，或按任意键退出...
+    pause
+    exit
+)
+
+start http://127.0.0.1:8000
+exit
+"""
+    launcher_path = os.path.join(BUILD_DIR, "启动题库系统.bat")
+    with open(launcher_path, "w", encoding="gbk", newline="\r\n") as f:
+        f.write(launcher_content)
+
+def zip_release():
+    print("🤐 Zipping Windows release package...")
+    zip_filename = os.path.join(DIST_DIR, "MathBank-Windows-x64")
+    shutil.make_archive(zip_filename, 'zip', BUILD_DIR)
+    print(f"🎉 Windows Zip file created: {zip_filename}.zip")
+
+def zip_macos_release():
+    print("🤐 Zipping macOS release package...")
+    macos_build_dir = os.path.join(DIST_DIR, "mathbank-macos")
+    os.makedirs(macos_build_dir, exist_ok=True)
+    
+    # Copy source files
+    files_to_copy = [
+        "main.py",
+        "database.py",
+        "sync_helper.py",
+        "search_questions.py",
+        ".env.example",
+        "requirements.txt",
+        "启动题库系统.command"
+    ]
+    for f in files_to_copy:
+        src = os.path.join(BASE_DIR, f)
+        dst = os.path.join(macos_build_dir, f)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            
+    # Copy static folder
+    shutil.copytree(
+        os.path.join(BASE_DIR, "static"),
+        os.path.join(macos_build_dir, "static"),
+        dirs_exist_ok=True
+    )
+    
+    # Make sure launcher is executable in build directory
+    launcher_path = os.path.join(macos_build_dir, "启动题库系统.command")
+    if os.path.exists(launcher_path):
+        os.chmod(launcher_path, 0o755)
+
+    # Zip macOS folder
+    zip_filename = os.path.join(DIST_DIR, "MathBank-macOS")
+    shutil.make_archive(zip_filename, 'zip', macos_build_dir)
+    print(f"🎉 macOS Zip file created: {zip_filename}.zip")
+    
+    # Cleanup temp macos folder
+    shutil.rmtree(macos_build_dir, ignore_errors=True)
+
+def cleanup_temp():
+    print("🧹 Cleaning up temporary files...")
+    shutil.rmtree(WHEELS_DIR, ignore_errors=True)
+    shutil.rmtree(BUILD_DIR, ignore_errors=True)
+
+def main():
+    try:
+        clean_directories()
+        download_python()
+        download_and_extract_sqlite()
+        configure_python_path()
+        download_and_extract_wheels()
+        copy_app_files()
+        create_launcher()
+        zip_release()
+        zip_macos_release()
+        cleanup_temp()
+        print("🚀 Windows & macOS Release Packages Built Successfully!")
+    except Exception as e:
+        print(f"❌ Error during packaging: {e}")
+
+if __name__ == "__main__":
+    main()
