@@ -579,6 +579,9 @@
             questionDetailLoading = true;
             updateQuestionSaveButtonState();
 
+            // 同步清空标签输入状态，避免异步加载期间上一题标签被误存到本题。
+            resetEditTagInputs();
+
             // Lazy-load details asynchronously
             fetch(`/api/questions/${requestedQuestionId}`)
                 .then(r => {
@@ -766,8 +769,10 @@
                 const relatedQuestionId = document.getElementById('editRelatedQuestion').value;
                 const tikzCode = document.getElementById('editContentTikzCode') ? document.getElementById('editContentTikzCode').value : '';
                 const tags = document.getElementById('editTags') ? document.getElementById('editTags').value.trim() : '';
-                const knowledge_list = window._editKnowledgeTags ? window._editKnowledgeTags.join(',') : '';
-                const solve_method = window._editSolveMethodTags ? window._editSolveMethodTags.join(',') : '';
+                const knInput = document.getElementById('editKnowledgeTagInput');
+                const smInput = document.getElementById('editSolveMethodTagInput');
+                const knowledge_list = (knInput && typeof knInput._getTags === 'function') ? knInput._getTags() : '';
+                const solve_method = (smInput && typeof smInput._getTags === 'function') ? smInput._getTags() : '';
                 
                 if (!content.trim()) {
                     showToast('保存失败：题干内容不能为空！', 'error');
@@ -3896,16 +3901,15 @@
         }
 
         // 编辑弹窗的多标签输入初始化 (知识点 / 解题方法)
+        // 标签状态绑定到输入框元素自身 (input._getTags)，不再写入全局变量，
+        // 避免切换题目时标签串味 / 被误存到其他题目。
         function setupEditTagInput(containerId, chipsId, inputId, initialValue) {
             const container = document.getElementById(containerId);
             const chipsSpan = document.getElementById(chipsId);
             const input = document.getElementById(inputId);
             if (!container || !chipsSpan || !input) return;
 
-            // 用容器 id 推导全局存储键
-            const globalKey = containerId === 'editKnowledgeTags' ? '_editKnowledgeTags' : '_editSolveMethodTags';
             const currentTags = [];
-            window[globalKey] = currentTags;
 
             const renderChips = () => {
                 chipsSpan.innerHTML = '';
@@ -3933,7 +3937,8 @@
 
             String(initialValue || '').split(/[,，;；\n]+/).forEach(t => { if (t.trim()) addTag(t); });
 
-            input.addEventListener('keydown', (e) => {
+            // 事件监听绑定到元素自身，重绑前先清理旧监听，避免多次加载后监听器累积。
+            const onKeydown = (e) => {
                 if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
                     e.preventDefault();
                     addTag(input.value);
@@ -3942,8 +3947,33 @@
                     currentTags.pop();
                     renderChips();
                 }
+            };
+            const onBlur = () => { if (input.value.trim()) { addTag(input.value); input.value = ''; } };
+            if (input._onKeydown) input.removeEventListener('keydown', input._onKeydown);
+            if (input._onBlur) input.removeEventListener('blur', input._onBlur);
+            input._onKeydown = onKeydown;
+            input._onBlur = onBlur;
+            input.addEventListener('keydown', onKeydown);
+            input.addEventListener('blur', onBlur);
+
+            // 把取值方法绑定到输入框，保存时从元素自身读取，不依赖全局变量。
+            input._getTags = () => currentTags.join(',');
+        }
+
+        // 切换题目时同步清空标签输入状态，避免异步加载期间把上一题的标签误存到本题。
+        function resetEditTagInputs() {
+            const map = [
+                ['editKnowledgeTagInput', 'editKnowledgeTagsChips'],
+                ['editSolveMethodTagInput', 'editSolveMethodTagsChips']
+            ];
+            map.forEach(([inputId, chipsId]) => {
+                const input = document.getElementById(inputId);
+                if (!input) return;
+                const chipsSpan = document.getElementById(chipsId);
+                if (chipsSpan) chipsSpan.innerHTML = '';
+                input.value = '';
+                input._getTags = () => '';
             });
-            input.addEventListener('blur', () => { if (input.value.trim()) { addTag(input.value); input.value = ''; } });
         }
 
         function renderParsedCardPreview(card, contentText, answerText) {
