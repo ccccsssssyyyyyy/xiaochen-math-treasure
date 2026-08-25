@@ -1895,10 +1895,8 @@
 
             // ===== 多文件队列（串行拆解，人工审核） =====
             // 队列项结构：{ file, name, status: 'pending'|'parsing'|'done'|'failed', error }
-            // 入队时按文件名去重（同一文件名不允许重复选入）。
+            // 入队时按文件名去重（同一文件名不允许重复选入队列）。
             const pendingFiles = [];
-            // 本会话已成功导入的文件名集合，用于“禁止同一份文件重复上传”（挂在 window 上以便跨函数重置）
-            window.__importedSourceNames = window.__importedSourceNames || {};
             let queueProcessing = false;
 
             function enqueueFiles(fileList) {
@@ -1918,10 +1916,9 @@
                         showToast(`已忽略非试卷文件：${file.name || '未知文件'}（仅支持 .tex / .pdf / .docx）`, 'warning');
                         return;
                     }
-                    // 去重：队列中已有同名文件，或本会话已成功导入过该文件，则跳过
+                    // 去重：队列中已有同名文件，则跳过（已导入文档的免重复拆解改由 processFileQueue 查库判断）
                     const dup = pendingFiles.some(item => item.name === file.name);
-                    const alreadyImported = !!(window.__importedSourceNames && window.__importedSourceNames[file.name]);
-                    if (dup || alreadyImported) {
+                    if (dup) {
                         skipped += 1;
                         return;
                     }
@@ -1929,7 +1926,7 @@
                     added += 1;
                 });
                 if (skipped > 0) {
-                    showToast(`已跳过 ${skipped} 个重复文件（队列中已有或本会话已导入的同名文件不会重复导入）`, 'info');
+                    showToast(`已跳过 ${skipped} 个重复文件（队列中已有同名文件不会重复选入）`, 'info');
                 }
                 renderFileQueue();
                 // 不再自动拆解：选完文件只入队并展示，等待用户点击“一键拆解”按钮
@@ -2028,6 +2025,7 @@
                     row.className = 'flex items-center justify-between gap-2 px-2 py-1 rounded-lg border text-[10px] ' +
                         (item.status === 'done' ? 'bg-emerald-50/70 border-emerald-200 text-emerald-700'
                             : item.status === 'failed' ? 'bg-rose-50/70 border-rose-200 text-rose-700'
+                            : item.status === 'skipped' ? 'bg-amber-50/70 border-amber-200 text-amber-700'
                             : item.status === 'parsing' ? 'bg-brand-50/70 border-brand-300 text-brand-700 ring-2 ring-brand-300'
                             : 'bg-white/70 border-slate-200 text-slate-600');
                     const left = document.createElement('div');
@@ -2036,6 +2034,7 @@
                     idxBadge.className = 'shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ' +
                         (item.status === 'done' ? 'bg-emerald-100 text-emerald-700'
                             : item.status === 'failed' ? 'bg-rose-100 text-rose-700'
+                            : item.status === 'skipped' ? 'bg-amber-100 text-amber-700'
                             : item.status === 'parsing' ? 'bg-brand-100 text-brand-700'
                             : 'bg-slate-100 text-slate-500');
                     idxBadge.textContent = idx + 1;
@@ -2043,6 +2042,7 @@
                     icon.className = 'fa-solid ' + (
                         item.status === 'done' ? 'fa-circle-check'
                         : item.status === 'failed' ? 'fa-circle-exclamation'
+                        : item.status === 'skipped' ? 'fa-ban'
                         : item.status === 'parsing' ? 'fa-spinner fa-spin'
                         : 'fa-file-lines'
                     );
@@ -2066,6 +2066,15 @@
                         errTip.textContent = item.error.length > 18 ? item.error.slice(0, 18) + '…' : item.error;
                         errTip.title = item.error;
                         right.appendChild(errTip);
+                    }
+                    if (item.status === 'skipped') {
+                        const reparseBtn = document.createElement('button');
+                        reparseBtn.type = 'button';
+                        reparseBtn.className = 'text-[9px] font-bold text-amber-600 hover:text-amber-700 transition-colors border border-amber-300 rounded px-1.5 py-0.5';
+                        reparseBtn.textContent = '仍要拆解';
+                        reparseBtn.title = '强制重新拆解该文件（用于重新查看原卷页面）';
+                        reparseBtn.addEventListener('click', () => window.__forceReparseByName(item.name));
+                        right.appendChild(reparseBtn);
                     }
                     // 待处理 / 失败 的项可移除（拆完的保留，方便核对）
                     if (item.status === 'pending' || item.status === 'failed') {
@@ -2104,8 +2113,9 @@
                 el.classList.remove('hidden');
                 if (parsing) {
                     el.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1"></i>正在拆解第 ${parsingIdx + 1}/${total} 个：<span class="font-bold">${escapeHtml(parsing.name)}</span>`;
-                } else if (done + failed === total) {
-                    el.innerHTML = `<i class="fa-solid fa-circle-check mr-1"></i>全部拆解完成：成功 ${done} / ${total}${failed ? ' · 失败 ' + failed : ''}（可统一导入）`;
+                } else if (done + failed + pendingFiles.filter(f => f.status === 'skipped').length === total) {
+                    const skippedCnt = pendingFiles.filter(f => f.status === 'skipped').length;
+                    el.innerHTML = `<i class="fa-solid fa-circle-check mr-1"></i>全部拆解完成：成功 ${done} / ${total}${failed ? ' · 失败 ' + failed : ''}${skippedCnt ? ' · 已跳过 ' + skippedCnt : ''}（可统一导入）`;
                 } else {
                     el.innerHTML = `等待拆解：已拆 ${done}/${total}${failed ? ' · 失败 ' + failed : ''}，点击“开始拆解”继续`;
                 }
@@ -2178,6 +2188,29 @@
                 }
             }
 
+            // 服务端「已导入文档」识别：按来源文件名精确查库，命中则跳过重复拆解。
+            // 网络异常时按「未导入」处理（不阻断拆解），返回 Promise<{imported,count}>。
+            function checkDocumentImported(name) {
+                return fetch(`/api/documents/imported?name=${encodeURIComponent(name)}`, {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/json' }
+                })
+                    .then(r => r.ok ? r.json() : { imported: false, count: 0 })
+                    .then(d => ({ imported: !!(d && d.imported), count: (d && d.count) || 0 }))
+                    .catch(() => ({ imported: false, count: 0 }));
+            }
+
+            // 供队列卡片「仍要拆解」按钮调用：强制重新拆解某个被判定为已导入的文件。
+            window.__forceReparseByName = function(name) {
+                const it = pendingFiles.find(f => f.name === name);
+                if (!it) return;
+                it.status = 'pending';
+                it.forceImport = true;
+                appendImportLog(`🔁 已手动触发重新拆解「${name}」`, 'warning');
+                queueProcessing = false;
+                processFileQueue();
+            };
+
             // 串行处理队列：一次只拆一个文件，拆完再取下一份
             function processFileQueue() {
                 console.log('[队列] processFileQueue() 被调用', {
@@ -2190,10 +2223,11 @@
                 }
                 const next = pendingFiles.find(f => f.status === 'pending');
                 if (!next) {
-                    const allDone = pendingFiles.every(f => f.status === 'done' || f.status === 'failed');
-                    if (allDone && pendingFiles.length > 0) {
+                    const allSettled = pendingFiles.every(f => f.status === 'done' || f.status === 'failed' || f.status === 'skipped');
+                    if (allSettled && pendingFiles.length > 0) {
                         console.log('[队列] ✅ 所有文件已处理完毕:', pendingFiles.map(f => ({ name: f.name, status: f.status })));
-                        showToast('所有文件均已拆解完成！', 'success');
+                        const skippedCnt = pendingFiles.filter(f => f.status === 'skipped').length;
+                        showToast(skippedCnt > 0 ? `拆解完成！其中 ${skippedCnt} 个文件已导入题库，已自动跳过` : '所有文件均已拆解完成！', 'success');
                         // 恢复底部按钮区
                         document.querySelectorAll('[data-queue-collapse="1"]').forEach(el => el.classList.add('hidden'));
                     }
@@ -2204,24 +2238,34 @@
                 next.status = 'parsing';
                 console.log(`[队列] → 开始处理文件 "${next.name}" (${pendingFiles.filter(f => f.status !== 'pending').length + 1}/${pendingFiles.length})`);
                 renderFileQueue();
-                // 把当前文件载入全局状态（复用现有拆解分支）。
-                // onReady 在 PDF/Word 同步完成后、或 TeX 本地预读异步完成后触发，
-                // 确保 latexTextarea 已填充再进入拆解，避免时序问题。
-                try {
-                    handleTexFileSelect(next.file, () => {
-                        // 标记本次拆解归属的文件，完成后写入来源
-                        window.__currentQueueFile = next;
-                        // 复用现有拆解入口（appendMode=true 表示追加到审查列表）
-                        runAIPaperParse(true, next.name);
-                    });
-                } catch (err) {
-                    next.status = 'failed';
-                    next.error = err.message || '载入失败';
-                    renderFileQueue();
-                    queueProcessing = false;
-                    processFileQueue();
-                    return;
-                }
+                // 先查库判断该文档是否已导入：已导入（且非强制）则跳过，避免重复拆解；否则正常拆解。
+                checkDocumentImported(next.name).then(info => {
+                    if (info.imported && !next.forceImport) {
+                        next.status = 'skipped';
+                        appendImportLog(`⏭️ 已跳过「${next.name}」：该题已导入题库（共 ${info.count} 道），无需重复拆解。如需重新查看原卷，可点「仍要拆解」。`, 'warning');
+                        renderFileQueue();
+                        queueProcessing = false;
+                        processFileQueue();
+                        return;
+                    }
+                    // 未导入或用户强制：把当前文件载入全局状态（复用现有拆解分支）。
+                    // onReady 在 PDF/Word 同步完成后、或 TeX 本地预读异步完成后触发，
+                    // 确保 latexTextarea 已填充再进入拆解，避免时序问题。
+                    try {
+                        handleTexFileSelect(next.file, () => {
+                            // 标记本次拆解归属的文件，完成后写入来源
+                            window.__currentQueueFile = next;
+                            // 复用现有拆解入口（appendMode=true 表示追加到审查列表）
+                            runAIPaperParse(true, next.name);
+                        });
+                    } catch (err) {
+                        next.status = 'failed';
+                        next.error = err.message || '载入失败';
+                        renderFileQueue();
+                        queueProcessing = false;
+                        processFileQueue();
+                    }
+                });
             }
 
             // 由拆解完成/失败回调调用，推进队列
@@ -2978,13 +3022,6 @@
                         }
                         let appendMode = window.__currentParseAppendMode;
                         const sourceFile = window.__currentParseSourceFile;
-                        // 标记本次已成功导入的文件名，禁止同一份文件重复上传
-                        const importedName = sourceFile ||
-                            (window.currentPdfFile && window.currentPdfFile.name) ||
-                            (window.currentDocxFile && window.currentDocxFile.name) || '';
-                        if (importedName) {
-                            window.__importedSourceNames[importedName] = true;
-                        }
                         const isWordTask = task.document_type === 'docx';
                         const documentLabel = isWordTask ? 'Word' : 'PDF';
                         try {
@@ -3188,11 +3225,7 @@
             window.currentPdfTaskId = null;
             window.activeCropQuestionIndex = null;
             window.tempCroppedPathsThisSession = [];
-            // 重置导入状态：清空已导入文件记录，允许新一轮重新上传
-            if (window.__importedSourceNames) {
-                Object.keys(window.__importedSourceNames).forEach(k => { delete window.__importedSourceNames[k]; });
-            }
-            
+
             const pdfRange = document.getElementById('pdfPageRange');
             if (pdfRange) pdfRange.value = '';
             const pdfRangeContainer = document.getElementById('pdfPageRangeContainer');

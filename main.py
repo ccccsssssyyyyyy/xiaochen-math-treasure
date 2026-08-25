@@ -2207,6 +2207,19 @@ def committed_question_response(
         return {"status": "success", "question": {"id": question_id}}
 
 
+@app.get("/api/documents/imported")
+def check_document_imported(name: str = "", db: Session = Depends(get_db)):
+    """按来源文件名精确判断该题是否已导入题库，供前端「已导入文档免重复拆解」使用。
+
+    入库时解析题的 source 默认填为来源文件名（见 import.js appendParsedQuestions），
+    因此 source == name 即代表该文档的题已进入题库。
+    """
+    if not name:
+        return {"imported": False, "count": 0}
+    count = db.query(Question).filter(Question.source == name).count()
+    return {"imported": count > 0, "count": count}
+
+
 @app.post("/api/questions")
 def create_question(
     background_tasks: BackgroundTasks,
