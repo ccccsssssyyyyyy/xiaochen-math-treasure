@@ -3,6 +3,11 @@
         // stored answer Markdown and API payloads cannot break out through a
         // filename/title interpolation in the legacy badge markup.
         (() => {
+            // 多文件队列推进函数：定义于 setupImportFileHandlers 内部（需闭包 pendingFiles 等局部状态），
+            // 但会被其外层的 runAIPaperParse / pollPdfTaskStatus 调用。提升到 IIFE 顶层变量，
+            // 让嵌套声明改为赋值，从而对外层调用点可见（否则 typeof 守卫判非函数、调用被静默跳过，队列卡在第一份）。
+            let advanceQueueAfterParse = null;
+
             const renderContentBadges = window.renderIllustrationBadges;
             if (typeof renderContentBadges === 'function') {
                 window.renderIllustrationBadges = function() {
@@ -182,7 +187,7 @@
             }
             EditorState.reset();
             document.getElementById('editorTitle').textContent = '录入新数学题';
-            
+
             window.lastOcrOriginalImagePath = '';
             window.contentLastCompiledTikzPath = '';
             window.answerLastCompiledTikzPath = '';
@@ -604,7 +609,11 @@
                     if (document.getElementById('editTags')) {
                         document.getElementById('editTags').value = fullItem.tags || '';
                     }
-                    
+
+                    // 初始化知识点 / 解题方法 多标签编辑
+                    setupEditTagInput('editKnowledgeTags', 'editKnowledgeTagsChips', 'editKnowledgeTagInput', fullItem.knowledge_list || '');
+                    setupEditTagInput('editSolveMethodTags', 'editSolveMethodTagsChips', 'editSolveMethodTagInput', fullItem.solve_method || '');
+
                     const compSelect = document.getElementById('editCompulsory');
                     const chapSelect = document.getElementById('editChapter');
                     const knowSelect = document.getElementById('editKnowledge');
@@ -701,6 +710,8 @@
                 const relatedQuestionId = document.getElementById('editRelatedQuestion').value;
                 const tikzCode = document.getElementById('editContentTikzCode') ? document.getElementById('editContentTikzCode').value : '';
                 const tags = document.getElementById('editTags') ? document.getElementById('editTags').value.trim() : '';
+                const knowledge_list = window._editKnowledgeTags ? window._editKnowledgeTags.join(',') : '';
+                const solve_method = window._editSolveMethodTags ? window._editSolveMethodTags.join(',') : '';
                 
                 if (!content.trim()) {
                     showToast('保存失败：题干内容不能为空！', 'error');
@@ -773,6 +784,8 @@
                 formData.append('related_question_id', relatedQuestionId);
                 formData.append('tikz_code', tikzCode);
                 formData.append('tags', tags);
+                formData.append('knowledge_list', knowledge_list);
+                formData.append('solve_method', solve_method);
                 const combinedImages = Array.from(new Set([
                     ...uploadedImages,
                     ...(typeof uploadedAnswerImages !== 'undefined' ? uploadedAnswerImages : [])
@@ -1108,13 +1121,44 @@
         let batchSelectedImages = [];
         let parsedQuestionsData = [];
         let parsedQuestionsGeneration = 0;
+        // 多文件批量导入时，按拆解顺序记录“每个文件对应哪些题”，用于在审查列表里分组展示。
+        // 结构：{ name(来源文件名), startIndex(在 parsedQuestionsData 中的起始下标), count(本题数) }
+        let parsedFileGroups = [];
         const parsedQuestionSaveInFlight = new Map();
         let allSourcesList = [];
 
         function replaceParsedQuestions(nextQuestions) {
             parsedQuestionsGeneration += 1;
             parsedQuestionsData = Array.isArray(nextQuestions) ? nextQuestions : [];
+            // 单文件全量替换时清空分组记录（分组仅用于多文件批量导入）
+            parsedFileGroups = [];
             return parsedQuestionsGeneration;
+        }
+
+        // 多文件模式：把新拆解的题追加到现有审查列表（不清空），并为每题标注来源文件。
+        // 返回 { generation, startIndex, count }，供增量渲染使用。
+        function appendParsedQuestions(newQuestions, sourceFile) {
+            parsedQuestionsGeneration += 1;
+            const startIndex = parsedQuestionsData.length;
+            const list = Array.isArray(newQuestions) ? newQuestions : [];
+            list.forEach(q => {
+                if (q && typeof q === 'object') {
+                    q.source_file = sourceFile || '';
+                    // 默认把来源文件名填入 source（来源输入框），便于人工核对与入库
+                    if (!q.source) q.source = sourceFile || '';
+                }
+                parsedQuestionsData.push(q);
+            });
+            // 记录本批题归属的文件分组（用于在审查列表里插入分组头）
+            if (list.length > 0) {
+                parsedFileGroups.push({
+                    name: sourceFile || '',
+                    startIndex: startIndex,
+                    count: list.length
+                });
+            }
+            window.__currentParseStartIndex = startIndex;
+            return { generation: parsedQuestionsGeneration, startIndex, count: list.length };
         }
 
         function isParsedQuestionSaveContextCurrent(generation, index, question) {
@@ -1130,6 +1174,11 @@
 
         function openImportModal() {
             const modal = document.getElementById('latexImportModal');
+            // 打开弹窗先清空上一批残留的拆解结果、日志与多文件队列，
+            // 避免旧题目和新批次混在一起，造成“来源/进度对不上”的误判。
+            if (typeof resetImportState === 'function') {
+                resetImportState(false);
+            }
             modal.classList.remove('hidden');
             window.MathBankModal.open(modal, {
                 onEscape: () => {
@@ -1263,10 +1312,14 @@
         function renderPdfPagesThumbnails() {
             const container = document.getElementById('pdfPagesThumbnailsContainer');
             container.innerHTML = '';
-            
+
+            console.log('[PDF预览] renderPdfPagesThumbnails 被调用, pdfPageImages 长度:', window.pdfPageImages.length);
+            console.log('[PDF预览] pdfPageImages 内容:', window.pdfPageImages);
+
             window.pdfPageImages.forEach((url, i) => {
                 const safeUrl = window.MathBankSafe.safeImageUrl(url);
-                if (!safeUrl) return;
+                console.log(`[PDF预览] 缩略图 ${i}: 原始URL="${url}", safeUrl="${safeUrl}"`);
+                if (!safeUrl) { console.warn(`[PDF预览] ⚠️ 缩略图 ${i} 被 safeImageUrl 过滤掉!`); return; }
                 const thumb = document.createElement('div');
                 thumb.className = `cursor-pointer border-2 rounded-lg overflow-hidden transition-all duration-200 aspect-[3/4] relative group hover:border-brand-500 bg-white ${i === activePageIndex ? 'border-brand-500 shadow-md ring-2 ring-brand-500/20' : 'border-slate-200'}`;
                 thumb.innerHTML = `
@@ -1297,7 +1350,11 @@
             
             const img = document.getElementById('pdfCropActiveImage');
             const safePageUrl = window.MathBankSafe.safeImageUrl(window.pdfPageImages[pageIdx]);
+            console.log(`[PDF预览] 主图 P${pageIdx + 1}: 原始URL="${window.pdfPageImages[pageIdx]}", safeUrl="${safePageUrl}"`);
             img.src = safePageUrl || '';
+            // 监听 img 的 load/error 事件
+            img.onload = () => console.log(`[PDF预览] ✅ 主图 P${pageIdx + 1} 加载成功`);
+            img.onerror = (e) => console.error(`[PDF预览] ❌ 主图 P${pageIdx + 1} 加载失败, src="${img.src}"`, e);
             
             clearPdfCropSelection();
         }
@@ -1562,7 +1619,10 @@
                 return;
             }
             texDrop.addEventListener('click', () => texInput.click());
-            texInput.addEventListener('change', (e) => handleTexFileSelect(e.target.files[0]));
+            texInput.addEventListener('change', (e) => {
+                enqueueFiles(Array.from(e.target.files || []));
+                texInput.value = '';
+            });
 
             ['dragenter', 'dragover'].forEach(eventName => {
                 texDrop.addEventListener(eventName, (e) => {
@@ -1579,13 +1639,7 @@
             });
 
             texDrop.addEventListener('drop', (e) => {
-                const file = e.dataTransfer.files[0];
-                const lowerFileName = file ? file.name.toLowerCase() : '';
-                if (file && (lowerFileName.endsWith('.tex') || lowerFileName.endsWith('.pdf') || lowerFileName.endsWith('.docx'))) {
-                    handleTexFileSelect(file);
-                } else {
-                    showToast('请拖入有效的 .tex、.pdf 或 .docx (Word) 格式试卷文件！', 'warning');
-                }
+                enqueueFiles(Array.from(e.dataTransfer.files || []));
             });
 
             function readFileAsArrayBuffer(file) {
@@ -1652,7 +1706,7 @@
                 return autoTitle;
             }
 
-            function handleTexFileSelect(file) {
+            function handleTexFileSelect(file, onReady) {
                 if (!file) return;
                 const lowerFileName = file.name.toLowerCase();
                 if (!lowerFileName.endsWith('.tex') && !lowerFileName.endsWith('.pdf') && !lowerFileName.endsWith('.docx')) {
@@ -1671,12 +1725,12 @@
                     texFileIcon.className = "fa-solid fa-file-word text-blue-600 text-xl mb-1.5 animate-bounce";
                     latexTextarea.value = `[Word (.docx) 试卷已成功载入: ${file.name}]\n系统将安全提取 OMML 公式与高清插图；MathType 公式无法可靠转换时会保留原预览图并标记人工核对。`;
                     latexTextarea.disabled = true;
-                    
+
                     const titleInput = document.getElementById('importPaperTitle');
                     if (!titleInput.value) {
                         titleInput.value = file.name.replace(/\.[^/.]+$/, "");
                     }
-                    
+
                     const pdfRangeContainer = document.getElementById('pdfPageRangeContainer');
                     if (pdfRangeContainer) pdfRangeContainer.classList.add('hidden');
                     if (texImagesSection) texImagesSection.classList.add('hidden');
@@ -1688,12 +1742,12 @@
                     texFileIcon.className = "fa-solid fa-file-pdf text-brand-500 text-xl mb-1.5 animate-bounce";
                     latexTextarea.value = `[PDF 试卷已成功载入: ${file.name}]\n总页数、高清转换与插图定位将会在点击“一键 AI 智能拆解并关联”后于后台异步执行。`;
                     latexTextarea.disabled = true;
-                    
+
                     const titleInput = document.getElementById('importPaperTitle');
                     if (!titleInput.value) {
                         titleInput.value = file.name.replace(/\.[^/.]+$/, "");
                     }
-                    
+
                     const pdfRangeContainer = document.getElementById('pdfPageRangeContainer');
                     if (pdfRangeContainer) pdfRangeContainer.classList.remove('hidden');
                     if (texImagesSection) texImagesSection.classList.add('hidden');
@@ -1787,9 +1841,411 @@
                             runBtn.disabled = false;
                             runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>一键 AI 智能拆解并关联</span>';
                         }
+                        // TeX 预读（异步）完成，textarea 已就绪，通知调用方继续拆解
+                        if (typeof onReady === 'function') onReady();
                     });
                 }
+                // docx / pdf 为同步载入，函数末尾通知继续拆解（TeX 异步已在 finally 通知，避免重复）
+                if (!lowerFileName.endsWith('.tex') && typeof onReady === 'function') {
+                    onReady();
+                }
             }
+
+            // ===== 多文件队列（串行拆解，人工审核） =====
+            // 队列项结构：{ file, name, status: 'pending'|'parsing'|'done'|'failed', error }
+            // 入队时按文件名去重（同一文件名不允许重复选入）。
+            const pendingFiles = [];
+            let queueProcessing = false;
+
+            function enqueueFiles(fileList) {
+                if (!fileList || fileList.length === 0) return;
+                let added = 0;
+                let skipped = 0;
+                // 多文件（≥2）模式下，单文件 TeX 配套图片区无意义，隐藏它；
+                // 仅剩 1 个文件或清空时恢复显示（由下方 renderFileQueue 收尾处理）。
+                const texImagesSection = document.getElementById('texImagesSection');
+                if (texImagesSection) {
+                    texImagesSection.classList.toggle('hidden', fileList.length >= 2);
+                }
+                fileList.forEach(file => {
+                    const lower = (file.name || '').toLowerCase();
+                    const valid = lower.endsWith('.tex') || lower.endsWith('.pdf') || lower.endsWith('.docx');
+                    if (!valid) {
+                        showToast(`已忽略非试卷文件：${file.name || '未知文件'}（仅支持 .tex / .pdf / .docx）`, 'warning');
+                        return;
+                    }
+                    // 去重：文件名已存在则跳过
+                    const dup = pendingFiles.some(item => item.name === file.name);
+                    if (dup) {
+                        skipped += 1;
+                        return;
+                    }
+                    pendingFiles.push({ file, name: file.name, status: 'pending', error: '' });
+                    added += 1;
+                });
+                if (skipped > 0) {
+                    showToast(`已跳过 ${skipped} 个重复文件（同名文件不会重复导入队列）`, 'info');
+                }
+                renderFileQueue();
+                // 不再自动拆解：选完文件只入队并展示，等待用户点击“一键拆解”按钮
+            }
+
+            function renderFileQueue() {
+                const queueEl = document.getElementById('importFileQueue');
+                // 上方拖放区内的文件列表（方案B：文件名直接显示在上传区）
+                renderTexFileList();
+                // 下方队列区仅作为进度面板使用
+                if (queueEl) {
+                    if (pendingFiles.length === 0) {
+                        queueEl.classList.add('hidden');
+                        queueEl.innerHTML = '';
+                        const texImagesSection = document.getElementById('texImagesSection');
+                        if (texImagesSection) texImagesSection.classList.remove('hidden');
+                    } else {
+                        queueEl.classList.remove('hidden');
+                        queueEl.innerHTML = '';
+                    }
+                }
+                // 多文件队列模式（≥1 个文件已入队）下，隐藏单文件专属的配置项与底部“一键 AI 智能拆解”按钮，
+                // 统一改用队列顶部的“开始拆解 N 个文件”按钮，避免误操作与视觉混乱。
+                const inBatchMode = pendingFiles.length >= 1;
+                document.querySelectorAll('[data-queue-collapse="1"]').forEach(el => {
+                    el.classList.toggle('hidden', inBatchMode);
+                });
+                updateFileQueueProgress();
+                updateParseButtonState();
+                // 同步队列快照到全局，供 saveAllParsedQuestions 跨作用域判断阶段
+                window.__pendingFilesSnapshot = pendingFiles.slice();
+            }
+
+            // 把待拆解文件列表渲染到上方“上传文件”拖放区内（多文件时一目了然）
+            function renderTexFileList() {
+                const drop = document.getElementById('texDropzone');
+                if (!drop) return;
+                let listEl = document.getElementById('texFileList');
+                if (!listEl) {
+                    listEl = document.createElement('div');
+                    listEl.id = 'texFileList';
+                    listEl.className = 'w-full mt-2 space-y-1';
+                    drop.appendChild(listEl);
+                }
+                // 队列为空，或仅剩单文件时：恢复单文件提示样式，隐藏列表（单文件由 texFileName 单独显示）
+                if (pendingFiles.length <= 1) {
+                    listEl.classList.add('hidden');
+                    listEl.innerHTML = '';
+                    const texFileName = document.getElementById('texFileName');
+                    const texFileIcon = document.getElementById('texFileIcon');
+                    if (texFileName) {
+                        texFileName.textContent = '点击或拖放 .tex / .pdf / .docx 试卷文件';
+                        texFileName.className = 'text-xs text-slate-600 font-medium';
+                    }
+                    if (texFileIcon) texFileIcon.className = 'fa-solid fa-file-lines text-slate-400 text-xl mb-1.5';
+                    return;
+                }
+                listEl.classList.remove('hidden');
+                listEl.innerHTML = '';
+
+                const total = pendingFiles.length;
+                const done = pendingFiles.filter(f => f.status === 'done').length;
+                const failed = pendingFiles.filter(f => f.status === 'failed').length;
+                const parsingIdx = pendingFiles.findIndex(f => f.status === 'parsing');
+                const parsing = parsingIdx !== -1;
+                // 当前正在拆解的文件序号（1-based），用于“第 X/N 个文件”
+                const currentNo = parsingIdx !== -1 ? parsingIdx + 1 : (done + failed + 1);
+
+                const header = document.createElement('div');
+                header.className = 'flex items-center justify-between px-0.5 mb-1';
+                header.innerHTML = `
+                    <span class="text-[10px] font-bold text-slate-600">已选文件（${total}）</span>
+                    <span class="text-[10px] font-bold ${parsing ? 'text-brand-600' : 'text-slate-400'}">${parsing ? '当前拆解：第 ' + currentNo + '/' + total + ' 个' : '待处理'} ${done}/${total}${failed ? ' · 失败 ' + failed : ''}</span>
+                `;
+                listEl.appendChild(header);
+
+                // 细分格进度条：每格代表一个文件，已完成=绿、正在拆=蓝动效、待处理=灰
+                const bar = document.createElement('div');
+                bar.className = 'flex gap-0.5 mb-1.5 px-0.5';
+                pendingFiles.forEach((item) => {
+                    const seg = document.createElement('div');
+                    seg.className = 'flex-1 h-1.5 rounded-full ' +
+                        (item.status === 'done' ? 'bg-emerald-400'
+                            : item.status === 'failed' ? 'bg-rose-400'
+                            : item.status === 'parsing' ? 'bg-brand-500 animate-pulse'
+                            : 'bg-slate-200');
+                    bar.appendChild(seg);
+                });
+                listEl.appendChild(bar);
+
+                const body = document.createElement('div');
+                body.className = 'space-y-1 max-h-32 overflow-y-auto custom-scrollbar pr-1';
+                pendingFiles.forEach((item, idx) => {
+                    const isActive = idx === parsingIdx;
+                    const row = document.createElement('div');
+                    row.className = 'flex items-center justify-between gap-2 px-2 py-1 rounded-lg border text-[10px] ' +
+                        (item.status === 'done' ? 'bg-emerald-50/70 border-emerald-200 text-emerald-700'
+                            : item.status === 'failed' ? 'bg-rose-50/70 border-rose-200 text-rose-700'
+                            : item.status === 'parsing' ? 'bg-brand-50/70 border-brand-300 text-brand-700 ring-2 ring-brand-300'
+                            : 'bg-white/70 border-slate-200 text-slate-600');
+                    const left = document.createElement('div');
+                    left.className = 'flex items-center space-x-1.5 min-w-0';
+                    const idxBadge = document.createElement('span');
+                    idxBadge.className = 'shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ' +
+                        (item.status === 'done' ? 'bg-emerald-100 text-emerald-700'
+                            : item.status === 'failed' ? 'bg-rose-100 text-rose-700'
+                            : item.status === 'parsing' ? 'bg-brand-100 text-brand-700'
+                            : 'bg-slate-100 text-slate-500');
+                    idxBadge.textContent = idx + 1;
+                    const icon = document.createElement('i');
+                    icon.className = 'fa-solid ' + (
+                        item.status === 'done' ? 'fa-circle-check'
+                        : item.status === 'failed' ? 'fa-circle-exclamation'
+                        : item.status === 'parsing' ? 'fa-spinner fa-spin'
+                        : 'fa-file-lines'
+                    );
+                    const nameEl = document.createElement('span');
+                    nameEl.className = 'truncate font-semibold max-w-[150px]' + (item.status === 'pending' ? ' text-slate-700' : '');
+                    nameEl.textContent = item.name;
+                    nameEl.title = item.name;
+                    left.append(idxBadge, icon, nameEl);
+
+                    const right = document.createElement('div');
+                    right.className = 'flex items-center space-x-1.5 shrink-0';
+                    if (isActive) {
+                        const tag = document.createElement('span');
+                        tag.className = 'text-[9px] font-bold text-brand-600 bg-brand-100 rounded px-1.5 py-0.5';
+                        tag.textContent = '拆解中';
+                        right.appendChild(tag);
+                    }
+                    if (item.status === 'failed' && item.error) {
+                        const errTip = document.createElement('span');
+                        errTip.className = 'text-[9px] opacity-80';
+                        errTip.textContent = item.error.length > 18 ? item.error.slice(0, 18) + '…' : item.error;
+                        errTip.title = item.error;
+                        right.appendChild(errTip);
+                    }
+                    // 待处理 / 失败 的项可移除（拆完的保留，方便核对）
+                    if (item.status === 'pending' || item.status === 'failed') {
+                        const removeBtn = document.createElement('button');
+                        removeBtn.type = 'button';
+                        removeBtn.className = 'text-slate-400 hover:text-red-500 transition-colors';
+                        removeBtn.title = item.status === 'failed' ? '移除该失败文件' : '从队列移除';
+                        removeBtn.innerHTML = '<i class="fa-solid fa-circle-xmark"></i>';
+                        removeBtn.addEventListener('click', () => removeQueuedFile(idx));
+                        right.appendChild(removeBtn);
+                    }
+                    row.append(left, right);
+                    body.appendChild(row);
+                });
+                listEl.appendChild(body);
+            }
+
+            function removeQueuedFile(idx) {
+                pendingFiles.splice(idx, 1);
+                renderFileQueue();
+            }
+
+            function updateFileQueueProgress() {
+                const el = document.getElementById('importQueueProgress');
+                if (!el) return;
+                const total = pendingFiles.length;
+                const done = pendingFiles.filter(f => f.status === 'done').length;
+                const failed = pendingFiles.filter(f => f.status === 'failed').length;
+                const parsingIdx = pendingFiles.findIndex(f => f.status === 'parsing');
+                const parsing = parsingIdx !== -1 ? pendingFiles[parsingIdx] : null;
+                if (total === 0) {
+                    el.classList.add('hidden');
+                    el.textContent = '';
+                    return;
+                }
+                el.classList.remove('hidden');
+                if (parsing) {
+                    el.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1"></i>正在拆解第 ${parsingIdx + 1}/${total} 个：<span class="font-bold">${escapeHtml(parsing.name)}</span>`;
+                } else if (done + failed === total) {
+                    el.innerHTML = `<i class="fa-solid fa-circle-check mr-1"></i>全部拆解完成：成功 ${done} / ${total}${failed ? ' · 失败 ' + failed : ''}（可统一导入）`;
+                } else {
+                    el.innerHTML = `等待拆解：已拆 ${done}/${total}${failed ? ' · 失败 ' + failed : ''}，点击“开始拆解”继续`;
+                }
+            }
+
+            function escapeHtml(str) {
+                return String(str || '').replace(/[&<>"']/g, c => ({
+                    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+                }[c]));
+            }
+
+            // 根据队列状态更新“一键拆解”按钮与“全部导入”按钮的文案与可用性。
+            // 两阶段模型（方案B）：
+            //   阶段一（队列还有 pending/parsing 文件）：禁用“全部导入”，引导先拆完所有文件；
+            //   阶段二（所有文件都已 done 或 failed）：禁用“开始拆解”，启用“全部导入”。
+            function updateParseButtonState() {
+                const runBtn = document.getElementById('runParseBtn');
+                const saveAllBtn = document.getElementById('saveAllParsedBtn');
+                const pending = pendingFiles.filter(f => f.status === 'pending').length;
+                const total = pendingFiles.length;
+                const done = pendingFiles.filter(f => f.status === 'done').length;
+                const failed = pendingFiles.filter(f => f.status === 'failed').length;
+                const parsing = pendingFiles.some(f => f.status === 'parsing');
+                // 供 saveAllParsedQuestions 判断阶段：队列是否还有未完成的文件
+                window.__importQueueHasPending = (pending > 0 || parsing);
+
+                if (total === 0) {
+                    // 无队列（单文件模式）：两个按钮都恢复默认
+                    if (runBtn) {
+                        runBtn.disabled = false;
+                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>一键 AI 智能拆解并关联</span>';
+                    }
+                    if (saveAllBtn) {
+                        saveAllBtn.disabled = false;
+                    }
+                    return;
+                }
+
+                // 阶段一：仍有文件待拆解 / 正在拆解
+                if (pending > 0 || parsing) {
+                    if (runBtn) {
+                        // 拆解进行中（被 runAIPaperParse 置为禁用+“正在全力拆解中”）时不覆盖
+                        if (!(runBtn.disabled && /正在全力拆解中/.test(runBtn.textContent))) {
+                            runBtn.disabled = parsing;
+                            if (parsing) {
+                                runBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin inline-block"></i><span>正在全力拆解中...</span>';
+                            } else if (done > 0 && pending > 0) {
+                                runBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i><span>继续拆解剩余 ${pending} 个文件</span>`;
+                            } else {
+                                runBtn.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles"></i><span>开始拆解 ${total} 个文件</span>`;
+                            }
+                        }
+                    }
+                    // 阶段一严禁提前导入：禁用“全部导入”并提示
+                    if (saveAllBtn) {
+                        saveAllBtn.disabled = true;
+                        saveAllBtn.title = '请先点“开始/继续拆解”把所有文件拆完，再统一导入';
+                    }
+                    return;
+                }
+
+                // 阶段二：所有文件都已 done / failed（无 pending、无 parsing）
+                if (runBtn) {
+                    runBtn.disabled = true;
+                    runBtn.innerHTML = '<i class="fa-solid fa-circle-check"></i><span>全部文件已拆解，请导入</span>';
+                }
+                if (saveAllBtn) {
+                    saveAllBtn.disabled = false;
+                    saveAllBtn.title = '';
+                }
+            }
+
+            // 串行处理队列：一次只拆一个文件，拆完再取下一份
+            function processFileQueue() {
+                console.log('[队列] processFileQueue() 被调用', {
+                    queueProcessing,
+                    pendingFiles: pendingFiles.map(f => ({ name: f.name, status: f.status }))
+                });
+                if (queueProcessing) {
+                    console.log('[队列] processFileQueue: 队列正在处理中，跳过（queueProcessing=true）');
+                    return;
+                }
+                const next = pendingFiles.find(f => f.status === 'pending');
+                if (!next) {
+                    const allDone = pendingFiles.every(f => f.status === 'done' || f.status === 'failed');
+                    if (allDone && pendingFiles.length > 0) {
+                        console.log('[队列] ✅ 所有文件已处理完毕:', pendingFiles.map(f => ({ name: f.name, status: f.status })));
+                        showToast('所有文件均已拆解完成！', 'success');
+                        // 恢复底部按钮区
+                        document.querySelectorAll('[data-queue-collapse="1"]').forEach(el => el.classList.add('hidden'));
+                    }
+                    queueProcessing = false;
+                    return;
+                }
+                queueProcessing = true;
+                next.status = 'parsing';
+                console.log(`[队列] → 开始处理文件 "${next.name}" (${pendingFiles.filter(f => f.status !== 'pending').length + 1}/${pendingFiles.length})`);
+                renderFileQueue();
+                // 把当前文件载入全局状态（复用现有拆解分支）。
+                // onReady 在 PDF/Word 同步完成后、或 TeX 本地预读异步完成后触发，
+                // 确保 latexTextarea 已填充再进入拆解，避免时序问题。
+                try {
+                    handleTexFileSelect(next.file, () => {
+                        // 标记本次拆解归属的文件，完成后写入来源
+                        window.__currentQueueFile = next;
+                        // 复用现有拆解入口（appendMode=true 表示追加到审查列表）
+                        runAIPaperParse(true, next.name);
+                    });
+                } catch (err) {
+                    next.status = 'failed';
+                    next.error = err.message || '载入失败';
+                    renderFileQueue();
+                    queueProcessing = false;
+                    processFileQueue();
+                    return;
+                }
+            }
+
+            // 由拆解完成/失败回调调用，推进队列
+            advanceQueueAfterParse = function(success, errorMsg) {
+                console.log(`[队列] advanceQueueAfterParse 被调用: success=${success}, error=${errorMsg || '无'}`, {
+                    pendingFiles: pendingFiles.map(f => ({ name: f.name, status: f.status })),
+                    __currentQueueFile: window.__currentQueueFile ? window.__currentQueueFile.name : null,
+                    queueProcessing
+                });
+                let cur = window.__currentQueueFile;
+                // 兜底：若 __currentQueueFile 丢失（例如浏览器缓存导致旧逻辑残留、
+                // 或运行中状态被异常清空），按"当前仍在 parsing 的文件"找回，
+                // 避免第 N 个文件拆完后卡死、不再推第 N+1 个。
+                if (!cur || pendingFiles.indexOf(cur) === -1) {
+                    const stillParsing = pendingFiles.find(f => f.status === 'parsing');
+                    if (stillParsing) {
+                        console.log('[队列] __currentQueueFile 丢失，兜底找回:', stillParsing.name);
+                        cur = stillParsing;
+                        window.__currentQueueFile = stillParsing;
+                    } else {
+                        console.warn('[队列] ⚠️ 找不到 parsing 状态的文件！pendingFiles 状态:', pendingFiles.map(f => ({ name: f.name, status: f.status })));
+                    }
+                }
+                if (cur && pendingFiles.indexOf(cur) !== -1) {
+                    if (success) {
+                        cur.status = 'done';
+                        console.log(`[队列] ✅ 文件 "${cur.name}" 标记为 done`);
+                    } else {
+                        cur.status = 'failed';
+                        cur.error = errorMsg || '拆解失败';
+                        console.log(`[队列] ❌ 文件 "${cur.name}" 标记为 failed: ${errorMsg}`);
+                    }
+                } else if (!cur) {
+                    console.error('[队列] ❌ 无法确定当前文件，队列可能已损坏');
+                } else {
+                    console.error('[队列] ❌ 当前文件不在 pendingFiles 中，可能被意外清理');
+                }
+                window.__currentQueueFile = null;
+                queueProcessing = false;
+                renderFileQueue();
+                // 继续处理下一份
+                console.log('[队列] → 调用 processFileQueue() 继续下一份');
+                processFileQueue();
+            }
+
+            // 供 resetImportState 调用：清空整个文件队列与 UI
+            window.__resetImportFileQueue = function() {
+                pendingFiles.length = 0;
+                queueProcessing = false;
+                window.__currentQueueFile = null;
+                renderFileQueue();
+            };
+
+            // 点击“一键拆解”按钮的统一入口：
+            // - 若队列中有待拆解文件（多文件模式），启动串行队列；
+            // - 否则走原单文件拆解逻辑（粘贴源码 / 单文件上传）。
+            window.startImportParseClick = function() {
+                const pending = pendingFiles.filter(f => f.status === 'pending').length;
+                const parsing = pendingFiles.some(f => f.status === 'parsing');
+                if (pendingFiles.length > 0 && (pending > 0 || parsing)) {
+                    // 多文件队列模式：启动或继续拆解
+                    if (!parsing) {
+                        processFileQueue();
+                    }
+                    return;
+                }
+                // 单文件模式：直接调用原拆解入口
+                runAIPaperParse();
+            };
 
             // 旧版独立配图区在部分页面布局中不存在；仅在整套控件齐全时绑定，
             // 避免空元素让试卷文件选择和后续初始化一起中断。
@@ -1891,19 +2347,99 @@
             consoleDiv.scrollTop = consoleDiv.scrollHeight;
         }
 
-        function runAIPaperParse() {
+        // ---- 拆卷步骤进度条（进度可视化 + 错误定位） ----
+        function escHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function resetImportSteps() {
+            const container = document.getElementById('importStepsContainer');
+            if (container) {
+                container.innerHTML = '';
+                container.classList.add('hidden');
+            }
+        }
+
+        function buildImportStepHtml(step, idx, total) {
+            const status = step.status || 'pending';
+            let icon, ringClass, textClass;
+            if (status === 'done') {
+                icon = '<i class="fa-solid fa-check"></i>';
+                ringClass = 'bg-emerald-500 text-white border-emerald-500';
+                textClass = 'text-emerald-600';
+            } else if (status === 'active') {
+                icon = '<i class="fa-solid fa-circle-notch fa-spin"></i>';
+                ringClass = 'bg-brand-600 text-white border-brand-600';
+                textClass = 'text-brand-700 font-semibold';
+            } else if (status === 'error') {
+                icon = '<i class="fa-solid fa-xmark"></i>';
+                ringClass = 'bg-red-500 text-white border-red-500';
+                textClass = 'text-red-600 font-semibold';
+            } else {
+                icon = String(idx + 1);
+                ringClass = 'bg-white text-slate-400 border-slate-300';
+                textClass = 'text-slate-400';
+            }
+            const connector = idx < total - 1
+                ? `<span class="absolute left-[15px] top-8 w-0.5 h-6 ${status === 'done' ? 'bg-emerald-400' : 'bg-slate-200'}"></span>`
+                : '';
+            const detail = step.detail
+                ? `<p class="text-[10px] text-slate-500 mt-0.5 leading-snug">${escHtml(step.detail)}</p>`
+                : '';
+            const errorNote = status === 'error'
+                ? `<p class="text-[10px] text-red-500 mt-0.5 leading-snug font-medium">此步骤出错，请检查上方错误日志</p>`
+                : '';
+            return (
+                `<div class="relative flex items-start space-x-3 py-1" data-step-status="${escHtml(status)}">` +
+                    `<div class="relative shrink-0">${connector}` +
+                        `<span class="inline-flex items-center justify-center w-8 h-8 rounded-full border-2 text-xs font-bold ${ringClass}">${icon}</span>` +
+                    `</div>` +
+                    `<div class="pt-1 text-left">` +
+                        `<p class="text-xs ${textClass}">${escHtml(step.label)}</p>` +
+                        detail +
+                        errorNote +
+                    `</div>` +
+                `</div>`
+            );
+        }
+
+        function renderImportSteps(steps) {
+            const container = document.getElementById('importStepsContainer');
+            if (!container) return;
+            if (!Array.isArray(steps) || steps.length === 0) {
+                resetImportSteps();
+                return;
+            }
+            container.classList.remove('hidden');
+            const html = steps
+                .map((s, i) => buildImportStepHtml(s, i, steps.length))
+                .join('');
+            container.innerHTML = html;
+        }
+
+        function runAIPaperParse(appendMode = false, appendSourceFile = '') {
             const titleInput = document.getElementById('importPaperTitle');
             const title = titleInput.value.trim();
             const latex = document.getElementById('importLatexContent').value.trim();
 
             if (!latex && !window.currentPdfFile) {
                 showToast('请粘贴或上传 LaTeX 试卷内容，或拖入 PDF 文件！', 'warning');
+                if (appendMode) {
+                    if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(false, '无可用试卷内容');
+                }
                 return;
             }
 
             if (!title) {
                 if (!confirm('试卷标题为空，导入后题目来源将显示为空。\n确定继续吗？')) {
                     titleInput.focus();
+                    if (appendMode) {
+                        if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(false, '试卷标题为空');
+                    }
                     return;
                 }
             }
@@ -1911,12 +2447,20 @@
             // One generation owns task creation, polling and terminal UI. A
             // reset or a newer import makes every older callback inert.
             const importTaskGeneration = beginDocumentImportTask();
+            window.__currentParseAppendMode = appendMode;
+            window.__currentParseSourceFile = appendSourceFile;
 
             // Hide placeholder & results, show loading skeleton
             document.getElementById('importPlaceholder').classList.add('hidden');
-            document.getElementById('parsedQuestionsWrapper').classList.add('hidden');
+            if (!appendMode) {
+                // 单文件模式：先隐藏既有审查列表，拆完整体替换
+                document.getElementById('parsedQuestionsWrapper').classList.add('hidden');
+            }
             const loadingState = document.getElementById('importLoadingState');
-            loadingState.classList.remove('hidden');
+            // 单文件模式显示加载骨架；多文件追加模式保留审查列表，进度由左侧队列显示
+            if (!appendMode) {
+                loadingState.classList.remove('hidden');
+            }
 
             const loadingIcon = loadingState.querySelector('.fa-circle-notch, .fa-spinner, .fa-circle-exclamation');
             if (loadingIcon) {
@@ -1940,10 +2484,15 @@
                 appendImportLog('开始上传 Word (.docx) 试卷文件...', 'current');
                 document.getElementById('importProgressBarContainer').classList.remove('hidden');
                 document.getElementById('importProgressBar').style.width = '0%';
+                resetImportSteps();
 
                 const docxFormData = new FormData();
                 docxFormData.append('file', window.currentDocxFile);
                 docxFormData.append('generate_answers', generateAnswers ? "true" : "false");
+
+                const separatedModeEl = document.getElementById('importSeparatedMode');
+                const separatedMode = separatedModeEl ? separatedModeEl.checked : false;
+                docxFormData.append('separated_mode', separatedMode ? "true" : "false");
 
                 fetch('/api/upload/docx-task', {
                     method: 'POST',
@@ -1974,7 +2523,13 @@
                     if (!isCurrentDocumentImportTask(importTaskGeneration)) return;
                     console.error(err);
                     appendImportLog(`Word 任务创建失败: ${err.message}`, 'error');
-                    
+                    // 队列模式：任务创建失败也必须推进队列，避免永久卡死在失败的文件上
+                    if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
+                        console.warn('[队列] ⚠️ Word 任务创建失败，标记文件失败并继续下一份:', err.message);
+                        advanceQueueAfterParse(false, err.message || 'Word 任务创建失败');
+                        return;
+                    }
+
                     const loadingIcon = document.querySelector('#importLoadingState .fa-spinner');
                     if (loadingIcon) {
                         loadingIcon.classList.remove('fa-spinner', 'animate-spin');
@@ -2005,11 +2560,16 @@
                 appendImportLog('开始上传 PDF 试卷文件...', 'current');
                 document.getElementById('importProgressBarContainer').classList.remove('hidden');
                 document.getElementById('importProgressBar').style.width = '0%';
+                resetImportSteps();
 
                 const pdfFormData = new FormData();
                 pdfFormData.append('file', window.currentPdfFile);
                 pdfFormData.append('generate_answers', generateAnswers ? "true" : "false");
-                
+
+                const separatedModeEl = document.getElementById('importSeparatedMode');
+                const separatedMode = separatedModeEl ? separatedModeEl.checked : false;
+                pdfFormData.append('separated_mode', separatedMode ? "true" : "false");
+
                 const pdfPageRangeInput = document.getElementById('pdfPageRange');
                 const pageRange = pdfPageRangeInput ? pdfPageRangeInput.value.trim() : '';
                 if (pageRange) {
@@ -2049,7 +2609,13 @@
                     if (!isCurrentDocumentImportTask(importTaskGeneration)) return;
                     console.error(err);
                     appendImportLog(`PDF 任务创建失败: ${err.message}`, 'error');
-                    
+                    // 队列模式：任务创建失败也必须推进队列，避免永久卡死在失败的文件上
+                    if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
+                        console.warn('[队列] ⚠️ PDF 任务创建失败，标记文件失败并继续下一份:', err.message);
+                        advanceQueueAfterParse(false, err.message || 'PDF 任务创建失败');
+                        return;
+                    }
+
                     const loadingIcon = document.querySelector('#importLoadingState .fa-spinner');
                     if (loadingIcon) {
                         loadingIcon.classList.remove('fa-spinner', 'animate-spin');
@@ -2143,8 +2709,17 @@
                 .then(data => {
                     if (!isCurrentDocumentImportTask(importTaskGeneration) || !data) return;
                     if (data.status === 'success') {
-                        replaceParsedQuestions(data.questions);
-                        appendImportLog(`试卷成功拆解完成！共提取出 ${parsedQuestionsData.length} 道高定数学题。`, 'success');
+                        const appendMode = window.__currentParseAppendMode;
+                        const sourceFile = window.__currentParseSourceFile;
+                        let addedCount = 0;
+                        if (appendMode) {
+                            const res = appendParsedQuestions(data.questions, sourceFile);
+                            addedCount = res.count;
+                            appendImportLog(`【${sourceFile}】拆解完成，新增 ${addedCount} 道题（累计 ${parsedQuestionsData.length} 道）。`, 'success');
+                        } else {
+                            replaceParsedQuestions(data.questions);
+                            appendImportLog(`试卷成功拆解完成！共提取出 ${parsedQuestionsData.length} 道高定数学题。`, 'success');
+                        }
                         const texDiagnostics = data.tex_diagnostics || {};
                         const estimatedCount = texDiagnostics.question_count_estimate || 0;
                         const actualCount = texDiagnostics.question_count_actual || parsedQuestionsData.length;
@@ -2156,20 +2731,33 @@
                         }
                         const texWarnings = Array.isArray(texDiagnostics.warnings) ? texDiagnostics.warnings : [];
                         texWarnings.forEach(message => appendImportLog(`TeX 预检：${message}`, 'warning'));
-                        if (texWarnings.length) {
+                        if (texWarnings.length && !appendMode) {
                             showToast(`TeX 拆分完成，但有 ${texWarnings.length} 项结构提示需要核对。`, 'warning');
                         }
-                        
-                        renderParsedQuestionsList(parsedQuestionsData);
-                        
+
+                        if (appendMode) {
+                            renderParsedQuestionsAppend(window.__currentParseStartIndex || 0);
+                        } else {
+                            renderParsedQuestionsList(parsedQuestionsData);
+                        }
+
                         document.getElementById('importLoadingState').classList.add('hidden');
                         document.getElementById('parsedQuestionsWrapper').classList.remove('hidden');
 
-                        if (generateAnswers) {
+                        if (generateAnswers && !appendMode) {
                             processAsyncAnswerGeneration(parsedQuestionsData, parsedQuestionsGeneration);
                         }
+
+                        if (appendMode) {
+                            console.log('[队列] TeX 拆解完成，调用 advanceQueueAfterParse(true)');
+                            if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
+                        }
                     } else {
-                        throw new Error(data.message || '拆解失败');
+                        const errMsg = data.message || '拆解失败';
+                        if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
+                            advanceQueueAfterParse(false, errMsg);
+                        }
+                        throw new Error(errMsg);
                     }
                 })
                 .catch(err => {
@@ -2197,6 +2785,9 @@
                     resetBtn.classList.remove('hidden');
 
                     showToast(`试卷拆解失败: ${err.message}`, 'error');
+                    if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
+                        advanceQueueAfterParse(false, err.message || '拆解失败');
+                    }
                 })
                 .finally(() => {
                     if (!isCurrentDocumentImportTask(importTaskGeneration)) return;
@@ -2298,6 +2889,10 @@
                     if (task.progress !== undefined) {
                         document.getElementById('importProgressBar').style.width = `${task.progress}%`;
                     }
+
+                    if (task.steps) {
+                        renderImportSteps(task.steps);
+                    }
                     
                     if (task.log && task.log !== lastLog) {
                         lastLog = task.log;
@@ -2323,46 +2918,73 @@
                     }
                     
                     if (task.status === 'completed') {
-                        if (!finishDocumentPoll(identity)) return;
-                        replaceParsedQuestions(task.data || []);
+                        console.log('[队列] PDF/Word 任务 completed，开始处理完成回调', { identity, appendMode: window.__currentParseAppendMode });
+                        if (!finishDocumentPoll(identity)) {
+                            console.warn('[队列] ⚠️ finishDocumentPoll 返回 false，generation 可能已过期，但仍尝试推进队列');
+                            // 不 return——即使 generation 过期也尝试推进队列，避免卡死
+                        }
+                        let appendMode = window.__currentParseAppendMode;
+                        const sourceFile = window.__currentParseSourceFile;
                         const isWordTask = task.document_type === 'docx';
                         const documentLabel = isWordTask ? 'Word' : 'PDF';
-                        appendImportLog(`${documentLabel} 试卷分析并拆解成功！共分析出 ${parsedQuestionsData.length} 道数学题。`, 'success');
-                        if (isWordTask && task.diagnostics) {
-                            const report = task.diagnostics;
-                            const converted = (report.omml_converted || 0) + (report.mtef_converted || 0);
-                            const reviewCount = report.review_required || 0;
-                            appendImportLog(`Word 提取报告：${converted} 个公式已转换，${report.images_extracted || 0} 张图片已保留，${reviewCount} 处需人工核对。`, reviewCount > 0 ? 'warning' : 'info');
-                            const structuralMathType = report.mtef_structural_converted || 0;
-                            const annotatedMathType = report.mtef_annotation_converted || 0;
-                            const compatibleMathType = report.mtef_compatibility_converted || 0;
-                            if (structuralMathType || annotatedMathType || compatibleMathType) {
-                                appendImportLog(`MathType 明细：${structuralMathType} 个按公式结构转换，${annotatedMathType} 个使用内嵌 LaTeX，${compatibleMathType} 个使用有限文本兼容。`, compatibleMathType > 0 ? 'warning' : 'info');
+                        try {
+                            if (appendMode) {
+                                const res = appendParsedQuestions(task.data || [], sourceFile);
+                                appendImportLog(`【${sourceFile}】${documentLabel} 拆解完成，新增 ${res.count} 道题（累计 ${parsedQuestionsData.length} 道）。`, 'success');
+                            } else {
+                                replaceParsedQuestions(task.data || []);
+                                appendImportLog(`${documentLabel} 试卷分析并拆解成功！共分析出 ${parsedQuestionsData.length} 道数学题。`, 'success');
                             }
-                            const restoredNumbers = report.numbering_converted || 0;
-                            const restoredFormatting = (report.superscripts_converted || 0)
-                                + (report.subscripts_converted || 0)
-                                + (report.underlines_converted || 0)
-                                + (report.text_styles_converted || 0);
-                            if (restoredNumbers || restoredFormatting) {
-                                appendImportLog(`Word 排版语义：已恢复 ${restoredNumbers} 个自动编号、${restoredFormatting} 处上下标/下划线/强调格式。`, 'info');
+                            if (isWordTask && task.diagnostics) {
+                                const report = task.diagnostics;
+                                const converted = (report.omml_converted || 0) + (report.mtef_converted || 0);
+                                const reviewCount = report.review_required || 0;
+                                appendImportLog(`Word 提取报告：${converted} 个公式已转换，${report.images_extracted || 0} 张图片已保留，${reviewCount} 处需人工核对。`, reviewCount > 0 ? 'warning' : 'info');
+                                const structuralMathType = report.mtef_structural_converted || 0;
+                                const annotatedMathType = report.mtef_annotation_converted || 0;
+                                const compatibleMathType = report.mtef_compatibility_converted || 0;
+                                if (structuralMathType || annotatedMathType || compatibleMathType) {
+                                    appendImportLog(`MathType 明细：${structuralMathType} 个按公式结构转换，${annotatedMathType} 个使用内嵌 LaTeX，${compatibleMathType} 个使用有限文本兼容。`, compatibleMathType > 0 ? 'warning' : 'info');
+                                }
+                                const restoredNumbers = report.numbering_converted || 0;
+                                const restoredFormatting = (report.superscripts_converted || 0)
+                                    + (report.subscripts_converted || 0)
+                                    + (report.underlines_converted || 0)
+                                    + (report.text_styles_converted || 0);
+                                if (restoredNumbers || restoredFormatting) {
+                                    appendImportLog(`Word 排版语义：已恢复 ${restoredNumbers} 个自动编号、${restoredFormatting} 处上下标/下划线/强调格式。`, 'info');
+                                }
+                                const lockedMath = report.math_locks_created || 0;
+                                if (lockedMath) {
+                                    appendImportLog(`公式保真校验：${report.math_locks_restored || 0}/${lockedMath} 个公式已按 Word 原文恢复，拆卷模型未直接改写最终公式。`, 'info');
+                                }
+                                if (reviewCount > 0 && !appendMode) {
+                                    showToast(`Word 中有 ${reviewCount} 处公式、字符、图片或表格需人工核对，已保留提示标记。`, 'warning');
+                                }
                             }
-                            const lockedMath = report.math_locks_created || 0;
-                            if (lockedMath) {
-                                appendImportLog(`公式保真校验：${report.math_locks_restored || 0}/${lockedMath} 个公式已按 Word 原文恢复，拆卷模型未直接改写最终公式。`, 'info');
+
+                            if (appendMode) {
+                                renderParsedQuestionsAppend(window.__currentParseStartIndex || 0);
+                            } else {
+                                renderParsedQuestionsList(parsedQuestionsData);
                             }
-                            if (reviewCount > 0) {
-                                showToast(`Word 中有 ${reviewCount} 处公式、字符、图片或表格需人工核对，已保留提示标记。`, 'warning');
-                            }
+
+                            document.getElementById('importLoadingState').classList.add('hidden');
+                            document.getElementById('parsedQuestionsWrapper').classList.remove('hidden');
+
+                            runBtn.disabled = false;
+                            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                        } catch (renderErr) {
+                            console.error('[队列] ❌ 渲染过程异常（仍尝试推进队列）:', renderErr);
+                            appendImportLog(`渲染异常: ${renderErr.message}（队列将继续推进）`, 'error');
+                            // 即使渲染异常也不卡队列
                         }
-                        
-                        renderParsedQuestionsList(parsedQuestionsData);
-                        
-                        document.getElementById('importLoadingState').classList.add('hidden');
-                        document.getElementById('parsedQuestionsWrapper').classList.remove('hidden');
-                        
-                        runBtn.disabled = false;
-                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                        // ★★★ 关键：无论前面是否异常，都要推进队列 ★★★
+                        console.log('[队列] 准备推进队列: appendMode=', appendMode, 'typeof advanceQueueAfterParse=', typeof advanceQueueAfterParse);
+                        if (appendMode) {
+                            console.log('[队列] ✅ 调用 advanceQueueAfterParse(true) 推进到下一文件');
+                            if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
+                        }
                     } else if (task.status === 'cancelled') {
                         if (!finishDocumentPoll(identity)) return;
                         document.getElementById('importLoadingState').classList.add('hidden');
@@ -2395,10 +3017,21 @@
                         runBtn.disabled = false;
                         runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
                         showToast(`${documentLabel} 拆解分析失败: ${task.error || '未知错误'}`, 'error');
+                        if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
+                            advanceQueueAfterParse(false, task.error || '未知错误');
+                        }
                     }
                 })
                 .catch(err => {
-                    if (isCurrentDocumentPoll(identity)) console.error(err);
+                    if (isCurrentDocumentPoll(identity)) {
+                        console.error('[队列] ❌ 轮询回调未捕获异常:', err);
+                        // 兜底：即使回调异常也尝试推进队列，避免卡死
+                        const appendMode = window.__currentParseAppendMode;
+                        if (appendMode && typeof advanceQueueAfterParse === 'function') {
+                            console.log('[队列] 从 catch 兜底调用 advanceQueueAfterParse(false)');
+                            advanceQueueAfterParse(false, err.message || '轮询回调异常');
+                        }
+                    }
                 });
             }, 1500);
         }
@@ -2507,7 +3140,13 @@
             if (blockImportResetWhileSaving()) {
                 return false;
             }
+            // 清空多文件队列（若存在）
+            if (typeof window.__resetImportFileQueue === 'function') {
+                window.__resetImportFileQueue();
+            }
             beginDocumentImportTask();
+            // 清空步骤进度条
+            resetImportSteps();
             // 隐藏加载状态和结果视图
             document.getElementById('importLoadingState').classList.add('hidden');
             document.getElementById('parsedQuestionsWrapper').classList.add('hidden');
@@ -2541,6 +3180,7 @@
 
             // 清空解析结果数据
             replaceParsedQuestions([]);
+            parsedFileGroups = [];
             if (typeof updateSelectedCount === 'function') {
                 updateSelectedCount();
             }
@@ -2584,18 +3224,34 @@
             container.appendChild(badge);
         }
 
-        function renderParsedQuestionsList(questions) {
+        function renderSingleParsedCard(index) {
+            const q = parsedQuestionsData[index];
+            if (!q) return;
             const container = document.getElementById('parsedCardsContainer');
-            container.innerHTML = '';
-            document.getElementById('parsedCountBadge').textContent = `共 ${questions.length} 题`;
+            const tocEl = document.getElementById('parsedTOC');
+            const TYPE_LABEL = {
+                single_choice: '选',
+                multi_choice: '选',
+                fill_in_blank: '填',
+                detailed_answer: '解'
+            };
 
-            if (questions.length === 0) {
-                container.innerHTML = '<div class="p-12 text-center text-slate-400 text-xs">AI 未能拆解出任何有效的题目，请检查 LaTeX 格式是否规整。</div>';
-                if (typeof updateSelectedCount === 'function') updateSelectedCount();
-                return;
+            // 渲染目录项（题型+题号：选1 / 填2 / 解3 ...）
+            if (tocEl) {
+                const tocItem = document.createElement('button');
+                tocItem.type = 'button';
+                tocItem.className = 'parsed-toc-item w-full flex items-center justify-center text-[11px] font-bold px-1.5 py-1.5 rounded-lg transition-all border select-none text-slate-500 bg-white/50 border-slate-200/60 hover:bg-brand-50 hover:text-brand-600';
+                tocItem.dataset.index = index;
+                tocItem.textContent = `${TYPE_LABEL[q.question_type] || '题'}${index + 1}`;
+                if (q.saved) {
+                    tocItem.classList.add('text-slate-400', 'opacity-60');
+                    tocItem.title = `第 ${index + 1} 题（已导入）`;
+                } else {
+                    tocItem.title = `第 ${index + 1} 题`;
+                }
+                tocItem.addEventListener('click', () => scrollToParsedCard(index));
+                tocEl.appendChild(tocItem);
             }
-
-            questions.forEach((q, index) => {
                 let qTypeOptionsHtml = '';
                 if (window.systemMetadata && window.systemMetadata.question_types) {
                     window.systemMetadata.question_types.forEach(item => {
@@ -2629,6 +3285,7 @@
                 card.id = `parsed-card-${index}`;
                 
                 card.innerHTML = `
+                    ${q.source_file ? `<div class="flex items-center space-x-1.5 mb-3 shrink-0"><i class="fa-solid fa-file-lines text-brand-500 text-[10px]"></i><span class="text-[10px] font-bold text-brand-700 bg-brand-50 border border-brand-100 rounded px-2 py-0.5 truncate max-w-full" title="${window.MathBankSafe.escapeAttribute(q.source_file)}">${window.MathBankSafe.escapeText(q.source_file)}</span></div>` : ''}
                     <!-- Card Top Configs Bar -->
                     <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 border-b pb-3 shrink-0">
                         <div class="flex items-center space-x-2 select-none text-slate-700 text-xs font-bold">
@@ -2660,6 +3317,22 @@
                         <select class="card-knowledge glass-select px-2 py-1.5 rounded-lg text-[10px] font-semibold">
                             <option value="">所有小节</option>
                         </select>
+                    </div>
+
+                    <!-- 知识点 / 解题方法 多标签 (AI 自动打标 + 手动修正) -->
+                    <div class="space-y-1 mt-2">
+                        <label class="text-[9px] font-bold text-slate-500 tracking-wider">知识点 (多标签)</label>
+                        <div class="card-knowledge-tags-input flex flex-wrap gap-1 items-center border border-slate-200 rounded-lg px-2 py-1.5 bg-white/50" data-field="knowledge_list">
+                            <span class="card-knowledge-tags-chips flex flex-wrap gap-1"></span>
+                            <input type="text" class="card-tag-add-input flex-1 min-w-[60px] bg-transparent text-[10px] outline-none" placeholder="输入后回车添加 (如: 函数单调性)">
+                        </div>
+                    </div>
+                    <div class="space-y-1 mt-2">
+                        <label class="text-[9px] font-bold text-slate-500 tracking-wider">解题方法 (多标签)</label>
+                        <div class="card-solvemethod-tags-input flex flex-wrap gap-1 items-center border border-slate-200 rounded-lg px-2 py-1.5 bg-white/50" data-field="solve_method">
+                            <span class="card-solvemethod-tags-chips flex flex-wrap gap-1"></span>
+                            <input type="text" class="card-tag-add-input flex-1 min-w-[60px] bg-transparent text-[10px] outline-none" placeholder="输入后回车添加 (如: 数形结合)">
+                        </div>
                     </div>
 
                     <!-- Body Content Split -->
@@ -2718,6 +3391,23 @@
                 container.appendChild(card);
                 setupCardCategoryLinkage(card, q);
 
+                // 初始化知识点 / 解题方法 多标签输入
+                setupCardTagInput(card, 'knowledge_list', q.knowledge_list || '');
+                setupCardTagInput(card, 'solve_method', q.solve_method || '');
+
+                // 分离式拆解缺口提示：若该题解析缺失（source 含 [缺解析] 标记），高亮警告
+                if (q.source && String(q.source).includes('[缺解析]')) {
+                    const warnBar = document.createElement('div');
+                    warnBar.className = 'mt-2 px-2.5 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-semibold flex items-center space-x-1.5';
+                    warnBar.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i><span>该题在解析区未找到对应段落（解析缺失），导入前请手动补全答案。</span>';
+                    const cardBody = card.querySelector('.card-body') || card.querySelector('.card-content-preview');
+                    if (cardBody && cardBody.parentNode) {
+                        cardBody.parentNode.insertBefore(warnBar, cardBody.nextSibling);
+                    } else {
+                        card.appendChild(warnBar);
+                    }
+                }
+
                 // Populate image badges
                 const badgesContainer = document.getElementById(`card-images-badges-${index}`);
                 const mappedImgs = Array.isArray(q.image_paths)
@@ -2744,9 +3434,151 @@
                 ansInput.addEventListener('input', debounce(triggerPreview, 200));
 
                 triggerPreview();
-            });
 
             if (typeof updateSelectedCount === 'function') updateSelectedCount();
+        }
+
+        // 在审查列表里渲染一个“文件分组头”，例如：📄 文件 2/5：xxx.pdf（18题）
+        function renderFileGroupHeader(groupIndex, group) {
+            const container = document.getElementById('parsedCardsContainer');
+            if (!container || !group) return;
+            const total = parsedFileGroups.length;
+            const header = document.createElement('div');
+            header.className = 'flex items-center justify-between gap-2 mt-5 mb-2 px-3 py-2 rounded-xl bg-brand-50/80 border border-brand-200/80 sticky top-0 z-10 backdrop-blur-sm';
+            header.innerHTML = `
+                <div class="flex items-center space-x-2 min-w-0">
+                    <i class="fa-solid fa-file-lines text-brand-600 text-sm shrink-0"></i>
+                    <span class="text-[11px] font-bold text-brand-800 truncate" title="${window.MathBankSafe.escapeAttribute(group.name)}">文件 ${groupIndex + 1}/${total}：${window.MathBankSafe.escapeText(group.name)}</span>
+                </div>
+                <span class="text-[10px] font-bold text-brand-600 bg-white/70 border border-brand-100 rounded-full px-2 py-0.5 shrink-0">${group.count} 题</span>
+            `;
+            container.appendChild(header);
+        }
+
+        function renderParsedQuestionsList(questions) {
+            const container = document.getElementById('parsedCardsContainer');
+            const tocEl = document.getElementById('parsedTOC');
+            container.innerHTML = '';
+            if (tocEl) tocEl.innerHTML = '';
+            document.getElementById('parsedCountBadge').textContent = `共 ${questions.length} 题`;
+
+            if (questions.length === 0) {
+                container.innerHTML = '<div class="p-12 text-center text-slate-400 text-xs">AI 未能拆解出任何有效的题目，请检查 LaTeX 格式是否规整。</div>';
+                if (tocEl) tocEl.classList.add('hidden');
+                if (typeof updateSelectedCount === 'function') updateSelectedCount();
+                return;
+            }
+
+            if (tocEl) tocEl.classList.remove('hidden');
+            // 多文件批量：在每个文件分组的第一题前插入分组头
+            const groupStarts = new Set(parsedFileGroups.map(g => g.startIndex));
+            questions.forEach((q, index) => {
+                const gi = parsedFileGroups.findIndex(g => g.startIndex === index);
+                if (gi !== -1) renderFileGroupHeader(gi, parsedFileGroups[gi]);
+                renderSingleParsedCard(index);
+            });
+            if (typeof updateSelectedCount === 'function') updateSelectedCount();
+            initParsedTOCScrollSpy();
+        }
+
+        // 多文件模式：增量渲染新追加的卡片（不清空既有列表，仅渲染 startIndex 之后的新题）
+        function renderParsedQuestionsAppend(startIndex) {
+            const container = document.getElementById('parsedCardsContainer');
+            const tocEl = document.getElementById('parsedTOC');
+            if (!container) return;
+            document.getElementById('parsedCountBadge').textContent = `共 ${parsedQuestionsData.length} 题`;
+            if (tocEl && parsedQuestionsData.length > 0) tocEl.classList.remove('hidden');
+            for (let index = startIndex; index < parsedQuestionsData.length; index++) {
+                // 若该下标正是一个新文件分组的起点，先插入分组头
+                const gi = parsedFileGroups.findIndex(g => g.startIndex === index);
+                if (gi !== -1) renderFileGroupHeader(gi, parsedFileGroups[gi]);
+                renderSingleParsedCard(index);
+            }
+            if (typeof updateSelectedCount === 'function') updateSelectedCount();
+            initParsedTOCScrollSpy();
+        }
+
+        // 点击目录项：平滑滚动到对应卡片
+        function scrollToParsedCard(index) {
+            const card = document.getElementById(`parsed-card-${index}`);
+            const scrollBox = document.getElementById('parsedCardsContainer');
+            if (!card || !scrollBox) return;
+            // 用 getBoundingClientRect 精确计算相对偏移，避免 offsetParent 层级不一致导致算错
+            const cardRect = card.getBoundingClientRect();
+            const boxRect = scrollBox.getBoundingClientRect();
+            const delta = cardRect.top - boxRect.top; // 卡片顶部相对滚动容器顶部的距离
+            scrollBox.scrollTo({ top: scrollBox.scrollTop + delta - 8, behavior: 'smooth' });
+            // 立即高亮被点击项，并让其在目录栏可视区内
+            highlightParsedTOCItem(index);
+        }
+
+        // 高亮指定目录项
+        function highlightParsedTOCItem(index) {
+            const tocEl = document.getElementById('parsedTOC');
+            if (!tocEl) return;
+            const items = tocEl.querySelectorAll('.parsed-toc-item');
+            let activeItem = null;
+            items.forEach(item => {
+                const active = Number(item.dataset.index) === index;
+                item.classList.toggle('bg-brand-600', active);
+                item.classList.toggle('text-white', active);
+                item.classList.toggle('border-brand-600', active);
+                item.classList.toggle('bg-white/50', !active);
+                item.classList.toggle('border-slate-200/60', !active);
+                item.classList.toggle('text-slate-500', !active);
+                if (active) activeItem = item;
+            });
+            // 让高亮项在目录栏自身可视区内可见（目录可滚动时长列表也跟焦）
+            if (activeItem) {
+                const itemRect = activeItem.getBoundingClientRect();
+                const tocRect = tocEl.getBoundingClientRect();
+                if (itemRect.top < tocRect.top || itemRect.bottom > tocRect.bottom) {
+                    activeItem.scrollIntoView({ block: 'nearest' });
+                }
+            }
+        }
+
+        // 滚动跟随：用 IntersectionObserver 判断当前最靠近视口顶部的卡片
+        let _parsedTOCObserver = null;
+        function initParsedTOCScrollSpy() {
+            const scrollBox = document.getElementById('parsedCardsContainer');
+            const tocEl = document.getElementById('parsedTOC');
+            if (!scrollBox || !tocEl) return;
+
+            // 清理旧观察者
+            if (_parsedTOCObserver) {
+                _parsedTOCObserver.disconnect();
+                _parsedTOCObserver = null;
+            }
+
+            const cards = scrollBox.querySelectorAll('[id^="parsed-card-"]');
+            if (!cards.length) return;
+
+            let currentIndex = Number(tocEl.querySelector('.parsed-toc-item.active')?.dataset.index || 0);
+
+            _parsedTOCObserver = new IntersectionObserver((entries) => {
+                // 找到顶部附近、可见比例最高的卡片
+                let best = null;
+                entries.forEach(entry => {
+                    if (entry.isIntersecting && (!best || entry.boundingClientRect.top < best.boundingClientRect.top)) {
+                        best = entry;
+                    }
+                });
+                if (!best) return;
+                const idxAttr = best.target.id.replace('parsed-card-', '');
+                const idx = Number(idxAttr);
+                if (!isNaN(idx) && idx !== currentIndex) {
+                    currentIndex = idx;
+                    highlightParsedTOCItem(idx);
+                }
+            }, {
+                root: scrollBox,
+                // 触发带设在容器顶部约 1/3 处：卡片顶部越过这条线即视为"当前题"
+                rootMargin: '0px 0px -66% 0px',
+                threshold: 0
+            });
+
+            cards.forEach(card => _parsedTOCObserver.observe(card));
         }
 
         function setupCardCategoryLinkage(card, q) {
@@ -2813,6 +3645,109 @@
 
             updateChapters();
             updateKnowledge();
+        }
+
+        // 初始化拆解卡片的多标签输入 (知识点 / 解题方法)
+        function setupCardTagInput(card, field, initialValue) {
+            const container = card.querySelector(`.card-${field === 'knowledge_list' ? 'knowledge' : 'solvemethod'}-tags-input`);
+            if (!container) return;
+            const chipsSpan = container.querySelector(`.card-${field === 'knowledge_list' ? 'knowledge' : 'solvemethod'}-tags-chips`);
+            const input = container.querySelector('.card-tag-add-input');
+
+            const currentTags = [];
+            const addTag = (raw) => {
+                const tag = (raw || '').trim();
+                if (!tag) return;
+                if (currentTags.includes(tag)) { input.value = ''; return; }
+                currentTags.push(tag);
+                renderChips();
+            };
+            const renderChips = () => {
+                chipsSpan.innerHTML = '';
+                currentTags.forEach((tag, idx) => {
+                    const chip = document.createElement('span');
+                    chip.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-brand-50 text-brand-700 text-[10px] font-semibold';
+                    chip.textContent = tag;
+                    const x = document.createElement('span');
+                    x.className = 'cursor-pointer text-brand-400 hover:text-brand-700';
+                    x.textContent = '×';
+                    x.addEventListener('click', () => {
+                        currentTags.splice(idx, 1);
+                        renderChips();
+                    });
+                    chip.appendChild(x);
+                    chipsSpan.appendChild(chip);
+                });
+            };
+
+            // 解析初始值 (逗号/顿号/分号分隔)
+            String(initialValue || '').split(/[,，;；\n]+/).forEach(t => { if (t.trim()) addTag(t); });
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+                    e.preventDefault();
+                    addTag(input.value);
+                    input.value = '';
+                } else if (e.key === 'Backspace' && !input.value && currentTags.length) {
+                    currentTags.pop();
+                    renderChips();
+                }
+            });
+            input.addEventListener('blur', () => { if (input.value.trim()) { addTag(input.value); input.value = ''; } });
+
+            // 暴露取值方法供保存时调用
+            container._getTags = () => currentTags.join(',');
+        }
+
+        // 编辑弹窗的多标签输入初始化 (知识点 / 解题方法)
+        function setupEditTagInput(containerId, chipsId, inputId, initialValue) {
+            const container = document.getElementById(containerId);
+            const chipsSpan = document.getElementById(chipsId);
+            const input = document.getElementById(inputId);
+            if (!container || !chipsSpan || !input) return;
+
+            // 用容器 id 推导全局存储键
+            const globalKey = containerId === 'editKnowledgeTags' ? '_editKnowledgeTags' : '_editSolveMethodTags';
+            const currentTags = [];
+            window[globalKey] = currentTags;
+
+            const renderChips = () => {
+                chipsSpan.innerHTML = '';
+                currentTags.forEach((tag, idx) => {
+                    const chip = document.createElement('span');
+                    chip.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-brand-50 text-brand-700 text-[10px] font-semibold';
+                    chip.textContent = tag;
+                    const x = document.createElement('span');
+                    x.className = 'cursor-pointer text-brand-400 hover:text-brand-700';
+                    x.textContent = '×';
+                    x.addEventListener('click', () => {
+                        currentTags.splice(idx, 1);
+                        renderChips();
+                    });
+                    chip.appendChild(x);
+                    chipsSpan.appendChild(chip);
+                });
+            };
+            const addTag = (raw) => {
+                const tag = (raw || '').trim();
+                if (!tag || currentTags.includes(tag)) return;
+                currentTags.push(tag);
+                renderChips();
+            };
+
+            String(initialValue || '').split(/[,，;；\n]+/).forEach(t => { if (t.trim()) addTag(t); });
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+                    e.preventDefault();
+                    addTag(input.value);
+                    input.value = '';
+                } else if (e.key === 'Backspace' && !input.value && currentTags.length) {
+                    currentTags.pop();
+                    renderChips();
+                }
+            });
+            input.addEventListener('blur', () => { if (input.value.trim()) { addTag(input.value); input.value = ''; } });
         }
 
         function renderParsedCardPreview(card, contentText, answerText) {
@@ -2915,6 +3850,11 @@
             const category_chapter = card.querySelector('.card-chapter').value;
             const category_knowledge = card.querySelector('.card-knowledge').value;
 
+            const knowledgeListEl = card.querySelector('.card-knowledge-tags-input');
+            const solveMethodEl = card.querySelector('.card-solvemethod-tags-input');
+            const knowledge_list = knowledgeListEl && knowledgeListEl._getTags ? knowledgeListEl._getTags() : '';
+            const solve_method = solveMethodEl && solveMethodEl._getTags ? solveMethodEl._getTags() : '';
+
             if (!content) {
                 showToast(`第 ${index + 1} 题的题干内容不能为空！`, 'warning');
                 return Promise.reject(new Error('Content empty'));
@@ -2951,6 +3891,8 @@
             formData.append('category_compulsory', category_compulsory);
             formData.append('category_chapter', category_chapter);
             formData.append('category_knowledge', category_knowledge);
+            formData.append('knowledge_list', knowledge_list);
+            formData.append('solve_method', solve_method);
             formData.append('difficulty', difficulty);
             formData.append('source', source);
             formData.append('answer_markdown', answer_markdown);
@@ -2965,6 +3907,63 @@
             })
             .then(r => r.json())
             .then(data => {
+                if (data.status === 'duplicate_warning') {
+                    // 查重命中：标记卡片为疑似重复，默认不入库，提供「仍导入」入口
+                    if (!isParsedQuestionSaveContextCurrent(saveGeneration, index, q)) {
+                        return true;
+                    }
+                    card.classList.add('ring-2', 'ring-amber-400', 'border-amber-400');
+                    const warnTip = document.createElement('div');
+                    warnTip.className = 'mt-2 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-semibold flex items-center justify-between';
+                    warnTip.innerHTML = `<span><i class="fa-solid fa-triangle-exclamation mr-1"></i>疑似重复（相似度 ${Math.round((data.similarity || 0) * 100)}%）</span>`;
+                    const forceBtn = document.createElement('button');
+                    forceBtn.className = 'ml-2 px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700';
+                    forceBtn.textContent = '仍导入';
+                    forceBtn.onclick = () => {
+                        const fd = new FormData();
+                        fd.append('content', content);
+                        fd.append('question_type', question_type);
+                        fd.append('category_compulsory', category_compulsory);
+                        fd.append('category_chapter', category_chapter);
+                        fd.append('category_knowledge', category_knowledge);
+                        fd.append('knowledge_list', knowledge_list);
+                        fd.append('solve_method', solve_method);
+                        fd.append('difficulty', difficulty);
+                        fd.append('source', source);
+                        fd.append('answer_markdown', answer_markdown);
+                        fd.append('image_paths', JSON.stringify(Array.from(new Set(safeImagePaths))));
+                        fd.append('force', '1');
+                        forceBtn.disabled = true;
+                        forceBtn.textContent = '导入中…';
+                        fetch('/api/questions', { method: 'POST', body: fd })
+                            .then(r => r.json())
+                            .then(d2 => {
+                                if (d2.status === 'success') {
+                                    warnTip.remove();
+                                    card.classList.remove('ring-2', 'ring-amber-400', 'border-amber-400');
+                                    q.saved = true;
+                                    const statusBadge = card.querySelector('.card-status-badge');
+                                    if (statusBadge) { statusBadge.textContent = '已导入'; statusBadge.className = 'card-status-badge text-[10px] font-bold px-2 py-0.5 rounded bg-green-50 text-green-700 border border-green-200'; }
+                                    // 同步目录项：已导入灰显
+                                    const tocItem = document.querySelector(`#parsedTOC .parsed-toc-item[data-index="${index}"]`);
+                                    if (tocItem) { tocItem.classList.add('text-slate-400', 'opacity-60'); tocItem.title = `第 ${index + 1} 题（已导入）`; }
+                                    showToast(`第 ${index + 1} 题已强制导入`);
+                                    loadCategories(); loadQuestions();
+                                } else {
+                                    forceBtn.disabled = false;
+                                    forceBtn.textContent = '仍导入';
+                                    showToast(`强制导入失败: ${d2.message || ''}`, 'error');
+                                }
+                            });
+                    };
+                    warnTip.appendChild(forceBtn);
+                    const cardBody = card.querySelector('.card-body') || card;
+                    cardBody.appendChild(warnTip);
+                    saveBtn.disabled = false;
+                    saveBtn.innerHTML = '<i class="fa-solid fa-file-arrow-up"></i> <span>导入此题</span>';
+                    if (typeof updateSelectedCount === 'function') updateSelectedCount();
+                    return false;
+                }
                 if (data.status === 'success') {
                     // The request may finish after a new paper has replaced this
                     // index. The backend save remains valid, but stale callbacks
@@ -2977,7 +3976,11 @@
                     const statusBadge = card.querySelector('.card-status-badge');
                     statusBadge.textContent = '已导入';
                     statusBadge.className = 'card-status-badge text-[10px] font-bold px-2 py-0.5 rounded bg-green-50 text-green-700 border border-green-200 animate-pulse';
-                    
+
+                    // 同步目录项：已导入灰显
+                    const tocItem = document.querySelector(`#parsedTOC .parsed-toc-item[data-index="${index}"]`);
+                    if (tocItem) { tocItem.classList.add('text-slate-400', 'opacity-60'); tocItem.title = `第 ${index + 1} 题（已导入）`; }
+
                     saveBtn.className = 'card-save-btn px-4 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-[10px] border border-emerald-300 hover:bg-emerald-100 transition-colors';
                     saveBtn.innerHTML = '<i class="fa-solid fa-rotate-right"></i> <span>再次导入</span>';
                     saveBtn.disabled = false;
@@ -3155,22 +4158,50 @@
             if (!mainBtn) return;
             
             mainBtn.disabled = true;
-            
+
             const btnText = document.getElementById('saveAllParsedBtnText');
             const originalText = btnText ? btnText.textContent : '导入选中题目';
             if (btnText) {
                 btnText.textContent = '批量入库中...';
             }
-            
+
             const icon = mainBtn.querySelector('i');
             const originalIconClass = icon ? icon.className : 'fa-solid fa-cloud-arrow-up';
             if (icon) {
                 icon.className = 'fa-solid fa-spinner animate-spin';
             }
 
+            // 方案A：顶部徽标实时显示导入进度「导入中：完成/总数」
+            const progressBadge = document.getElementById('selectedCountBadge');
+            const totalToImport = selectedIndices.length;
+            let doneCount = 0;
+            const setImportProgress = () => {
+                if (progressBadge) {
+                    progressBadge.textContent = `导入中：已导入 ${doneCount} / ${totalToImport} 题`;
+                }
+            };
+            setImportProgress();
+
             showToast(`正在批量导入 ${selectedIndices.length} 道勾选题目，请稍候...`);
 
-            const promises = selectedIndices.map(idx => saveParsedQuestion(idx).catch(() => null));
+            const promises = selectedIndices.map(idx =>
+                saveParsedQuestion(idx)
+                    .then(
+                        res => {
+                            // 每完成一题（成功/重复/后端失败）都推进计数
+                            doneCount++;
+                            setImportProgress();
+                            return res;
+                        },
+                        err => {
+                            // 前端校验拒绝（题干空/缺章节/卡片缺失）也会走到这里，
+                            // 同样计入已完成，避免徽标卡在「N-1/N」永不收尾
+                            doneCount++;
+                            setImportProgress();
+                            return null;
+                        }
+                    )
+            );
 
             Promise.all(promises)
                 .then(results => {
@@ -3178,13 +4209,13 @@
                         return;
                     }
                     const successCount = results.filter(r => r === true).length;
-                    
+
                     updateSelectedCount();
                     const remainingUnsavedCount = parsedQuestionsData.filter(q => !q.saved).length;
-                    
+
                     if (remainingUnsavedCount === 0) {
                         showToast(`批量导入完成！共 ${successCount} 道题目已全部成功导入本地库！`, 'success');
-                        
+
                         setTimeout(() => {
                             if (batchGeneration !== parsedQuestionsGeneration) {
                                 return;
@@ -3192,9 +4223,16 @@
                             if (blockImportResetWhileSaving()) {
                                 return;
                             }
+                            // 方案B：若批量队列里还有未拆解（pending/parsing）的文件，
+                            // 不关闭弹窗、不清空队列，仅提示用户继续拆解剩余文件；
+                            // 只有队列也全部处理完（无 pending/parsing）时才整体收尾。
+                            if (window.__importQueueHasPending) {
+                                showToast(`本批 ${successCount} 道题已导入！队列还有文件待拆解，请继续点“开始拆解剩余文件”。`, 'success');
+                                return;
+                            }
                             clearAllImportInputs();
-                            resetImportState(false); 
-                            closeImportModal();      
+                            resetImportState(false);
+                            closeImportModal();
                         }, 1500);
                     } else {
                         showToast(`批量导入已完成！成功: ${successCount}/${selectedIndices.length}。剩余未导入的题目已保留，请确认。`, 'warning');
@@ -3210,13 +4248,17 @@
                     if (batchGeneration !== parsedQuestionsGeneration) {
                         return;
                     }
-                    mainBtn.disabled = false;
+                    // 恢复按钮外观，但阶段一（队列仍有未拆文件）需保持禁用，避免误导入
                     if (icon) {
                         icon.className = originalIconClass;
                     }
                     if (btnText) {
                         btnText.textContent = originalText;
                     }
+                    if (!window.__importQueueHasPending) {
+                        mainBtn.disabled = false;
+                    }
+                    // 导入结束：徽标恢复为「已选 X / Y 题」
                     updateSelectedCount();
                 });
         }
