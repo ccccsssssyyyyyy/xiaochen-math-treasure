@@ -2078,6 +2078,15 @@
                         errTip.title = item.error;
                         right.appendChild(errTip);
                     }
+                    if (item.status === 'failed') {
+                        const retryBtn = document.createElement('button');
+                        retryBtn.type = 'button';
+                        retryBtn.className = 'text-[9px] font-bold text-brand-600 hover:text-brand-700 transition-colors border border-brand-300 rounded px-1.5 py-0.5';
+                        retryBtn.textContent = '重试';
+                        retryBtn.title = '重新拆解该失败/超时文件';
+                        retryBtn.addEventListener('click', () => window.__forceReparseByName(item.name));
+                        right.appendChild(retryBtn);
+                    }
                     if (item.status === 'skipped') {
                         const reparseBtn = document.createElement('button');
                         reparseBtn.type = 'button';
@@ -2180,10 +2189,16 @@
                             }
                         }
                     }
-                    // 阶段一严禁提前导入：禁用“全部导入”并提示
+                    // 阶段一：方案B——已有文件拆解完成时，允许先导入已拆完的题，
+                    // 不必等全部文件拆完（避免个别文件卡死/失败拖累整体、已花 token 浪费）。
                     if (saveAllBtn) {
-                        saveAllBtn.disabled = true;
-                        saveAllBtn.title = '请先点“开始/继续拆解”把所有文件拆完，再统一导入';
+                        if (done > 0) {
+                            saveAllBtn.disabled = false;
+                            saveAllBtn.title = '仅导入已成功拆解的文件（其余文件拆解完后再导入）';
+                        } else {
+                            saveAllBtn.disabled = true;
+                            saveAllBtn.title = '请先点“开始/继续拆解”把文件拆完，再统一导入';
+                        }
                     }
                     return;
                 }
@@ -2976,9 +2991,23 @@
 
             stopCurrentDocumentPoll();
             window.currentPdfTaskId = taskId;
-            const identity = { generation, taskId, intervalId: null };
+            const identity = { generation, taskId, intervalId: null, startedAt: Date.now() };
             activeDocumentPoll = identity;
             identity.intervalId = setInterval(() => {
+                // 方案B：拆解绝对超时保护。超过 PARSE_TIMEOUT_MS 仍无 completed/error 响应，
+                // 判定后端任务卡死，标记该文件失败并继续下一个，避免全盘卡死、已拆完的题也无法入库。
+                const PARSE_TIMEOUT_MS = window.__PARSE_TIMEOUT_MS || (5 * 60 * 1000);
+                if (Date.now() - identity.startedAt > PARSE_TIMEOUT_MS) {
+                    const timedOutName = (window.__currentQueueFile && window.__currentQueueFile.name)
+                        || window.__currentParseSourceFile || '';
+                    console.warn('[队列] ⚠️ 拆解超时（超过 5 分钟无响应），标记失败并继续下一个文件', { name: timedOutName });
+                    finishDocumentPoll(identity);
+                    appendImportLog(`⏱️ 文件「${timedOutName}」拆解超时（超过 5 分钟无响应），已标记为失败。可点「重试」重新拆解，或「移除」跳过。`, 'error');
+                    if (typeof advanceQueueAfterParse === 'function') {
+                        advanceQueueAfterParse(false, '拆解超时（超过 5 分钟无响应）');
+                    }
+                    return;
+                }
                 fetch(`/api/tasks/${taskId}/status`)
                 .then(r => {
                     if (!r.ok) throw new Error("获取任务进度失败");
@@ -4349,10 +4378,26 @@
                 const unsavedCount = parsedQuestionsData.filter(q => !q.saved).length;
                 if (unsavedCount === 0) {
                     showToast('所有题目已成功导入！', 'info');
+                    return;
+                }
+                // 方案B：队列还有文件未拆完时，若用户未手动勾选，自动勾选已出现的题
+                // （即已拆解完成文件的题，仍在拆/待拆文件的题尚未进入列表），先导入已完成部分。
+                if (window.__importQueueHasPending) {
+                    toggleSelectAllParsed(true);
+                    const autoIndices = getCheckedUnsavedIndices();
+                    if (autoIndices.length > 0) {
+                        showToast(`队列尚有文件未拆完，先导入已拆解完成的 ${autoIndices.length} 道题目。`, 'info');
+                        updateSelectedCount();
+                        selectedIndices.length = 0;
+                        autoIndices.forEach(i => selectedIndices.push(i));
+                    } else {
+                        showToast('当前已拆解的文件题目均已导入，剩余文件拆解完成后再导入。', 'info');
+                        return;
+                    }
                 } else {
                     showToast('请先勾选需要导入的题目！', 'warning');
+                    return;
                 }
-                return;
             }
 
             const mainBtn = document.getElementById('saveAllParsedBtn');
