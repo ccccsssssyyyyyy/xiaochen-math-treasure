@@ -8,6 +8,62 @@
             // 让嵌套声明改为赋值，从而对外层调用点可见（否则 typeof 守卫判非函数、调用被静默跳过，队列卡在第一份）。
             let advanceQueueAfterParse = null;
 
+            // 目录竖栏标签工具：把文件序号转中文、定位文件分组、生成「（中文文件序号）题型缩写+文件内连续序号」
+            function numberToChinese(n) {
+                n = Number(n) || 0;
+                if (n <= 0) return String(n);
+                const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+                if (n <= 10) return n === 10 ? '十' : digits[n];
+                if (n < 20) return '十' + digits[n - 10];
+                if (n < 100) {
+                    const tens = Math.floor(n / 10);
+                    const ones = n % 10;
+                    return (tens === 1 ? '十' : digits[tens] + '十') + (ones === 0 ? '' : digits[ones]);
+                }
+                return String(n);
+            }
+
+            // 返回某题所属文件序号（从 1 起）与文件内连续序号（从 1 起）
+            function getParsedQuestionFileInfo(index) {
+                let fileSeq = index + 1;
+                let fileNo = 1;
+                if (Array.isArray(parsedFileGroups) && parsedFileGroups.length > 0) {
+                    let gi = parsedFileGroups.findIndex(g => index >= g.startIndex && index < g.startIndex + (g.count || 0));
+                    if (gi === -1) {
+                        gi = -1;
+                        for (let k = 0; k < parsedFileGroups.length; k++) {
+                            if (parsedFileGroups[k].startIndex <= index) gi = k;
+                        }
+                    }
+                    if (gi !== -1) {
+                        fileNo = gi + 1;
+                        fileSeq = index - parsedFileGroups[gi].startIndex + 1;
+                    }
+                }
+                return { fileNo, fileSeq };
+            }
+
+            // 生成目录竖栏标签：多文件加「（文件中文序号）」前缀，单文件不加；题型缩写 选/填/解/未
+            function getParsedQuestionCatalogLabel(index) {
+                const q = parsedQuestionsData[index];
+                if (!q) return '';
+                const TYPE_LABEL = {
+                    single_choice: '选',
+                    multi_choice: '选',
+                    fill_in_blank: '填',
+                    detailed_answer: '解'
+                };
+                const typeAbbr = TYPE_LABEL[q.question_type] || '未';
+                const { fileNo, fileSeq } = getParsedQuestionFileInfo(index);
+                const prefix = (Array.isArray(parsedFileGroups) && parsedFileGroups.length >= 2) ? `（${numberToChinese(fileNo)}）` : '';
+                return `${prefix}${typeAbbr}${fileSeq}`;
+            }
+
+            // 暴露到全局，供全局作用域的 renderSingleParsedCard 调用（与项目 window.__isMultiFileQueueMode 等暴露方式一致）
+            window.numberToChinese = numberToChinese;
+            window.getParsedQuestionFileInfo = getParsedQuestionFileInfo;
+            window.getParsedQuestionCatalogLabel = getParsedQuestionCatalogLabel;
+
             const renderContentBadges = window.renderIllustrationBadges;
             if (typeof renderContentBadges === 'function') {
                 window.renderIllustrationBadges = function() {
@@ -3370,25 +3426,19 @@
             if (!q) return;
             const container = document.getElementById('parsedCardsContainer');
             const tocEl = document.getElementById('parsedTOC');
-            const TYPE_LABEL = {
-                single_choice: '选',
-                multi_choice: '选',
-                fill_in_blank: '填',
-                detailed_answer: '解'
-            };
-
-            // 渲染目录项（题型+题号：选1 / 填2 / 解3 ...）
+            // 渲染目录项（多文件：「（文件中文序号）题型缩写+文件内连续序号」如 （二）选1；单文件保持 选1）
             if (tocEl) {
                 const tocItem = document.createElement('button');
                 tocItem.type = 'button';
-                tocItem.className = 'parsed-toc-item w-full flex items-center justify-center text-[11px] font-bold px-1.5 py-1.5 rounded-lg transition-all border select-none text-slate-500 bg-white/50 border-slate-200/60 hover:bg-brand-50 hover:text-brand-600';
+                tocItem.className = 'parsed-toc-item w-full flex items-center justify-center text-[10px] font-bold px-1 py-1.5 rounded-lg transition-all border select-none text-slate-500 bg-white/50 border-slate-200/60 hover:bg-brand-50 hover:text-brand-600';
                 tocItem.dataset.index = index;
-                tocItem.textContent = `${TYPE_LABEL[q.question_type] || '题'}${index + 1}`;
+                tocItem.textContent = getParsedQuestionCatalogLabel(index);
+                const fileInfo = getParsedQuestionFileInfo(index);
                 if (q.saved) {
                     tocItem.classList.add('text-slate-400', 'opacity-60');
-                    tocItem.title = `第 ${index + 1} 题（已导入）`;
+                    tocItem.title = `文件 ${fileInfo.fileNo} 第 ${fileInfo.fileSeq} 题（已导入）`;
                 } else {
-                    tocItem.title = `第 ${index + 1} 题`;
+                    tocItem.title = `文件 ${fileInfo.fileNo} 第 ${fileInfo.fileSeq} 题`;
                 }
                 tocItem.addEventListener('click', () => scrollToParsedCard(index));
                 tocEl.appendChild(tocItem);
