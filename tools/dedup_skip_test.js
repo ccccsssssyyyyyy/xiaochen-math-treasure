@@ -68,6 +68,7 @@ setTimeout(() => {
         const byName = Object.fromEntries(snap.map(f => [f.name, f.status]));
         console.log('=== 初步结果（已导入文档应被跳过）===');
         console.log('pendingFiles 状态:', JSON.stringify(byName));
+        console.log('pendingFiles 错误明细:', JSON.stringify(snap.map(f=>({name:f.name,status:f.status,error:f.error||null}))));
         const pdfTaskCalls = calls.filter(c=>c.includes('pdf-task')).length;
         const docImportCalls = calls.filter(c=>c.includes('/api/documents/imported')).length;
         console.log('pdf-task 调用数（期望仅 B、C = 2）:', pdfTaskCalls);
