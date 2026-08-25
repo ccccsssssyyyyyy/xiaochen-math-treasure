@@ -1124,10 +1124,15 @@
         // 多文件批量导入时，按拆解顺序记录“每个文件对应哪些题”，用于在审查列表里分组展示。
         // 结构：{ name(来源文件名), startIndex(在 parsedQuestionsData 中的起始下标), count(本题数) }
         let parsedFileGroups = [];
+        // 拆解结果审查筛选状态：'unimported'(默认,只看未导入) | 'imported' | 'all'
+        // 仅控制卡片可见性，不改动 parsedQuestionsData 数组下标（避免文件分组错位）。
+        window.__parsedReviewFilter = window.__parsedReviewFilter || 'unimported';
         const parsedQuestionSaveInFlight = new Map();
         let allSourcesList = [];
 
         function replaceParsedQuestions(nextQuestions) {
+            // 单文件全量替换：清掉上一轮（可能是多文件）残留的页面图映射
+            if (window.pdfPageImagesMap) window.pdfPageImagesMap = {};
             parsedQuestionsGeneration += 1;
             parsedQuestionsData = Array.isArray(nextQuestions) ? nextQuestions : [];
             // 单文件全量替换时清空分组记录（分组仅用于多文件批量导入）
@@ -1213,6 +1218,8 @@
         // PDF & Crop Global States
         window.currentPdfFile = null;
         window.pdfPageImages = [];
+        // 多文件支持：按来源文件名分别保存各文档的页面图，避免后处理的文档覆盖前面的
+        window.pdfPageImagesMap = {};
         window.currentPdfTaskId = null;
         window.activeCropQuestionIndex = null;
         window.tempCroppedPathsThisSession = [];
@@ -1269,7 +1276,42 @@
             clearPdfCropSelection();
         }
 
+        // 根据题号找到它所属文档的页面图与 taskId（多文件按 source_file；单文件全局兜底）
+        function getCropDocumentForQuestion(questionIndex) {
+            const q = parsedQuestionsData[questionIndex];
+            const key = q && q.source_file ? q.source_file : '';
+            const map = window.pdfPageImagesMap || {};
+            const entry = key ? map[key] : null;
+            if (entry && entry.pageImages && entry.pageImages.length > 0) {
+                return entry;
+            }
+            // 兜底：单文件模式下题目未带 source_file，使用全局最后一份文档
+            if (window.pdfPageImages && window.pdfPageImages.length > 0) {
+                return { taskId: window.currentPdfTaskId, pageImages: window.pdfPageImages };
+            }
+            return null;
+        }
+
+        // 该题是否存在可截图的 PDF/Word 页面（控制“手动截图”按钮显隐）
+        function questionHasCropPages(index) {
+            const q = parsedQuestionsData[index];
+            if (!q) return false;
+            const key = q.source_file;
+            const map = window.pdfPageImagesMap || {};
+            if (key && map[key] && map[key].pageImages && map[key].pageImages.length > 0) return true;
+            if (!key && window.pdfPageImages && window.pdfPageImages.length > 0) return true;
+            return false;
+        }
+
         function openPdfCropModalForQuestion(questionIndex) {
+            const entry = getCropDocumentForQuestion(questionIndex);
+            if (!entry) {
+                showToast('该题没有可截图的 PDF/Word 页面', 'warning');
+                return;
+            }
+            // 切换到该题所属文档的页面图与 taskId，多文件互不干扰
+            window.pdfPageImages = entry.pageImages;
+            if (entry.taskId) window.currentPdfTaskId = entry.taskId;
             window.activeCropQuestionIndex = questionIndex;
             activePageIndex = 0;
             zoomFactor = 1.0;
@@ -1855,6 +1897,8 @@
             // 队列项结构：{ file, name, status: 'pending'|'parsing'|'done'|'failed', error }
             // 入队时按文件名去重（同一文件名不允许重复选入）。
             const pendingFiles = [];
+            // 本会话已成功导入的文件名集合，用于“禁止同一份文件重复上传”（挂在 window 上以便跨函数重置）
+            window.__importedSourceNames = window.__importedSourceNames || {};
             let queueProcessing = false;
 
             function enqueueFiles(fileList) {
@@ -1874,9 +1918,10 @@
                         showToast(`已忽略非试卷文件：${file.name || '未知文件'}（仅支持 .tex / .pdf / .docx）`, 'warning');
                         return;
                     }
-                    // 去重：文件名已存在则跳过
+                    // 去重：队列中已有同名文件，或本会话已成功导入过该文件，则跳过
                     const dup = pendingFiles.some(item => item.name === file.name);
-                    if (dup) {
+                    const alreadyImported = !!(window.__importedSourceNames && window.__importedSourceNames[file.name]);
+                    if (dup || alreadyImported) {
                         skipped += 1;
                         return;
                     }
@@ -1884,7 +1929,7 @@
                     added += 1;
                 });
                 if (skipped > 0) {
-                    showToast(`已跳过 ${skipped} 个重复文件（同名文件不会重复导入队列）`, 'info');
+                    showToast(`已跳过 ${skipped} 个重复文件（队列中已有或本会话已导入的同名文件不会重复导入）`, 'info');
                 }
                 renderFileQueue();
                 // 不再自动拆解：选完文件只入队并展示，等待用户点击“一键拆解”按钮
@@ -2915,6 +2960,14 @@
                     
                     if (task.page_images && task.page_images.length > 0) {
                         window.pdfPageImages = task.page_images;
+                        // 多文件：按来源文件保存页面图，避免后处理的文档覆盖前面的
+                        const sourceKey = window.__currentParseSourceFile ||
+                            (window.currentPdfFile && window.currentPdfFile.name) ||
+                            (window.currentDocxFile && window.currentDocxFile.name) || '';
+                        if (sourceKey) {
+                            if (!window.pdfPageImagesMap) window.pdfPageImagesMap = {};
+                            window.pdfPageImagesMap[sourceKey] = { taskId: taskId, pageImages: task.page_images };
+                        }
                     }
                     
                     if (task.status === 'completed') {
@@ -2925,6 +2978,13 @@
                         }
                         let appendMode = window.__currentParseAppendMode;
                         const sourceFile = window.__currentParseSourceFile;
+                        // 标记本次已成功导入的文件名，禁止同一份文件重复上传
+                        const importedName = sourceFile ||
+                            (window.currentPdfFile && window.currentPdfFile.name) ||
+                            (window.currentDocxFile && window.currentDocxFile.name) || '';
+                        if (importedName) {
+                            window.__importedSourceNames[importedName] = true;
+                        }
                         const isWordTask = task.document_type === 'docx';
                         const documentLabel = isWordTask ? 'Word' : 'PDF';
                         try {
@@ -3124,9 +3184,14 @@
             window.currentTexDiagnostics = null;
             window.currentTexReadToken = null;
             window.pdfPageImages = [];
+            window.pdfPageImagesMap = {};
             window.currentPdfTaskId = null;
             window.activeCropQuestionIndex = null;
             window.tempCroppedPathsThisSession = [];
+            // 重置导入状态：清空已导入文件记录，允许新一轮重新上传
+            if (window.__importedSourceNames) {
+                Object.keys(window.__importedSourceNames).forEach(k => { delete window.__importedSourceNames[k]; });
+            }
             
             const pdfRange = document.getElementById('pdfPageRange');
             if (pdfRange) pdfRange.value = '';
@@ -3363,7 +3428,7 @@
                             <!-- Thumbnail labels of images selected -->
                         </div>
                         <div class="flex items-center space-x-2">
-                            ${window.pdfPageImages && window.pdfPageImages.length > 0 ? `
+                            ${questionHasCropPages(index) ? `
                                 <button onclick="openPdfCropModalForQuestion(${index})" class="glass-btn text-amber-700 font-bold px-3 py-1.5 rounded-lg text-[10px] flex items-center space-x-1" title="查看 PDF 页面并拖拽框选截图">
                                     <i class="fa-solid fa-scissors"></i>
                                     <span>手动截图</span>
