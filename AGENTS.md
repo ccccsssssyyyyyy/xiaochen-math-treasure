@@ -111,6 +111,7 @@
   - **逐页可信分流与跨页合并**：按页码提取 Markdown，无需直提的页面单独调用 VLM OCR，页标使用 `<!-- MATHBANK_PDF_PAGE:N -->` 合并且不切断跨页题目。
 - **配图关联**：题目拆解默认不含配图。若原题有插图，由用户点击【手动截图】在 PDF 灯箱中框选，向 `/api/ai/manual-crop-pdf` 发送百分比坐标进行精准裁剪。
 - **有界任务与协作取消**：PDF/Word 导入共用 `mathbank.task_manager.TaskManager`，默认最多 2 个工作任务与 4 个排队任务，PDF 最多 80 页、OCR 并发最多 4。前端轮询 `/api/tasks/{task_id}/status`，点击【中止拆分】或按 `ESC` 调用取消；工作线程必须在阶段转换和付费 AI 调用前检查取消信号。`completed` / `error` / `cancelled` 是不可覆盖终态，取消端点必须复核最终状态，不能把刚完成任务误报为已取消。
+- **拆卷步骤可视化（进度条 + 错误定位）**：`TaskManager` 在 `create` 之后通过 `init_steps(task_id, [{"key","label"}...])` 注册有序步骤计划；解析流程在每个阶段起点调用 `step_start(task_id, key)`（会自动把上一个 `active` 步骤置为 `done`），成功末尾调用 `step_complete_all`；异常分支用 `step_error(task_id, key, message)` 标记失败步骤并写入 `failed_step` 与形如「拆解在『步骤名』步骤失败：…」的 `error`。`snapshot` 会把这些步骤随 `status`/`progress`/`error` 一并返回。前端 `import.js` 的 `renderImportSteps` 据此渲染竖向步骤条（`#importStepsContainer`）：进行中步骤品牌色高亮、已完成步骤绿勾、失败时对应步骤红色高亮并附错误提示；LaTeX 同步拆解不走任务系统，无 `steps` 字段，步骤条自动隐藏。新增拆解阶段时必须同步更新 `main.py` 中的 `PDF_DECOMPOSE_STEPS` / `DOCX_DECOMPOSE_STEPS` 步骤计划。
 - **任务资源生命周期**：完成结果保留 1 小时供前端导入；终态过期或因容量淘汰时必须同时删除登记的 PDF 页面、截图等临时资产。手动裁图生成的新资产必须追加到同一任务记录，不得形成长期孤儿文件。
 
 ### 3.9 Word (.docx) 安全保真拆分与公式提取

@@ -139,9 +139,18 @@ def clean_content_for_latex(content: str, q_type: str = "", is_answer: bool = Fa
     """
     if not content:
         return ""
-    
+
     text = content.strip()
-    
+
+    # Normalize invisible / ambiguous whitespace that silently breaks LaTeX:
+    # non-breaking space (U+00A0), ideographic space (U+3000), zero-width chars,
+    # BOM, and stray carriage returns become ordinary ASCII space / newline.
+    text = text.replace('\u00a0', ' ').replace('\u3000', ' ')
+    text = text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # Drop a trailing lone backslash that would otherwise escape the closing quote.
+    text = re.sub(r'\\(?=\s*$)', '', text)
+
     # 如果是选择题，先清洗题干末尾残留的全角/半角供填答空括号，避免与右侧 \paren 生成括号重叠
     if q_type in ["single_choice", "multi_choice"] or r"\begin{choices}" in text or re.search(r'^\s*[-*]?\s*[A-D][\.、\s]', text, re.MULTILINE):
         text = clean_choice_stem_parentheses(text)
@@ -587,6 +596,12 @@ def compile_tex_to_pdf(tex_content: str, image_paths: list = None) -> tuple:
     """
     if image_paths is None:
         image_paths = []
+
+    # 0. Fast pre-check: if xelatex is not installed, report immediately.
+    #    Spawning a missing executable can, on some platforms, leave the
+    #    caller process in a bad state, so avoid subprocess entirely here.
+    if shutil.which("xelatex") is None:
+        return (None, "系统未检测到 xelatex 编译器，请确保已安装 TeX Live / MiKTeX / MacTeX 并加入 PATH。")
 
     # 1. Compute MD5 Cache Key from TeX content & image modification times
     img_signatures = []

@@ -48,6 +48,17 @@ def _first_error_block(log_text: str) -> tuple[str, int | None, str]:
     if not line_match:
         line_match = re.search(r"(?m)^.*?\.tex:(\d+):\s*(.*)$", log)
     if not line_match:
+        # Fallback: capture the last ``! ...`` error block and the following
+        # 30 lines so a usable source_context is still produced.
+        last_err = None
+        for m in re.finditer(r"(?m)^!\s*(.+)$", log):
+            last_err = m
+        if last_err is not None:
+            tail = log[last_err.end():last_err.end() + 2000]
+            tail_line = re.search(r"(?m)^l\.(\d+)\s*(.*)$", tail)
+            if tail_line:
+                return last_err.group(1).strip(), int(tail_line.group(1)), tail_line.group(2).strip()
+            return last_err.group(1).strip(), None, tail.strip()[:1200]
         return error, None, ""
     return error, int(line_match.group(1)), line_match.group(2).strip()
 
@@ -102,7 +113,14 @@ def build_local_latex_diagnostic(log_text: str, tex_content: str) -> dict[str, A
         location = f"生成的 LaTeX 第 {line_number} 行附近"
 
     lower_log = str(log_text or "").lower()
-    if "fontspec error" in lower_log and "cannot be found" in lower_log:
+    if "xelatex" in lower_log and ("未检测到" in str(log_text) or "not found" in lower_log or "no such file" in lower_log):
+        summary = "系统未安装 LaTeX 编译器（xelatex）"
+        cause = "当前运行环境没有检测到 xelatex，因此无法编译试卷 PDF。这是环境问题而非试卷内容错误。"
+        fixes = [
+            "在电脑上安装 TeX Live / MacTeX / MiKTeX，并确保 xelatex 已加入系统 PATH。",
+            "安装完成后刷新本页，重新点击「试卷 PDF 预览」即可正常编译。",
+        ]
+    elif "fontspec error" in lower_log and "cannot be found" in lower_log:
         font_match = re.search(r'The font "([^"]+)" cannot be found', str(log_text), re.IGNORECASE)
         font_name = font_match.group(1) if font_match else "指定字体"
         summary = f"PDF 编译器找不到字体“{font_name}”"
@@ -140,6 +158,8 @@ def build_local_latex_diagnostic(log_text: str, tex_content: str) -> dict[str, A
         fixes = ["检查下方标出的源码位置。", "若是导入公式，请回到对应题目核对公式结构。"]
 
     technical = "\n".join(part for part in (f"! {error}", f"l.{line_number} {line_text}" if line_number else "") if part)
+    full_tail = str(log_text or "").strip().splitlines()[-40:]
+    full_tail_text = "\n".join(full_tail)
     return {
         "summary": summary,
         "cause": cause,
@@ -150,7 +170,7 @@ def build_local_latex_diagnostic(log_text: str, tex_content: str) -> dict[str, A
         "line_number": line_number,
         "question_id": question_id,
         "source_context": context,
-        "technical_error": technical[:1600],
+        "technical_error": (technical + "\n\n--- 编译器完整日志尾部 ---\n" + full_tail_text)[:4000],
         "ai_used": False,
     }
 

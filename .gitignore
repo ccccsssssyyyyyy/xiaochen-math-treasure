@@ -86,3 +86,6 @@ tests/artifacts/*
 *.xdv
 *.bbl
 *.blg
+
+# 12. 忽略个人项目记忆文档（含项目进度，避免误提交到上游公开仓库）
+.workbuddy/
