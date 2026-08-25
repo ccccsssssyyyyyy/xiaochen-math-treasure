@@ -15,6 +15,7 @@
     // Global Store State
     window.PaperStore = {
         cart: [], // Array of { id: number, score: number }
+        specRows: [], // 细目表组卷行 [{knowledge, question_type, difficulty, solve_method, count}]
         meta: {
             title: '2026年高中数学模拟考试试卷',
             subtitle: '',
@@ -234,6 +235,15 @@
                 b.classList.add('hidden');
             }
         });
+        // 题库工作台顶部的"试题篮"提示条：只要购物车非空就显示，方便随时切到组卷
+        const hintBar = document.getElementById('bankCartHintBar');
+        if (hintBar) {
+            if (count > 0) {
+                hintBar.classList.remove('hidden');
+            } else {
+                hintBar.classList.add('hidden');
+            }
+        }
     }
 
     // Workspace View Switcher
@@ -254,9 +264,11 @@
         const bankSec = document.getElementById('bankWorkspaceSection');
         const paperSec = document.getElementById('paperWorkspaceSection');
         const toggleSidebarBtn = document.getElementById('toggleSidebarBtn');
+        const topFilterBar = document.getElementById('bankTopFilterBar');
 
         if (workspaceId === 'paper') {
             if (bankSec) bankSec.classList.add('hidden');
+            if (topFilterBar) topFilterBar.classList.add('hidden');
             if (toggleSidebarBtn) toggleSidebarBtn.classList.add('hidden');
             if (paperSec) {
                 paperSec.classList.remove('hidden');
@@ -264,6 +276,7 @@
             }
         } else {
             if (paperSec) paperSec.classList.add('hidden');
+            if (topFilterBar) topFilterBar.classList.remove('hidden');
             if (toggleSidebarBtn) toggleSidebarBtn.classList.remove('hidden');
             if (bankSec) bankSec.classList.remove('hidden');
         }
@@ -387,6 +400,830 @@
         window.renderPaperCanvas();
     };
 
+    // 组卷体检报告渲染（供弹窗复用）
+    function renderHealthReportInto(container) {
+        if (!container) return;
+        const cart = window.PaperStore.cart;
+        const meta = window.PaperStore.meta;
+        const qmap = window.PaperStore.questionsMap;
+
+        const targetScore = parseInt(meta.total_score_target, 10);
+        const validItems = cart.filter(it => {
+            const q = qmap[it.id];
+            return q && q.content && q.content.trim().length > 0;
+        });
+
+        const totalCount = validItems.length;
+        const totalScore = validItems.reduce((s, it) => s + (parseInt(it.score, 10) || 5), 0);
+
+        // Type distribution
+        const typeLabels = {
+            single_choice: '单选', multi_choice: '多选',
+            fill_in_blank: '填空', detailed_answer: '解答'
+        };
+        const typeCount = { single_choice: 0, multi_choice: 0, fill_in_blank: 0, detailed_answer: 0 };
+        const typeScore = { single_choice: 0, multi_choice: 0, fill_in_blank: 0, detailed_answer: 0 };
+        // Difficulty distribution (normalize known variants)
+        const diffCount = { easy: 0, medium: 0, hard: 0, unknown: 0 };
+        // Knowledge coverage
+        const knowSet = new Set();
+
+        validItems.forEach(it => {
+            const q = qmap[it.id];
+            if (!q) return;
+            const t = q.question_type || 'single_choice';
+            if (typeCount[t] !== undefined) {
+                typeCount[t]++;
+                typeScore[t] += (parseInt(it.score, 10) || 5);
+            }
+            const d = q.difficulty;
+            if (d === 'easy' || d === 'normal' || d === 'easy_error') diffCount.easy++;
+            else if (d === 'medium' || d === 'challenge') diffCount.medium++;
+            else if (d === 'hard' || d === 'qiangji') diffCount.hard++;
+            else diffCount.unknown++;
+            const kl = q.knowledge_list || q.category_knowledge || '';
+            kl.split(/[,，;；\n]+/).forEach(k => {
+                const kk = k.trim();
+                if (kk) knowSet.add(kk);
+            });
+        });
+
+        // Score target check
+        let scoreCheckHtml = '';
+        if (!isNaN(targetScore) && targetScore > 0) {
+            if (totalScore === targetScore) {
+                scoreCheckHtml = `<span class="text-emerald-600 font-semibold"><i class="fa-solid fa-circle-check mr-1"></i>已对齐目标 ${targetScore} 分</span>`;
+            } else {
+                const diff = totalScore - targetScore;
+                scoreCheckHtml = `<span class="text-amber-600 font-semibold"><i class="fa-solid fa-triangle-exclamation mr-1"></i>与目标差 ${diff > 0 ? '+' : ''}${diff} 分（当前 ${totalScore} / 目标 ${targetScore}）</span>`;
+            }
+        } else {
+            scoreCheckHtml = `<span class="text-slate-400">当前总分 ${totalScore} 分（可在下方设置目标分校验）</span>`;
+        }
+
+        // Type distribution chips
+        const typeChip = (key) => {
+            const n = typeCount[key];
+            if (!n) return '';
+            return `<span class="inline-flex items-center px-2 py-0.5 rounded-lg bg-brand-50 text-brand-700 text-[10px] font-semibold border border-brand-200/60 dark:bg-brand-900/40 dark:text-brand-200 dark:border-brand-900">${typeLabels[key]} ${n}题/${typeScore[key]}分</span>`;
+        };
+        const typeDistHtml = (typeCount.single_choice || typeCount.multi_choice || typeCount.fill_in_blank || typeCount.detailed_answer)
+            ? `<div class="flex flex-wrap gap-1.5 mt-1">${typeChip('single_choice')}${typeChip('multi_choice')}${typeChip('fill_in_blank')}${typeChip('detailed_answer')}</div>`
+            : `<div class="text-[10px] text-slate-400 mt-1">暂无题型分布</div>`;
+
+        // Difficulty bar
+        const diffTotal = totalCount || 1;
+        const easyPct = Math.round((diffCount.easy / diffTotal) * 100);
+        const medPct = Math.round((diffCount.medium / diffTotal) * 100);
+        const hardPct = Math.max(0, 100 - easyPct - medPct);
+        const diffBarHtml = totalCount > 0 ? `
+            <div class="mt-1">
+                <div class="flex items-center justify-between text-[10px] text-slate-500 mb-0.5">
+                    <span>难度分布</span>
+                    <span>易 ${easyPct}% · 中 ${medPct}% · 难 ${hardPct}%</span>
+                </div>
+                <div class="w-full h-2 rounded-full bg-slate-200 overflow-hidden flex dark:bg-slate-700">
+                    <div class="bg-emerald-500 h-full" style="width:${easyPct}%"></div>
+                    <div class="bg-amber-500 h-full" style="width:${medPct}%"></div>
+                    <div class="bg-rose-500 h-full" style="width:${hardPct}%"></div>
+                </div>
+            </div>` : '';
+
+        // Knowledge coverage
+        const knowArr = Array.from(knowSet);
+        const knowHtml = knowArr.length > 0
+            ? `<div class="flex flex-wrap gap-1 mt-1">${knowArr.slice(0, 12).map(k => `<span class="inline-flex items-center px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] dark:bg-slate-800 dark:text-slate-300">${escapeHtml(k)}</span>`).join('')}${knowArr.length > 12 ? `<span class="text-[10px] text-slate-400">+${knowArr.length - 12}</span>` : ''}</div>`
+            : `<div class="text-[10px] text-slate-400 mt-1">本卷尚未标注知识点</div>`;
+
+        // Duplicate detection (same source + same leading content)
+        const seenKeys = {};
+        const dupList = [];
+        validItems.forEach(it => {
+            const q = qmap[it.id];
+            if (!q) return;
+            const src = (q.source || '').trim();
+            const head = (q.content || '').replace(/\s+/g, '').slice(0, 40);
+            const key = (src ? src + '|' : '') + head;
+            if (seenKeys[key]) {
+                dupList.push(it.id);
+            } else {
+                seenKeys[key] = true;
+            }
+        });
+        const dupHtml = dupList.length > 0
+            ? `<div class="mt-1 text-[10px] text-rose-600 font-semibold"><i class="fa-solid fa-copy mr-1"></i>疑似重复 ${dupList.length} 道（同源/同题干开头），建议检查</div>`
+            : (totalCount > 0 ? `<div class="mt-1 text-[10px] text-emerald-600"><i class="fa-solid fa-circle-check mr-1"></i>未检出明显重复题</div>` : '');
+
+        container.innerHTML = `
+            <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-1.5 text-sm font-bold text-slate-700 dark:text-slate-200">
+                        <i class="fa-solid fa-stethoscope text-brand-500"></i>
+                        <span>组卷体检报告</span>
+                        <span class="text-slate-400 font-normal">${totalCount} 题</span>
+                    </div>
+                    <div class="flex items-center space-x-1 text-[11px]">
+                        <span class="text-slate-400">目标分</span>
+                        <input id="paperTargetScoreInput" type="number" min="0" max="300" value="${isNaN(targetScore) ? '' : targetScore}" placeholder="目标分" class="w-16 px-1.5 py-0.5 text-[11px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 focus:ring-1 focus:ring-brand-500 focus:outline-none" onchange="window.updatePaperMeta('total_score_target', this.value ? parseInt(this.value,10) : '')" />
+                    </div>
+                </div>
+                <div class="text-sm">${scoreCheckHtml}</div>
+                <div>
+                    <div class="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">题型分布</div>
+                    ${typeDistHtml}
+                </div>
+                <div>
+                    <div class="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">难度分布</div>
+                    ${diffBarHtml || '<div class="text-[10px] text-slate-400">暂无题目</div>'}
+                </div>
+                <div>
+                    <div class="text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">知识点覆盖（${knowArr.length} 个）</div>
+                    ${knowHtml}
+                </div>
+                ${dupHtml || (totalCount === 0 ? '<div class="text-[10px] text-slate-400">尚未选题，无法体检</div>' : '')}
+            </div>
+        `;
+    }
+
+    // 打开组卷体检弹窗
+    window.openHealthModal = function () {
+        let modal = document.getElementById('healthModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+        modal = document.createElement('div');
+        modal.id = 'healthModal';
+        modal.className = 'fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-labelledby', 'healthModalTitle');
+        modal.innerHTML = `
+            <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden font-sans">
+                <div class="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/50">
+                    <div class="flex items-center space-x-2.5">
+                        <div class="w-9 h-9 rounded-2xl bg-brand-500/10 text-brand-600 dark:text-brand-400 flex items-center justify-center font-bold text-lg">
+                            <i class="fa-solid fa-stethoscope"></i>
+                        </div>
+                        <div>
+                            <h3 id="healthModalTitle" class="font-bold text-slate-800 dark:text-slate-100 text-base">组卷体检</h3>
+                            <p class="text-xs text-slate-400">检查总分对齐、题型/难度/知识点分布与重复题</p>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeHealthModal()" aria-label="关闭" class="w-8 h-8 rounded-full hover:bg-slate-200/60 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center justify-center transition-colors">
+                        <i class="fa-solid fa-xmark text-sm"></i>
+                    </button>
+                </div>
+                <div class="p-6 overflow-y-auto flex-1" id="healthModalBody"></div>
+                <div class="px-6 py-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 flex items-center justify-end">
+                    <button onclick="closeHealthModal()" class="px-4 py-1.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 font-medium transition-colors dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">关闭</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        window.MathBankModal.open(modal, { onEscape: window.closeHealthModal });
+        renderHealthReportInto(document.getElementById('healthModalBody'));
+    };
+
+    window.closeHealthModal = function () {
+        const modal = document.getElementById('healthModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+    };
+
+    // 兼容旧调用（保留别名）
+    window.renderPaperHealthCheck = function () {
+        const c = document.getElementById('healthModalBody') || document.getElementById('paperToolTabHealthContent');
+        renderHealthReportInto(c);
+    };
+
+
+    // ---- 试卷模板与预设 (Templates & personal presets) ----
+    const BUILTIN_TEMPLATES = [
+        {
+            key: 'weekly', name: '周测卷', desc: '100分·选择+填空+解答',
+            meta: { paper_type: 'exam', total_score_target: 100, solution_space_default: '7.0' },
+            specRows: [
+                { knowledge: '', question_type: 'single_choice', difficulty: '', solve_method: '', count: 8 },
+                { knowledge: '', question_type: 'fill_in_blank', difficulty: '', solve_method: '', count: 4 },
+                { knowledge: '', question_type: 'detailed_answer', difficulty: '', solve_method: '', count: 4 }
+            ]
+        },
+        {
+            key: 'monthly', name: '月考卷', desc: '150分·高考式',
+            meta: { paper_type: 'exam_19', total_score_target: 150, solution_space_default: '7.0' },
+            specRows: [
+                { knowledge: '', question_type: 'single_choice', difficulty: '', solve_method: '', count: 8 },
+                { knowledge: '', question_type: 'multi_choice', difficulty: '', solve_method: '', count: 4 },
+                { knowledge: '', question_type: 'fill_in_blank', difficulty: '', solve_method: '', count: 4 },
+                { knowledge: '', question_type: 'detailed_answer', difficulty: '', solve_method: '', count: 6 }
+            ]
+        },
+        {
+            key: 'classroom', name: '随堂练', desc: '50分·纯解答',
+            meta: { paper_type: 'quiz', total_score_target: 50, solution_space_default: '7.0' },
+            specRows: [
+                { knowledge: '', question_type: 'detailed_answer', difficulty: '', solve_method: '', count: 4 }
+            ]
+        }
+    ];
+
+    function applyTemplateConfig(tpl, loadSpec) {
+        // 仅覆盖卷面参数（版式/总分/留白），不动已选试题篮
+        window.PaperStore.meta.paper_type = tpl.meta.paper_type;
+        window.PaperStore.meta.total_score_target = tpl.meta.total_score_target;
+        window.PaperStore.meta.solution_space_default = tpl.meta.solution_space_default;
+        if (loadSpec && Array.isArray(tpl.specRows) && tpl.specRows.length > 0) {
+            // 仅把细目表载入工作区，供用户在细目表弹窗里查看/修改/手动抽题
+            window.PaperStore.specRows = JSON.parse(JSON.stringify(tpl.specRows));
+        }
+        saveMetaToStorage();
+        saveCartToStorage();
+        window.renderPaperCanvas();
+    }
+
+    window.renderPaperTemplatePanel = function () {
+        window.openTemplateModal();
+    };
+
+    // ---- 模板弹窗 ----
+    window.openTemplateModal = function () {
+        let modal = document.getElementById('templateModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+        modal = document.createElement('div');
+        modal.id = 'templateModal';
+        modal.className = 'fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-labelledby', 'templateModalTitle');
+        modal.innerHTML = `
+            <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden font-sans">
+                <div class="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/50">
+                    <div class="flex items-center space-x-2.5">
+                        <div class="w-9 h-9 rounded-2xl bg-brand-500/10 text-brand-600 dark:text-brand-400 flex items-center justify-center font-bold text-lg">
+                            <i class="fa-solid fa-layer-group"></i>
+                        </div>
+                        <div>
+                            <h3 id="templateModalTitle" class="font-bold text-slate-800 dark:text-slate-100 text-base">选择试卷模板</h3>
+                            <p class="text-xs text-slate-400">套用卷面参数（版式/总分/留白），细目表可选加载</p>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeTemplateModal()" aria-label="关闭" class="w-8 h-8 rounded-full hover:bg-slate-200/60 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center justify-center transition-colors">
+                        <i class="fa-solid fa-xmark text-sm"></i>
+                    </button>
+                </div>
+                <div class="p-6 overflow-y-auto flex-1 space-y-5" id="templateModalBody"></div>
+                <div class="px-6 py-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 flex items-center justify-end gap-3">
+                    <button onclick="window.openTemplateEditor()" class="px-4 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 active:scale-95 transition-all flex items-center space-x-1.5">
+                        <i class="fa-solid fa-plus"></i><span>新增预设</span>
+                    </button>
+                    <button onclick="closeTemplateModal()" class="px-4 py-1.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 font-medium transition-colors dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">关闭</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        window.MathBankModal.open(modal, { onEscape: window.closeTemplateModal });
+        window.renderTemplateList();
+    };
+
+    window.closeTemplateModal = function () {
+        const modal = document.getElementById('templateModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+    };
+
+    // 渲染模板列表（内置 + 个人）
+    window.renderTemplateList = function () {
+        const body = document.getElementById('templateModalBody');
+        if (!body) return;
+        const builtinHtml = BUILTIN_TEMPLATES.map(t => `
+            <div class="flex items-center justify-between bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 py-2.5">
+                <div class="min-w-0">
+                    <div class="text-xs font-bold text-slate-700 dark:text-slate-200">${escapeHtml(t.name)}</div>
+                    <div class="text-[10px] text-slate-400">${escapeHtml(t.desc)}</div>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                    <button onclick="window.applyTemplateFlow('builtin','${t.key}')" class="px-2.5 py-1 rounded-lg text-[10px] font-semibold bg-brand-600 text-white hover:bg-brand-700 active:scale-95 transition-all">应用</button>
+                    <button onclick="window.openTemplateEditor('builtin','${t.key}')" class="px-2.5 py-1 rounded-lg text-[10px] font-semibold bg-white text-slate-600 border border-slate-200 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700" title="基于该模板编辑">编辑</button>
+                </div>
+            </div>
+        `).join('');
+
+        body.innerHTML = `
+            <div>
+                <div class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-2">内置模板</div>
+                <div class="space-y-2">${builtinHtml}</div>
+            </div>
+            <div>
+                <div class="text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-2">个人预设</div>
+                <div id="personalTemplateList" class="space-y-2">
+                    <div class="text-[10px] text-slate-400">加载中…</div>
+                </div>
+            </div>
+        `;
+        window.loadPersonalTemplates();
+    };
+
+    // 应用模板流程：先展示确认（含细目表勾选）
+    window.applyTemplateFlow = async function (kind, keyOrId) {
+        let tpl = null;
+        if (kind === 'builtin') {
+            tpl = BUILTIN_TEMPLATES.find(t => t.key === keyOrId);
+        } else {
+            try {
+                const res = await fetch('/api/paper/templates');
+                const data = await res.json();
+                const list = data.data || [];
+                const raw = list.find(t => t.id === keyOrId);
+                if (!raw) return;
+                tpl = {
+                    name: raw.name,
+                    meta: { paper_type: raw.paper_type, total_score_target: raw.total_score_target, solution_space_default: '7.0' },
+                    specRows: raw.spec_rows && raw.spec_rows.length ? raw.spec_rows : []
+                };
+            } catch (e) { return; }
+        }
+        if (!tpl) return;
+
+        const body = document.getElementById('templateModalBody');
+        if (!body) return;
+        const hasSpec = Array.isArray(tpl.specRows) && tpl.specRows.length > 0;
+        body.innerHTML = `
+            <div class="space-y-4">
+                <div class="flex items-center gap-2">
+                    <button onclick="window.renderTemplateList()" class="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"><i class="fa-solid fa-arrow-left mr-1"></i>返回</button>
+                    <div class="text-sm font-bold text-slate-700 dark:text-slate-200">应用「${escapeHtml(tpl.name)}」</div>
+                </div>
+                <div class="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3 space-y-1">
+                    <div>版式：${tpl.meta.paper_type === 'exam_19' ? '19题高考卷(含答题卡)' : tpl.meta.paper_type === 'quiz' ? '日常小练' : '常规试卷'}</div>
+                    <div>目标总分：${escapeHtml(String(tpl.meta.total_score_target || ''))} 分</div>
+                    <div>默认留白：${parseFloat(tpl.meta.solution_space_default || '7.0') === 0 ? '不留白' : parseFloat(tpl.meta.solution_space_default || '7.0') + ' cm'}</div>
+                    ${hasSpec ? `<div>细目表：含 ${tpl.specRows.length} 行条件</div>` : '<div>细目表：无</div>'}
+                </div>
+                ${hasSpec ? `
+                <label class="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-300 bg-brand-50/50 dark:bg-brand-900/30 rounded-xl p-3 cursor-pointer">
+                    <input type="checkbox" id="tmplLoadSpecChk" class="mt-0.5 w-4 h-4 rounded accent-brand-600" />
+                    <span>同时加载模板细目表（仅载入细目表弹窗，不会自动抽题；你可在细目表里改知识点/难度后再手动抽题）</span>
+                </label>
+                ` : ''}
+                <div class="flex items-center justify-end gap-3 pt-1">
+                    <button onclick="window.renderTemplateList()" class="px-4 py-1.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 font-medium dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">取消</button>
+                    <button onclick="window.confirmApplyTemplate(${hasSpec ? 'true' : 'false'})" class="px-4 py-1.5 rounded-xl bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all">确认应用</button>
+                </div>
+                <div id="tmplApplyMsg" class="text-[10px] text-slate-500"></div>
+            </div>
+        `;
+        // 暂存待应用模板
+        window.__pendingTemplate = tpl;
+    };
+
+    window.confirmApplyTemplate = function (hasSpec) {
+        const tpl = window.__pendingTemplate;
+        if (!tpl) return;
+        const loadSpec = hasSpec ? (document.getElementById('tmplLoadSpecChk') || {}).checked : false;
+        applyTemplateConfig(tpl, loadSpec);
+        if (window.showToast) window.showToast(`已套用「${tpl.name}」模板（${loadSpec ? '已载入细目表' : '仅卷面参数'}）`, 'success');
+        window.closeTemplateModal();
+    };
+
+    window.applyBuiltinTemplate = function (key) {
+        window.applyTemplateFlow('builtin', key);
+    };
+
+    window.saveCurrentAsTemplate = async function () {
+        const name = prompt('请输入预设名称：', (window.PaperStore.meta.title || '我的预设'));
+        if (!name) return;
+        try {
+            const res = await fetch('/api/paper/save-template', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: name,
+                    meta: window.PaperStore.meta,
+                    spec_rows: window.PaperStore.specRows || []
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                if (window.showToast) window.showToast('预设已保存', 'success');
+                window.loadPersonalTemplates();
+            } else {
+                if (window.showToast) window.showToast(data.message || '保存失败', 'warning');
+            }
+        } catch (e) {
+            if (window.showToast) window.showToast('保存请求失败', 'warning');
+        }
+    };
+
+    // 模板编辑器（新增 / 编辑内置 / 编辑个人）
+    window.openTemplateEditor = function (kind, keyOrId) {
+        let editing = null;
+        if (kind === 'builtin') {
+            const t = BUILTIN_TEMPLATES.find(x => x.key === keyOrId);
+            if (t) editing = { name: t.name, meta: Object.assign({}, t.meta), specRows: JSON.parse(JSON.stringify(t.specRows)) };
+        } else if (kind === 'personal') {
+            // personal 编辑器在列表加载后绑定，这里通过全局缓存取
+            editing = window.__personalTemplateCache ? window.__personalTemplateCache.find(t => t.id === keyOrId) : null;
+            if (editing) {
+                editing = { name: editing.name, meta: { paper_type: editing.paper_type, total_score_target: editing.total_score_target, solution_space_default: '7.0' }, specRows: JSON.parse(JSON.stringify(editing.spec_rows || [])) };
+            }
+        }
+
+        const body = document.getElementById('templateModalBody');
+        if (!body) return;
+        const ed = editing || { name: '', meta: { paper_type: 'exam', total_score_target: 100, solution_space_default: '7.0' }, specRows: [] };
+        if (!ed.specRows || !ed.specRows.length) ed.specRows = [{ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 }];
+
+        const ptypeOpts = [
+            { v: 'exam_19', l: '19题高考卷(含答题卡)' },
+            { v: 'exam', l: '常规试卷' },
+            { v: 'quiz', l: '日常小练' }
+        ].map(o => `<option value="${o.v}" ${o.v === ed.meta.paper_type ? 'selected' : ''}>${o.l}</option>`).join('');
+        const spaceOpts = [
+            { v: '0.0', l: '不留白' }, { v: '3.0', l: '紧凑 3cm' }, { v: '7.0', l: '标准 7cm' }
+        ].map(o => `<option value="${o.v}" ${parseFloat(o.v) === parseFloat(ed.meta.solution_space_default || '7.0') ? 'selected' : ''}>${o.l}</option>`).join('');
+
+        body.innerHTML = `
+            <div class="space-y-4" id="tmplEditorWrap">
+                <div class="flex items-center gap-2">
+                    <button onclick="window.renderTemplateList()" class="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"><i class="fa-solid fa-arrow-left mr-1"></i>返回</button>
+                    <div class="text-sm font-bold text-slate-700 dark:text-slate-200">${editing ? '编辑模板' : '新增预设'}</div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-[11px] font-semibold text-slate-500 mb-1">模板名称</label>
+                        <input id="tmplEdName" value="${escapeHtml(ed.name)}" class="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" placeholder="如：高一函数周测" />
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-semibold text-slate-500 mb-1">试卷版式</label>
+                        <select id="tmplEdType" class="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">${ptypeOpts}</select>
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-semibold text-slate-500 mb-1">目标总分</label>
+                        <input id="tmplEdScore" type="number" min="0" max="300" value="${escapeHtml(String(ed.meta.total_score_target || ''))}" class="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-semibold text-slate-500 mb-1">默认留白</label>
+                        <select id="tmplEdSpace" class="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">${spaceOpts}</select>
+                    </div>
+                </div>
+                <div>
+                    <div class="flex items-center justify-between mb-2">
+                        <label class="text-[11px] font-semibold text-slate-500">细目表（可选，应用时不自动抽题）</label>
+                        <button onclick="window.tmplEditorAddRow()" class="text-[10px] px-2 py-0.5 rounded-lg bg-brand-50 text-brand-700 font-semibold border border-brand-200/60 hover:bg-brand-100 dark:bg-brand-900/40 dark:text-brand-200 dark:border-brand-900">+ 加一行</button>
+                    </div>
+                    <div id="tmplEdSpecRows" class="space-y-1.5"></div>
+                </div>
+                <div class="flex items-center justify-end gap-3 pt-1">
+                    <button onclick="window.renderTemplateList()" class="px-4 py-1.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 font-medium dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">取消</button>
+                    <button onclick="window.saveTemplateEditor()" class="px-4 py-1.5 rounded-xl bg-emerald-600 text-white font-semibold hover:bg-emerald-700 active:scale-95 transition-all">保存预设</button>
+                </div>
+                <div id="tmplEdMsg" class="text-[10px] text-slate-500"></div>
+            </div>
+        `;
+        // 暂存编辑器草稿
+        window.__tmplEditorDraft = ed;
+        window.renderTmplEditorRows();
+    };
+
+    window.tmplEditorAddRow = function () {
+        if (!window.__tmplEditorDraft) window.__tmplEditorDraft = { specRows: [] };
+        if (!window.__tmplEditorDraft.specRows) window.__tmplEditorDraft.specRows = [];
+        window.__tmplEditorDraft.specRows.push({ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 });
+        window.renderTmplEditorRows();
+    };
+
+    function renderTmplEditorRows() {
+        const wrap = document.getElementById('tmplEdSpecRows');
+        if (!wrap || !window.__tmplEditorDraft) return;
+        const rows = window.__tmplEditorDraft.specRows;
+        const typeOpts = SPEC_QTYPES;
+        const diffOpts = SPEC_DIFFS;
+        wrap.innerHTML = rows.map((r, i) => `
+            <div class="flex flex-wrap items-center gap-1.5" data-te-row="${i}">
+                <input data-te="knowledge" data-idx="${i}" value="${escapeHtml(r.knowledge)}" placeholder="考点(可空)" class="w-24 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+                ${buildSpecSelect(typeOpts, r.question_type, 'te-type')}
+                ${buildSpecSelect(diffOpts, r.difficulty, 'te-diff')}
+                <input data-te="solve_method" data-idx="${i}" value="${escapeHtml(r.solve_method)}" placeholder="解法(可空)" class="w-20 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+                <input data-te="count" data-idx="${i}" type="number" min="1" max="20" value="${r.count}" class="w-12 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" title="题量" />
+                <button onclick="window.tmplEditorRemoveRow(${i})" class="px-1.5 py-1 text-[10px] rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40"><i class="fa-solid fa-trash-can"></i></button>
+            </div>
+        `).join('');
+        wrap.querySelectorAll('[data-te]').forEach(inp => {
+            inp.addEventListener('input', (e) => {
+                const idx = parseInt(e.target.dataset.idx, 10);
+                const key = e.target.dataset.te;
+                if (window.__tmplEditorDraft.specRows[idx]) window.__tmplEditorDraft.specRows[idx][key] = e.target.value;
+            });
+        });
+        wrap.querySelectorAll('.te-type, .te-diff').forEach(sel => {
+            sel.addEventListener('change', (e) => {
+                const idx = Array.from(wrap.querySelectorAll('[data-te-row]')).indexOf(sel.closest('[data-te-row]'));
+                const key = sel.classList.contains('te-type') ? 'question_type' : 'difficulty';
+                if (window.__tmplEditorDraft.specRows[idx]) window.__tmplEditorDraft.specRows[idx][key] = sel.value;
+            });
+        });
+    }
+
+    window.tmplEditorRemoveRow = function (i) {
+        if (!window.__tmplEditorDraft || !window.__tmplEditorDraft.specRows) return;
+        window.__tmplEditorDraft.specRows.splice(i, 1);
+        if (window.__tmplEditorDraft.specRows.length === 0) {
+            window.__tmplEditorDraft.specRows.push({ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 });
+        }
+        window.renderTmplEditorRows();
+    };
+
+    window.saveTemplateEditor = async function () {
+        const draft = window.__tmplEditorDraft;
+        if (!draft) return;
+        const name = (document.getElementById('tmplEdName') || {}).value || '';
+        const paper_type = (document.getElementById('tmplEdType') || {}).value || 'exam';
+        const total_score_target = parseInt((document.getElementById('tmplEdScore') || {}).value || '0', 10) || 0;
+        const solution_space_default = (document.getElementById('tmplEdSpace') || {}).value || '7.0';
+        if (!name.trim()) {
+            const msg = document.getElementById('tmplEdMsg');
+            if (msg) msg.innerHTML = '<span class="text-rose-600">请填写模板名称</span>';
+            return;
+        }
+        const spec_rows = (draft.specRows || []).filter(r => r && (r.knowledge.trim() || r.question_type || r.difficulty || r.solve_method.trim() || r.count))
+            .map(r => ({ knowledge: r.knowledge, question_type: r.question_type, difficulty: r.difficulty, solve_method: r.solve_method, count: parseInt(r.count, 10) || 1 }));
+        try {
+            const res = await fetch('/api/paper/save-template', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: name,
+                    meta: { paper_type, total_score_target, solution_space_default },
+                    spec_rows: spec_rows
+                })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                if (window.showToast) window.showToast('预设已保存', 'success');
+                window.renderTemplateList();
+            } else {
+                const msg = document.getElementById('tmplEdMsg');
+                if (msg) msg.innerHTML = `<span class="text-rose-600">${escapeHtml(data.message || '保存失败')}</span>`;
+            }
+        } catch (e) {
+            const msg = document.getElementById('tmplEdMsg');
+            if (msg) msg.innerHTML = '<span class="text-rose-600">保存请求失败</span>';
+        }
+    };
+
+    window.loadPersonalTemplates = async function () {
+        const listEl = document.getElementById('personalTemplateList');
+        if (!listEl) return;
+        try {
+            const res = await fetch('/api/paper/templates');
+            const data = await res.json();
+            const tpls = data.data || [];
+            window.__personalTemplateCache = tpls;
+            if (tpls.length === 0) {
+                listEl.innerHTML = '<div class="text-[10px] text-slate-400">暂无个人预设，点右下「新增预设」创建，或套用内置模板后「存为预设」。</div>';
+                return;
+            }
+            listEl.innerHTML = tpls.map(t => `
+                <div class="flex items-center justify-between bg-slate-50 dark:bg-slate-800/60 rounded-xl px-3 py-2.5">
+                    <button onclick="window.applyTemplateFlow('personal', ${t.id})" class="flex-1 text-left min-w-0">
+                        <div class="text-xs font-bold text-slate-700 dark:text-slate-200 truncate">${escapeHtml(t.name)}</div>
+                        <div class="text-[10px] text-slate-400">${escapeHtml(t.paper_type === 'exam_19' ? '高考卷' : t.paper_type === 'quiz' ? '小练' : '常规')} · ${escapeHtml(String(t.total_score_target || ''))}分${t.spec_rows && t.spec_rows.length ? ' · 含细目表' : ''}</div>
+                    </button>
+                    <div class="flex items-center gap-1.5 shrink-0 ml-2">
+                        <button onclick="window.openTemplateEditor('personal', ${t.id})" class="px-2 py-1 rounded-lg text-[10px] font-semibold bg-white text-slate-600 border border-slate-200 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700" title="编辑">编辑</button>
+                        <button onclick="window.deletePersonalTemplate(${t.id})" class="px-2 py-1 rounded-lg text-[10px] font-semibold text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40" title="删除">删除</button>
+                    </div>
+                </div>
+            `).join('');
+        } catch (e) {
+            listEl.innerHTML = '<div class="text-[10px] text-rose-500">加载预设失败</div>';
+        }
+    };
+
+    window.applyPersonalTemplate = async function (id) {
+        window.applyTemplateFlow('personal', id);
+    };
+
+    window.deletePersonalTemplate = async function (id) {
+        if (!confirm('确定删除该预设？')) return;
+        try {
+            const res = await fetch(`/api/paper/template/${id}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                window.loadPersonalTemplates();
+                if (window.showToast) window.showToast('预设已删除', 'info');
+            }
+        } catch (e) { }
+    };
+
+    // ---- 细目表组卷 (Spec-based batch selection) ----
+    const SPEC_QTYPES = [
+        { value: '', label: '不限题型' },
+        { value: 'single_choice', label: '单选' },
+        { value: 'multi_choice', label: '多选' },
+        { value: 'fill_in_blank', label: '填空' },
+        { value: 'detailed_answer', label: '解答' }
+    ];
+    const SPEC_DIFFS = [
+        { value: '', label: '不限难度' },
+        { value: 'easy', label: '普通题' },
+        { value: 'easy_error', label: '易错题' },
+        { value: 'medium', label: '挑战题' },
+        { value: 'hard', label: '强基题' }
+    ];
+
+    function buildSpecSelect(options, selectedVal, cls) {
+        return `<select class="${cls} px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 focus:ring-1 focus:ring-brand-500 focus:outline-none">
+            ${options.map(o => `<option value="${o.value}" ${o.value === selectedVal ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>`;
+    }
+
+    // 渲染细目表行到指定容器（供弹窗复用）
+    function renderSpecRowsInto(container) {
+        if (!window.PaperStore.specRows) {
+            window.PaperStore.specRows = [{ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 }];
+        }
+        const rows = window.PaperStore.specRows;
+        const typeOpts = SPEC_QTYPES;
+        const diffOpts = SPEC_DIFFS;
+
+        const rowHtml = rows.map((r, i) => `
+            <div class="flex flex-wrap items-center gap-1.5 mb-1.5" data-spec-row="${i}">
+                <input data-spec="knowledge" data-idx="${i}" value="${escapeHtml(r.knowledge)}" placeholder="考点(可空/多值)" list="specKnowledgeList" class="spec-input w-24 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 focus:ring-1 focus:ring-brand-500 focus:outline-none" />
+                ${buildSpecSelect(typeOpts, r.question_type, 'spec-type')}
+                ${buildSpecSelect(diffOpts, r.difficulty, 'spec-diff')}
+                <input data-spec="solve_method" data-idx="${i}" value="${escapeHtml(r.solve_method)}" placeholder="解法(可空)" class="spec-input w-20 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 focus:ring-1 focus:ring-brand-500 focus:outline-none" />
+                <input data-spec="count" data-idx="${i}" type="number" min="1" max="20" value="${r.count}" class="spec-input w-12 px-1.5 py-1 text-[10px] rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 focus:ring-1 focus:ring-brand-500 focus:outline-none" title="题量" />
+                <button onclick="window.removeSpecRow(${i})" class="px-1.5 py-1 text-[10px] rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40" title="删除该行">
+                    <i class="fa-solid fa-trash-can"></i>
+                </button>
+            </div>
+        `).join('');
+
+        const body = `
+            <datalist id="specKnowledgeList"></datalist>
+            <div class="text-[10px] text-slate-400 -mt-1 mb-2">考点/解法支持多值（逗号分隔，OR 匹配）</div>
+            <div id="specRowsContainer">${rowHtml}</div>
+        `;
+        container.innerHTML = body;
+
+        // bind inputs
+        container.querySelectorAll('.spec-input').forEach(inp => {
+            inp.addEventListener('input', (e) => {
+                const idx = parseInt(e.target.dataset.idx, 10);
+                const key = e.target.dataset.spec;
+                if (window.PaperStore.specRows[idx]) {
+                    window.PaperStore.specRows[idx][key] = e.target.value;
+                }
+            });
+        });
+        container.querySelectorAll('.spec-type, .spec-diff').forEach(sel => {
+            sel.addEventListener('change', (e) => {
+                const idx = Array.from(container.querySelectorAll('[data-spec-row]')).indexOf(sel.closest('[data-spec-row]'));
+                const key = sel.classList.contains('spec-type') ? 'question_type' : 'difficulty';
+                if (window.PaperStore.specRows[idx]) {
+                    window.PaperStore.specRows[idx][key] = sel.value;
+                }
+            });
+        });
+
+        window.loadSpecTagOptions();
+    }
+
+    // 打开细目表组卷弹窗
+    window.openSpecModal = function () {
+        let modal = document.getElementById('specModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+        modal = document.createElement('div');
+        modal.id = 'specModal';
+        modal.className = 'fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-labelledby', 'specModalTitle');
+        modal.innerHTML = `
+            <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden font-sans">
+                <div class="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-slate-800/50">
+                    <div class="flex items-center space-x-2.5">
+                        <div class="w-9 h-9 rounded-2xl bg-brand-500/10 text-brand-600 dark:text-brand-400 flex items-center justify-center font-bold text-lg">
+                            <i class="fa-solid fa-table-list"></i>
+                        </div>
+                        <div>
+                            <h3 id="specModalTitle" class="font-bold text-slate-800 dark:text-slate-100 text-base">细目表组卷</h3>
+                            <p class="text-xs text-slate-400">按题型/难度/知识点/解法设定每组抽题条件，一键抽取入篮</p>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeSpecModal()" aria-label="关闭" class="w-8 h-8 rounded-full hover:bg-slate-200/60 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center justify-center transition-colors">
+                        <i class="fa-solid fa-xmark text-sm"></i>
+                    </button>
+                </div>
+                <div class="p-6 overflow-y-auto flex-1" id="specModalBody"></div>
+                <div class="px-6 py-3.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 flex items-center justify-between gap-3">
+                    <button onclick="window.addSpecRow()" class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-brand-50 text-brand-700 border border-brand-200/60 hover:bg-brand-100 dark:bg-brand-900/40 dark:text-brand-200 dark:border-brand-900 flex items-center space-x-1">
+                        <i class="fa-solid fa-plus"></i><span>加一行</span>
+                    </button>
+                    <div class="flex items-center gap-3">
+                        <span id="specResultMsg" class="text-[10px] text-slate-500"></span>
+                        <button onclick="window.runSpecBatchSelect()" class="px-4 py-1.5 rounded-xl text-xs font-semibold bg-brand-600 text-white shadow-sm hover:bg-brand-700 active:scale-95 transition-all flex items-center space-x-1.5">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>按细目表抽题入篮</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        window.MathBankModal.open(modal, { onEscape: window.closeSpecModal });
+        renderSpecRowsInto(document.getElementById('specModalBody'));
+    };
+
+    window.closeSpecModal = function () {
+        const modal = document.getElementById('specModal');
+        if (modal) {
+            window.MathBankModal.close(modal);
+            modal.remove();
+        }
+    };
+
+
+    window.addSpecRow = function () {
+        if (!window.PaperStore.specRows) window.PaperStore.specRows = [];
+        window.PaperStore.specRows.push({ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 });
+        const body = document.getElementById('specModalBody');
+        if (body) renderSpecRowsInto(body);
+    };
+
+    window.removeSpecRow = function (i) {
+        if (!window.PaperStore.specRows) return;
+        window.PaperStore.specRows.splice(i, 1);
+        if (window.PaperStore.specRows.length === 0) {
+            window.PaperStore.specRows.push({ knowledge: '', question_type: '', difficulty: '', solve_method: '', count: 1 });
+        }
+        const body = document.getElementById('specModalBody');
+        if (body) renderSpecRowsInto(body);
+    };
+
+    window.loadSpecTagOptions = async function () {
+        const dl = document.getElementById('specKnowledgeList');
+        if (!dl) return;
+        try {
+            const res = await fetch('/api/tag-options');
+            const data = await res.json();
+            const knows = (data.knowledge_list || []).map(k => `<option value="${escapeHtml(k)}">`).join('');
+            const solves = (data.solve_method || []).map(s => `<option value="${escapeHtml(s)}">`).join('');
+            dl.innerHTML = knows + solves;
+        } catch (e) { }
+    };
+
+    window.runSpecBatchSelect = async function () {
+        const rows = (window.PaperStore.specRows || []).filter(r => r && (r.knowledge.trim() || r.question_type || r.difficulty || r.solve_method.trim()));
+        if (rows.length === 0) {
+            if (window.showToast) window.showToast('请至少填写一行考点或题型', 'warning');
+            return;
+        }
+        const msgEl = document.getElementById('specResultMsg');
+        if (msgEl) msgEl.innerHTML = '<span class="text-brand-600"><i class="fa-solid fa-spinner fa-spin mr-1"></i>正在按细目表抽题…</span>';
+        try {
+            const res = await fetch('/api/paper/batch-select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rows: rows })
+            });
+            const data = await res.json();
+            if (data.status !== 'success') {
+                if (msgEl) msgEl.innerHTML = `<span class="text-rose-600">${escapeHtml(data.message || '抽题失败')}</span>`;
+                return;
+            }
+            // 回填 cart（已去重，避免与现有 cart 重复）
+            let added = 0;
+            (data.questions || []).forEach(q => {
+                if (!window.isInCart(q.id)) {
+                    window.addToCart(q.id, q.question_type === 'detailed_answer' ? 12 : 5);
+                    added++;
+                }
+            });
+            const gapTxt = data.total_gap > 0
+                ? `<span class="text-amber-600 font-semibold">缺口 ${data.total_gap} 道</span>（已选 ${data.selected_count}/${data.total_need}）`
+                : `<span class="text-emerald-600 font-semibold">已凑齐 ${data.selected_count}/${data.total_need} 道</span>`;
+            if (msgEl) msgEl.innerHTML = `<span class="text-slate-600">${gapTxt}。新增入篮 ${added} 道。可点右侧「组卷体检」查看分布。</span>`;
+            if (window.showToast) window.showToast(`细目表抽题完成：入篮 ${added} 道，缺口 ${data.total_gap} 道`, data.total_gap > 0 ? 'warning' : 'success');
+            window.renderPaperCanvas();
+        } catch (e) {
+            if (msgEl) msgEl.innerHTML = `<span class="text-rose-600">请求失败：${escapeHtml(e.message)}</span>`;
+        }
+    };
+
+
+
     // Render Part 2: Config & 3-Level Cascade Filter Section
     function renderPart2FilterSection() {
         const meta = window.PaperStore.meta;
@@ -454,30 +1291,7 @@
 
         container.innerHTML = `
             <div class="space-y-2 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-3 rounded-2xl shadow-sm">
-                <!-- Top Row: Paper Metadata -->
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                    <div>
-                        <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-0.5">主标题</label>
-                        <input type="text" id="paperMetaTitle" value="${escapeHtml(meta.title)}" 
-                            oninput="updatePaperMeta('title', this.value)" onchange="updatePaperMeta('title', this.value)"
-                            class="glass-input w-full px-2 py-1 text-xs rounded-lg" placeholder="如：2026年高中数学期末考试">
-                    </div>
-                    <div>
-                        <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-0.5">副标题 / 备注</label>
-                        <input type="text" id="paperMetaSubtitle" value="${escapeHtml(meta.subtitle)}" 
-                            oninput="updatePaperMeta('subtitle', this.value)" onchange="updatePaperMeta('subtitle', this.value)"
-                            class="glass-input w-full px-2 py-1 text-xs rounded-lg" placeholder="可选副标题/说明...">
-                    </div>
-                    <div>
-                        <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-0.5">试卷类型预设</label>
-                        <select id="paperMetaType" onchange="updatePaperMeta('paper_type', this.value)"
-                            class="glass-select w-full px-2 py-1 text-xs rounded-lg">
-                            <option value="exam_19" ${meta.paper_type === 'exam_19' ? 'selected' : ''}>19题高考卷 (含答题卡)</option>
-                            <option value="exam" ${meta.paper_type === 'exam' ? 'selected' : ''}>常规试卷</option>
-                            <option value="quiz" ${meta.paper_type === 'quiz' ? 'selected' : ''}>日常小练</option>
-                        </select>
-                    </div>
-                </div>
+                <!-- 主标题/副标题/试卷类型：已迁移到右侧试卷预览区直接点击编辑（见 canvas-meta-title / canvas-meta-subtitle），左侧不再重复。 -->
 
                 <!-- Middle Row 1: 3-Level Cascade Curriculum Dropdowns (学段 -> 章节 -> 小节/知识点) -->
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800/60">
@@ -543,6 +1357,16 @@
                     <button onclick="triggerAiPaperSelect()" class="glass-btn-primary h-[28px] px-3 rounded-lg text-[10px] font-semibold flex items-center space-x-1 shrink-0">
                         <span>智能抽取</span>
                     </button>
+                    <button onclick="window.openSpecModal()" class="h-[28px] px-2.5 rounded-lg text-[10px] font-semibold border border-brand-200/80 bg-white text-brand-700 hover:bg-brand-50 transition-all flex items-center space-x-1 shrink-0 dark:bg-slate-800 dark:border-brand-900 dark:text-brand-200 dark:hover:bg-brand-900/40" title="按细目表（题型/难度/知识点）批量抽题">
+                        <i class="fa-solid fa-table-list text-[10px]"></i>
+                        <span>细目表组卷</span>
+                    </button>
+                    <select id="paperAiFreshPriority" title="避重策略：优先未用过(鲜活) 或 优先高频旧题"
+                        class="h-[28px] px-1.5 rounded-lg text-[10px] border border-brand-200/80 bg-brand-50/60 text-brand-900 font-semibold focus:ring-1 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200 shrink-0">
+                        <option value="">避重:自动</option>
+                        <option value="true">优先未用过</option>
+                        <option value="false">优先旧题</option>
+                    </select>
                 </div>
             </div>
         `;
@@ -590,10 +1414,6 @@
                     if (node.innerText.trim() === '') node.innerHTML = '';
                 }
             });
-            const leftInput = document.getElementById('paperMetaTitle');
-            if (leftInput && leftInput !== document.activeElement && leftInput.value !== value) {
-                leftInput.value = value;
-            }
         } else if (key === 'subtitle') {
             const nodes = document.querySelectorAll('.canvas-meta-subtitle');
             nodes.forEach(node => {
@@ -607,10 +1427,6 @@
                     if (node.innerText.trim() === '') node.innerHTML = '';
                 }
             });
-            const leftInput = document.getElementById('paperMetaSubtitle');
-            if (leftInput && leftInput !== document.activeElement && leftInput.value !== value) {
-                leftInput.value = value;
-            }
         }
     }
 
@@ -660,8 +1476,11 @@
                     compulsory: f.compulsory,
                     chapter: f.chapter,
                     knowledge: f.knowledge,
+                    knowledge_list: f.knowledge_list || f.knowledge || '',
+                    solve_method: f.solve_method || '',
                     question_type: f.question_type,
-                    difficulty: f.difficulty
+                    difficulty: f.difficulty,
+                    fresh_priority: (document.getElementById('paperAiFreshPriority') || {}).value || ''
                 })
             });
             const data = await res.json();
@@ -674,11 +1493,6 @@
                         addedCount++;
                     }
                 });
-                if (data.ai_analysis) {
-                    window.PaperStore.meta.ai_analysis = data.ai_analysis;
-                    window.PaperStore.meta.ai_model_used = data.model_used || '大模型';
-                    saveMetaToStorage();
-                }
                 saveCartToStorage();
                 renderPart3QuestionStream();
                 window.renderPaperCanvas();
@@ -697,13 +1511,6 @@
                 btn.innerHTML = origBtnHtml;
             }
         }
-    };
-
-    window.clearAiAnalysis = function () {
-        delete window.PaperStore.meta.ai_analysis;
-        delete window.PaperStore.meta.ai_model_used;
-        saveMetaToStorage();
-        window.renderPaperCanvas();
     };
 
     // Switch Part 3 Tab ('all' or 'selected')
@@ -994,28 +1801,7 @@
         const medPct = totalCount > 0 ? Math.round((medCount / totalCount) * 100) : 0;
         const hardPct = totalCount > 0 ? Math.max(0, 100 - easyPct - medPct) : 0;
 
-        let aiAnalysisBanner = '';
-        if (meta.ai_analysis) {
-            aiAnalysisBanner = `
-                <div class="mb-4 p-3.5 rounded-2xl border border-brand-200/80 bg-brand-50/50 backdrop-blur-md shadow-sm dark:bg-brand-900/40 dark:border-brand-900 transition-all">
-                    <div class="flex items-center justify-between mb-1.5 pb-1 border-b border-brand-200/50 dark:border-brand-900/60">
-                        <div class="flex items-center space-x-1.5 text-xs font-bold text-brand-700 dark:text-brand-200">
-                            <i class="fa-solid fa-brain text-brand-500"></i>
-                            <span>双向细目表与考点覆盖分析 (${escapeHtml(meta.ai_model_used || '大模型')})</span>
-                        </div>
-                        <button onclick="window.clearAiAnalysis()" class="text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 px-1.5 py-0.5 rounded-md hover:bg-slate-200/60 font-medium transition-all" title="关闭分析框">
-                            <i class="fa-solid fa-xmark mr-1"></i>关闭分析
-                        </button>
-                    </div>
-                    <div class="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed">
-                        ${escapeHtml(meta.ai_analysis)}
-                    </div>
-                </div>
-            `;
-        }
-
         container.innerHTML = `
-            ${aiAnalysisBanner}
             <!-- Part 1: Top Fixed Control Section (Non-scrolling Studio Panel) -->
             <div class="shrink-0 mb-3">
                 <div class="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-3 rounded-2xl flex flex-col space-y-2.5 shadow-sm">
@@ -1053,7 +1839,39 @@
                                     `}
                                 </select>
                             </div>
+                            <!-- Batch Score by Question Type -->
+                            <div class="flex items-center space-x-1 text-xs">
+                                <span class="text-slate-500 font-semibold dark:text-slate-300 flex items-center space-x-1" title="按题型批量设置每题分值">
+                                    <i class="fa-solid fa-sliders text-brand-500"></i>
+                                    <span>批量设分:</span>
+                                </span>
+                                <select id="batchScoreTypeSelect" onchange="window.toggleBatchScoreInput()" class="px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-brand-50/60 text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200">
+                                    <option value="">选择题型…</option>
+                                    <option value="single_choice">单选</option>
+                                    <option value="multi_choice">多选</option>
+                                    <option value="fill_in_blank">填空</option>
+                                    <option value="detailed_answer">解答</option>
+                                </select>
+                                <span id="batchScoreInputWrap" class="hidden items-center space-x-1">
+                                    <input id="batchScoreValue" type="number" min="0" max="100" value="5" class="w-14 px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-white text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200" title="每题分值" />
+                                    <button onclick="window.applyBatchScore()" class="px-2 py-1 text-xs rounded-xl bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all" title="应用批量分值">
+                                        应用
+                                    </button>
+                                </span>
+                            </div>
                         </div>
+                    </div>
+
+                    <!-- Row 1.5: Tool entry buttons (Health / Template) -->
+                    <div class="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-800/60">
+                        <button onclick="window.openHealthModal()" class="flex-1 py-1.5 justify-center rounded-xl text-xs font-semibold bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="手动触发组卷体检，弹出评估报告">
+                            <i class="fa-solid fa-stethoscope text-brand-500"></i>
+                            <span>组卷体检</span>
+                        </button>
+                        <button onclick="window.openTemplateModal()" class="flex-1 py-1.5 justify-center rounded-xl text-xs font-semibold bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="选择/编辑/新增试卷模板">
+                            <i class="fa-solid fa-layer-group text-brand-500"></i>
+                            <span>选择试卷模板</span>
+                        </button>
                     </div>
 
                     <!-- Row 2: Paper Management Actions (Clear, Save, History) -->
@@ -1728,6 +2546,52 @@
         }
     };
 
+    // Toggle visibility of batch score value input based on selected question type
+    window.toggleBatchScoreInput = function () {
+        const typeSel = document.getElementById('batchScoreTypeSelect');
+        const wrap = document.getElementById('batchScoreInputWrap');
+        if (!typeSel || !wrap) return;
+        if (typeSel.value) {
+            wrap.classList.remove('hidden');
+            wrap.classList.add('flex');
+        } else {
+            wrap.classList.add('hidden');
+            wrap.classList.remove('flex');
+        }
+    };
+
+    // Apply a uniform score to all questions of the selected type in the cart
+    window.applyBatchScore = function () {
+        const typeSel = document.getElementById('batchScoreTypeSelect');
+        const valInput = document.getElementById('batchScoreValue');
+        if (!typeSel || !valInput) return;
+        const qType = typeSel.value;
+        if (!qType) {
+            if (window.showToast) window.showToast('请先选择题型', 'warning');
+            return;
+        }
+        const newScore = Math.max(0, Math.min(100, parseInt(valInput.value, 10) || 0));
+        if (isNaN(newScore)) {
+            if (window.showToast) window.showToast('分值无效', 'warning');
+            return;
+        }
+        let affected = 0;
+        window.PaperStore.cart.forEach(item => {
+            const q = window.PaperStore.questionsMap[item.id];
+            const t = q ? (q.question_type || 'single_choice') : 'single_choice';
+            if (t === qType) {
+                item.score = newScore;
+                affected++;
+            }
+        });
+        saveCartToStorage();
+        renderPart3QuestionStream();
+        window.renderPaperCanvas();
+        if (window.showToast) {
+            window.showToast(`已将 ${affected} 道${qType === 'single_choice' ? '单选' : qType === 'multi_choice' ? '多选' : qType === 'fill_in_blank' ? '填空' : '解答'}题分值统一设为 ${newScore} 分`, 'success');
+        }
+    };
+
     // Helper: build cart questions payload with solution_space
     function buildCartQuestionsPayload() {
         const cart = window.PaperStore.cart;
@@ -1897,12 +2761,28 @@
             ? report.fixes
             : ['返回题目编辑页，核对报错位置附近的公式或排版命令。'];
         const fixesHtml = fixes.map(item => `<li>${escapeHtml(item)}</li>`).join('');
-        const sourceHtml = report.source_context
-            ? `<details><summary>查看出错位置附近的 LaTeX 源码</summary><pre>${escapeHtml(report.source_context)}</pre></details>`
+
+        // Prefer the pinpointed source_context; otherwise fall back to the
+        // full compiler log so the user still sees something actionable.
+        const sourceContext = report.source_context
+            || report.full_log
+            || report.technical_error
+            || '';
+        const sourceLabel = report.source_context ? '查看出错位置附近的 LaTeX 源码' : '查看编译器完整日志';
+        const sourceHtml = sourceContext
+            ? `<details ${report.source_context ? '' : 'open'}><summary>${sourceLabel}</summary><pre>${escapeHtml(sourceContext)}</pre></details>`
             : '';
-        const technicalHtml = report.technical_error
+        const technicalHtml = (report.technical_error && report.technical_error !== sourceContext)
             ? `<details><summary>查看编译器技术信息</summary><pre>${escapeHtml(report.technical_error)}</pre></details>`
             : '';
+        const aiNoteHtml = report.ai_note
+            ? `<p class="ai-note">${escapeHtml(report.ai_note)}</p>`
+            : '';
+
+        // Pass the raw TeX so the user can copy / download it for debugging.
+        const texSource = report.tex_source || '';
+        const safeTex = JSON.stringify(texSource);
+
         try {
             tab.document.open();
             tab.document.write(`
@@ -1923,12 +2803,15 @@
                         h2 { margin: 0 0 8px; font-size: 14px; color: #475569; }
                         p, li { font-size: 14px; line-height: 1.75; }
                         p { margin: 0; }
+                        .ai-note { margin-top: 10px; font-size: 12px; color: #64748b; }
                         ol { margin: 6px 0 0; padding-left: 22px; }
                         code { background: #f1f5f9; border-radius: 5px; padding: 2px 5px; }
                         details { margin-top: 14px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; }
                         summary { cursor: pointer; color: #475569; font-size: 13px; font-weight: 600; }
                         pre { margin: 10px 0 0; padding: 12px; border-radius: 8px; overflow: auto; background: #0f172a; color: #e2e8f0; font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
-                        button { margin-top: 22px; border: 0; border-radius: 9px; padding: 10px 16px; background: #334155; color: white; cursor: pointer; }
+                        .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
+                        button { border: 0; border-radius: 9px; padding: 10px 16px; background: #334155; color: white; cursor: pointer; font-size: 13px; }
+                        button.ghost { background: #e2e8f0; color: #334155; }
                     </style>
                 </head>
                 <body>
@@ -1941,12 +2824,29 @@
                                 <span class="badge">${report.ai_used ? 'AI 已结合编译日志解释' : '本地诊断结果'}</span>
                             </div>
                         </div>
-                        <section class="section"><h2>为什么会这样</h2><p>${escapeHtml(report.cause || fallbackMessage || 'LaTeX 编译没有完成。')}</p></section>
+                        <section class="section"><h2>为什么会这样</h2><p>${escapeHtml(report.cause || fallbackMessage || 'LaTeX 编译没有完成。')}</p>${aiNoteHtml}</section>
                         <section class="section"><h2>建议如何修复</h2><ol>${fixesHtml}</ol></section>
                         ${sourceHtml}
                         ${technicalHtml}
-                        <button onclick="window.close()">关闭此页并返回修改</button>
+                        <div class="actions">
+                            <button onclick="window.close()">关闭此页并返回修改</button>
+                            ${texSource ? '<button class="ghost" onclick="__copyTex()">复制完整 LaTeX 源码</button><button class="ghost" onclick="__downloadTex()">下载 paper.tex</button>' : ''}
+                        </div>
                     </main>
+                    <script>
+                        const __TEX = ${safeTex};
+                        function __copyTex() {
+                            if (navigator.clipboard) { navigator.clipboard.writeText(__TEX).then(function(){ alert('LaTeX 源码已复制到剪贴板'); }); }
+                            else { alert('当前环境不支持自动复制，请使用下载。'); }
+                        }
+                        function __downloadTex() {
+                            const blob = new Blob([__TEX], { type: 'text/plain;charset=utf-8' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url; a.download = 'paper.tex'; a.click();
+                            URL.revokeObjectURL(url);
+                        }
+                    </script>
                 </body>
                 </html>
             `);
@@ -2714,7 +3614,7 @@
         if (currentServerId && savedServerId === currentServerId) {
             if (savedWorkspace === 'paper') {
                 if (typeof window.selectWorkspace === 'function') {
-                    window.selectWorkspace('paper', '组卷排版工作台');
+                    window.selectWorkspace('paper', '组卷工作台');
                 }
             }
         } else {

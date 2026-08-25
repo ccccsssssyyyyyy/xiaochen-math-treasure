@@ -1270,6 +1270,7 @@
                     window.systemMetadata = systemMetadata;
                     populateCategoryDropdowns();
                     populateFilterDropdowns();
+                    if (typeof loadTagFilterOptions === 'function') loadTagFilterOptions();
                     
                     // Most callers only need fresh dropdown data. Reloading the
                     // editor is an explicit settings/curriculum operation because
