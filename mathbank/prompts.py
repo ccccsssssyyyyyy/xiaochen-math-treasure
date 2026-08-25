@@ -167,7 +167,7 @@ def build_paper_selection_prompts(
     return system_prompt, user_content
 
 
-def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool) -> str:
+def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False) -> str:
     curriculum_text = build_curriculum_text(curriculum)
     
     if generate_answers_bool:
@@ -189,6 +189,8 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool)
         f"{curriculum_text}\n"
         "【核心拆题与分类规范】:\n"
         "1. 字段分类：挑选精确匹配的学段 `category_compulsory` 与章节 `category_chapter`；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
+        "1.0 题干纯净规则（极重要）：`content` 必须是去掉原卷顺序题号后的纯净题干，严禁在开头保留如 \"16.\"、\"（16）\"、\"16、\"、\"一.\"、\"(1)\" 这类原卷大题/小题编号——这些编号由系统在组卷时统一生成，残留会导致重复编号。仅当编号后紧跟的实质内容是题干的一部分时才保留（即不要误删题干中自然出现的小问序号）。\n"
+        "1.2 标签自动标注（重要）：必须为每道题额外产出 `knowledge_list`（字符串数组，列出本题涉及的**全部**细粒度知识点，如 [\"函数单调性\", \"导数应用\"]，可跨多个知识点）与 `solve_method`（单个字符串，给出本题**最贴切的核心解题方法/思想方法**，如 \"数形结合\"、\"分类讨论\"、\"换元法\"、\"待定系数法\"、\"反证法\"、\"归纳法\" 等，仅取最具代表性的一个）。\n"
         f"1.1 {CLASSIFICATION_PRIORITY_RULE}\n"
         "2. 文字与插图忠实保留：100% 完整保留题干所有汉字，绝对禁止删除“（如图）”、“如图所示”、“如右图所示”等几何指代描述！绝对保留 Markdown/LaTeX 原有的图片链接（如 `![](/static/uploads/...)` 或 `\\includegraphics{...}`），并将其 URL/文件名提取至 `referenced_images` 数组中。如输入中出现 `[公式待核对]`、`[公式结构待核对]`、`[特殊字符待核对]` 或“公式无法安全提取”，必须原样保留标记及紧随的预览图，绝不得猜测、补写或替换公式。\n"
         "2.1 公式锁定协议：若正文出现 `<mathbank-math id=\"MBM_...\">完整公式</mathbank-math>`，标签内公式在原位置完整可见，可用于理解、分类和解题，但它是只读来源。输出题干或原版答案时，必须在同一语义位置将每个标签替换为且仅替换为一次 `[[对应的完整 id]]`，例如 `[[MBM_xxx_0001]]`；禁止遗漏、重复、改名或把同一 id 放入多个题目。若需要生成新解析，可另写普通 LaTeX 公式，但不得在新解析中重复这些锁定 id。\n"
@@ -198,6 +200,21 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool)
         "5. 换行与段落规范：不同小问（如 (1)、(2)、(i)、(ii)）、证明推导步骤与自然段落之间，必须使用双换行/空行（`\\n\\n`）分隔！\n"
         "6. 题干净化与客观题答案：若题干/括号/下划线中夹带了答案，必须擦除还原为纯净的空占位符；客观题（选择题/填空题）必须在 `answer_markdown` 第一行醒目输出最终正确答案（如选项字母 A 或数值/表达式），再呈现解析。\n"
         f"{answer_rule}\n\n"
+    )
+
+    if separated_mode:
+        separated_rule = (
+            "【分离式文档（题目在前、解析在后）强约束 — 必须严格遵守】:\n"
+            "1. 本文档为「题干区」与「解析区」物理分离结构：前半部分是全部题目的纯净题干（无答案），后半部分是按题号排列的参考答案与解析。\n"
+            "2. 你必须先完整提取前半部分的题号序列（如 1,2,3… 或 一,二,三…），建立「题号 → 题干」的映射。\n"
+            "3. 后半部分每段解析必须显式绑定其对应题号：在每道题的 JSON 中填写 `answer_belongs_to` 为该段解析对应的前文题号字符串（如 \"3\" 或 \"三\"）。严禁凭内容猜测、严禁把独立解析拆成新题、严禁把多段解析塞进同一题。\n"
+            "4. 若某题在解析区找不到对应段落，则其 `answer_markdown` 设为空字符串 \"\" 且 `answer_belongs_to` 为 null，并在该题目的 `source` 末尾追加标注「[缺解析]」。\n"
+            "5. 若解析区多出无法对应任何题号的段落，仍按题号顺序尽力配对最近的题目；实在无法配对的，将其内容填入 `answer_markdown` 并设 `answer_belongs_to` 为该段自身标注的题号。\n"
+            "6. 解析区通常带有显式题号（如「三、」「3.」），请以该显式题号为锚点进行配对，这是唯一权威依据。\n"
+        )
+        system_instructions = system_instructions + separated_rule + "\n"
+
+    system_instructions = system_instructions + (
         "【输出约束与 JSON 格式】:\n"
         "必须且只能输出严格合法的 JSON 对象，绝对不要包裹 ```json Markdown 代码块！字符串内部换行必须输出 JSON 转义序列 `\\n`（反斜杠+n），LaTeX 命令的反斜杠必须按 JSON 规范转义为双反斜杠 `\\\\`。\n"
         "{\n"
@@ -210,7 +227,10 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool)
         '      "category_chapter": "章节名称",\n'
         '      "difficulty": "easy_error / challenge / qiangji",\n'
         '      "source": "出处信息或 null",\n'
-        '      "referenced_images": ["/static/uploads/xxx.png"]\n'
+        '      "knowledge_list": ["细粒度知识点1", "细粒度知识点2"],\n'
+        '      "solve_method": "核心解题方法 (如: 数形结合)",\n'
+        '      "referenced_images": ["/static/uploads/xxx.png"],\n'
+        '      "answer_belongs_to": "该题解析所对应前文题目的题号字符串（仅分离模式需要，如 \\"3\\" 或 \\"三\\"），若解析紧跟本题则为 null"\n'
         '    }\n'
         '  ]\n'
         "}\n"

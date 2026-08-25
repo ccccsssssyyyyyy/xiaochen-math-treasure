@@ -12,13 +12,59 @@ let bankQuestionsRetryTimer = null;
             const preview = document.getElementById('previewSection');
             const resizer1 = document.getElementById('resizer-1');
             const resizer2 = document.getElementById('resizer-2');
-            const resizerV = document.getElementById('sidebar-resizer-v');
-            const sidebarTopPanel = document.getElementById('sidebarTopPanel');
             const mainContainer = document.querySelector('main');
+
+            // 方案A：从 localStorage 恢复上次拖拽后的栏宽（左/右）
+            const LS_SIDEBAR = 'mathbank.layout.sidebar_width';
+            const LS_PREVIEW = 'mathbank.layout.preview_width';
+
+            const clampToContainer = (w) => {
+                const rect = mainContainer.getBoundingClientRect();
+                const maxW = Math.max(0, rect.width * 0.5);
+                if (w > maxW) return maxW;
+                return w;
+            };
+
+            const applySidebarWidth = (w) => {
+                if (w <= 45) {
+                    sidebar.style.width = '0px';
+                    sidebar.style.minWidth = '0px';
+                    sidebar.style.borderRightWidth = '0px';
+                } else {
+                    sidebar.style.width = w + 'px';
+                    sidebar.style.minWidth = '0px';
+                    sidebar.style.borderRightWidth = '1px';
+                }
+            };
+            const applyPreviewWidth = (w) => {
+                if (w <= 45) {
+                    preview.style.width = '0px';
+                    preview.style.minWidth = '0px';
+                    preview.style.borderLeftWidth = '0px';
+                } else {
+                    preview.style.width = w + 'px';
+                    preview.style.minWidth = '0px';
+                    preview.style.borderLeftWidth = '1px';
+                }
+            };
+
+            try {
+                const savedSidebar = localStorage.getItem(LS_SIDEBAR);
+                if (savedSidebar !== null) {
+                    const w = clampToContainer(parseFloat(savedSidebar));
+                    if (!isNaN(w) && w >= 0) applySidebarWidth(w);
+                }
+                const savedPreview = localStorage.getItem(LS_PREVIEW);
+                if (savedPreview !== null) {
+                    const w = clampToContainer(parseFloat(savedPreview));
+                    if (!isNaN(w) && w >= 0) applyPreviewWidth(w);
+                }
+            } catch (err) {
+                console.warn('恢复栏宽失败：', err);
+            }
 
             let isResizingLeft = false;
             let isResizingRight = false;
-            let isResizingV = false;
 
             resizer1.addEventListener('mousedown', function(e) {
                 e.preventDefault();
@@ -34,17 +80,19 @@ let bankQuestionsRetryTimer = null;
                 document.body.classList.add('select-none');
             });
 
-            if (resizerV && sidebarTopPanel) {
-                resizerV.addEventListener('mousedown', function(e) {
-                    e.preventDefault();
-                    isResizingV = true;
-                    document.body.style.cursor = 'row-resize';
-                    document.body.classList.add('select-none');
-                });
-            }
+            const persistWidths = () => {
+                try {
+                    const sbW = parseFloat(sidebar.style.width) || 0;
+                    const pvW = parseFloat(preview.style.width) || 0;
+                    localStorage.setItem(LS_SIDEBAR, String(sbW));
+                    localStorage.setItem(LS_PREVIEW, String(pvW));
+                } catch (err) {
+                    console.warn('保存栏宽失败：', err);
+                }
+            };
 
             document.addEventListener('mousemove', function(e) {
-                if (!isResizingLeft && !isResizingRight && !isResizingV) return;
+                if (!isResizingLeft && !isResizingRight) return;
 
                 const containerRect = mainContainer.getBoundingClientRect();
 
@@ -79,30 +127,17 @@ let bankQuestionsRetryTimer = null;
                         preview.style.width = newWidth + 'px';
                     }
                 }
-
-                if (isResizingV && sidebar && sidebarTopPanel) {
-                    const sidebarRect = sidebar.getBoundingClientRect();
-                    let newHeight = e.clientY - sidebarRect.top;
-                    const minHeight = 100;
-                    const maxHeight = sidebarRect.height * 0.85;
-
-                    if (newHeight < minHeight) {
-                        newHeight = minHeight;
-                    } else if (newHeight > maxHeight) {
-                        newHeight = maxHeight;
-                    }
-                    sidebarTopPanel.style.height = newHeight + 'px';
-                }
             });
 
             document.addEventListener('mouseup', function() {
-                if (isResizingLeft || isResizingRight || isResizingV) {
+                if (isResizingLeft || isResizingRight) {
                     isResizingLeft = false;
                     isResizingRight = false;
-                    isResizingV = false;
                     document.body.style.cursor = '';
                     document.body.classList.remove('select-none');
                     window.dispatchEvent(new Event('resize'));
+                    // 拖拽结束后持久化栏宽
+                    persistWidths();
                 }
             });
         }
@@ -1120,6 +1155,141 @@ let bankQuestionsRetryTimer = null;
             };
         }
 
+        // 知识点 / 解题方法 搜索式多选标签筛选
+        // 全量标签缓存：{ knowledge: [...], solve: [...] }
+        const allTagOptions = { knowledge: [], solve: [] };
+        // 已选标签集合：{ knowledge: Set, solve: Set }
+        const selectedTagSet = { knowledge: new Set(), solve: new Set() };
+
+        function getSelectedTags(type) {
+            return Array.from(selectedTagSet[type] || []);
+        }
+
+        function renderTagFilterChips(containerId, values) {
+            // containerId: 'filterKnowledgeTags' -> type 'knowledge'; 'filterSolveMethodTags' -> type 'solve'
+            const type = containerId === 'filterKnowledgeTags' ? 'knowledge' : 'solve';
+            allTagOptions[type] = (values || []).slice();
+            const box = document.querySelector(`.tag-search-box[data-tag-type="${type}"]`);
+            if (!box) return;
+            const selectedEl = box.querySelector('.tsb-selected');
+            const inputEl = box.querySelector('.tsb-input');
+            const dropdownEl = box.querySelector('.tsb-dropdown');
+
+            function renderSelected() {
+                selectedEl.innerHTML = '';
+                const sel = selectedTagSet[type];
+                if (!sel.size) {
+                    selectedEl.innerHTML = '<span class="text-[10px] text-slate-400 px-1 py-0.5">未选择，下方搜索添加</span>';
+                    return;
+                }
+                sel.forEach(v => {
+                    const chip = document.createElement('span');
+                    chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-brand-600 text-white';
+                    chip.textContent = v;
+                    const x = document.createElement('span');
+                    x.textContent = '×';
+                    x.className = 'cursor-pointer ml-0.5 font-bold';
+                    x.addEventListener('click', () => {
+                        sel.delete(v);
+                        renderSelected();
+                        refreshDropdown();
+                        currentBankPage = 1;
+                        if (activeSidebarTab === 'bank') loadQuestions();
+                        else loadDrafts();
+                    });
+                    chip.appendChild(x);
+                    selectedEl.appendChild(chip);
+                });
+            }
+            if (typeof updateTopMoreFilterBadge === 'function') updateTopMoreFilterBadge();
+
+            function refreshDropdown() {
+                const q = (inputEl.value || '').trim().toLowerCase();
+                dropdownEl.innerHTML = '';
+                const sel = selectedTagSet[type];
+                const matches = allTagOptions[type].filter(v =>
+                    !sel.has(v) && (q === '' || v.toLowerCase().includes(q))
+                );
+                if (!matches.length) {
+                    dropdownEl.innerHTML = '<div class="px-3 py-2 text-[10px] text-slate-400">无匹配标签</div>';
+                    dropdownEl.classList.remove('hidden');
+                    return;
+                }
+                matches.slice(0, 30).forEach(v => {
+                    const item = document.createElement('div');
+                    item.className = 'px-3 py-1.5 text-[11px] cursor-pointer hover:bg-brand-50 hover:text-brand-600';
+                    item.textContent = v;
+                    item.addEventListener('click', () => {
+                        sel.add(v);
+                        inputEl.value = '';
+                        renderSelected();
+                        refreshDropdown();
+                        currentBankPage = 1;
+                        if (activeSidebarTab === 'bank') loadQuestions();
+                        else loadDrafts();
+                    });
+                    dropdownEl.appendChild(item);
+                });
+                dropdownEl.classList.remove('hidden');
+            }
+
+            inputEl.oninput = () => refreshDropdown();
+            inputEl.onfocus = () => refreshDropdown();
+            inputEl.addEventListener('blur', () => setTimeout(() => dropdownEl.classList.add('hidden'), 150));
+
+            renderSelected();
+        }
+
+        async function loadTagFilterOptions() {
+            try {
+                const res = await fetch('/api/tag-options');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.status === 'success') {
+                    renderTagFilterChips('filterKnowledgeTags', data.knowledge_list);
+                    renderTagFilterChips('filterSolveMethodTags', data.solve_method);
+                }
+            } catch (e) {
+                console.warn('[TagFilter] 加载标签选项失败', e);
+            }
+        }
+
+        // 顶部「更多筛选」下拉开关
+        function toggleTopMoreFilter() {
+            const panel = document.getElementById('topMoreFilterPanel');
+            const icon = document.getElementById('topMoreFilterIcon');
+            if (!panel) return;
+            const willShow = panel.classList.contains('hidden');
+            panel.classList.toggle('hidden', !willShow);
+            if (icon) icon.style.transform = willShow ? 'rotate(180deg)' : '';
+        }
+        window.toggleTopMoreFilter = toggleTopMoreFilter;
+
+        // 点击外部关闭「更多筛选」面板
+        document.addEventListener('click', (e) => {
+            const container = document.getElementById('topMoreFilterContainer');
+            const panel = document.getElementById('topMoreFilterPanel');
+            if (!container || !panel) return;
+            if (!panel.classList.contains('hidden') && !container.contains(e.target)) {
+                panel.classList.add('hidden');
+                const icon = document.getElementById('topMoreFilterIcon');
+                if (icon) icon.style.transform = '';
+            }
+        });
+
+        // 更新「更多筛选」已选标签徽标
+        function updateTopMoreFilterBadge() {
+            const badge = document.getElementById('topMoreFilterBadge');
+            if (!badge) return;
+            const count = getSelectedTags('knowledge').length + getSelectedTags('solve').length;
+            if (count > 0) {
+                badge.textContent = String(count);
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+            }
+        }
+
         // Load and List Saved Questions
         function loadQuestions(retryCount = 0) {
             const loadSequence = ++bankQuestionsLoadSequence;
@@ -1143,7 +1313,11 @@ let bankQuestionsRetryTimer = null;
             const source = document.getElementById('filterSource') ? document.getElementById('filterSource').value : '';
             const sortOrder = document.getElementById('filterSort') ? document.getElementById('filterSort').value : 'desc';
             const requestedPage = Math.max(1, currentBankPage);
-            
+
+            // 知识点 / 解题方法 搜索式多选筛选 (OR)
+            const selectedKnowledge = getSelectedTags('knowledge');
+            const selectedMethods = getSelectedTags('solve');
+
             const params = new URLSearchParams();
             if (q) params.append('q', q);
             if (qtype) params.append('qtype', qtype);
@@ -1151,6 +1325,8 @@ let bankQuestionsRetryTimer = null;
             if (compulsory) params.append('compulsory', compulsory);
             if (chapter) params.append('chapter', chapter);
             if (source) params.append('source', source);
+            if (selectedKnowledge.length) params.append('knowledge_list', selectedKnowledge.join(','));
+            if (selectedMethods.length) params.append('solve_method', selectedMethods.join(','));
             params.append('page', String(requestedPage));
             params.append('page_size', String(PAGE_LIMIT));
             params.append('sort', sortOrder === 'asc' ? 'asc' : 'desc');
@@ -1195,6 +1371,8 @@ let bankQuestionsRetryTimer = null;
                                 <p>未找到匹配题目</p>
                             </div>`;
                         renderSidebarPagination(0, 1, 'bank');
+                        const listCountEl = document.getElementById('sidebarListCount');
+                        if (listCountEl) listCountEl.textContent = '共 0 题';
                         return;
                     }
                     
@@ -1202,36 +1380,45 @@ let bankQuestionsRetryTimer = null;
                         // Create card element
                         const difficultyBadge = getDifficultyBadge(item.difficulty);
                         const typeText = getTypeText(item.question_type);
-                        
+                        const inCart = (typeof window.isInCart === 'function') ? window.isInCart(item.id) : false;
+
                         const itemCard = document.createElement('div');
-                        itemCard.className = `question-card p-3.5 mx-1.5 flex flex-col space-y-2 select-none group relative ${EditorState.questionId === item.id ? 'active' : ''}`;
+                        itemCard.className = `question-card p-3.5 mx-1.5 flex flex-col space-y-2 select-none group relative ${EditorState.questionId === item.id ? 'active' : ''} ${inCart ? 'cart-active' : ''}`;
                         itemCard.dataset.id = item.id;
-                        
+
                         const cleanContent = parseMarkdownWithMath(item.content || '');
-                        
+
+                        // 旧 tags 仍显示（兼容），并补充知识点/解题方法多标签
                         let tagsHtml = '';
-                        if (item.tags) {
-                            const tagList = item.tags.split(/[,，]+/).map(t => t.trim()).filter(t => t.length > 0);
-                            if (tagList.length > 0) {
-                                const displayTags = tagList.slice(0, 2);
-                                const hiddenCount = tagList.length - 2;
-                                
-                                displayTags.forEach(tag => {
-                                    tagsHtml += `<span class="text-[9px] font-bold text-amber-600 bg-amber-50 border border-amber-300/60 px-1.5 py-0.5 rounded-full flex items-center space-x-0.5"><i class="fa-solid fa-tag text-[7px] text-amber-500 mr-0.5"></i><span class="max-w-[80px] truncate">${window.MathBankSafe.escapeText(tag)}</span></span>`;
-                                });
-                                
-                                if (hiddenCount > 0) {
-                                    const fullTagsHtml = tagList.map(tag => `<span class="inline-flex items-center whitespace-nowrap"><i class="fa-solid fa-tag text-[7px] text-amber-500/80 mr-1"></i>${window.MathBankSafe.escapeText(tag)}</span>`).join('<span class="mx-1.5 text-amber-300/50">|</span>');
-                                    tagsHtml += `
-                                    <div class="relative flex items-center" onclick="event.stopPropagation()">
-                                        <span class="peer text-[9px] font-bold text-amber-600 bg-amber-100 border border-amber-300/60 px-1.5 py-0.5 rounded-full cursor-default flex items-center shadow-sm hover:bg-amber-200 transition-colors">+${hiddenCount}</span>
-                                        <div class="absolute top-full right-0 mt-1.5 w-max max-w-[220px] bg-amber-50 border border-amber-200/80 text-amber-800 text-[10px] px-2.5 py-1.5 rounded-lg shadow-md opacity-0 pointer-events-none peer-hover:opacity-100 transition-opacity duration-150 z-50 font-medium invisible peer-hover:visible">
-                                            <div class="flex flex-wrap items-center leading-relaxed">
-                                                ${fullTagsHtml}
-                                            </div>
+                        const legacyTags = (item.tags || '').split(/[,，]+/).map(t => t.trim()).filter(t => t.length > 0);
+                        const allTags = legacyTags.slice();
+                        (item.knowledge_list || '').split(/[,，;；\n]+/).map(t => t.trim()).filter(t => t.length > 0).forEach(t => {
+                            if (!allTags.includes(t)) allTags.push(t);
+                        });
+                        (item.solve_method || '').split(/[,，;；\n]+/).map(t => t.trim()).filter(t => t.length > 0).forEach(t => {
+                            if (!allTags.includes(t)) allTags.push(t);
+                        });
+                        if (allTags.length > 0) {
+                            const displayTags = allTags.slice(0, 3);
+                            const hiddenCount = allTags.length - 3;
+                            displayTags.forEach(tag => {
+                                const isMethod = (item.solve_method || '').includes(tag);
+                                const tone = isMethod
+                                    ? 'text-sky-600 bg-sky-50 border-sky-300/60'
+                                    : 'text-amber-600 bg-amber-50 border-amber-300/60';
+                                tagsHtml += `<span class="text-[9px] font-bold ${tone} border px-1.5 py-0.5 rounded-full flex items-center space-x-0.5"><i class="fa-solid ${isMethod ? 'fa-lightbulb' : 'fa-tag'} text-[7px] mr-0.5"></i><span class="max-w-[80px] truncate">${window.MathBankSafe.escapeText(tag)}</span></span>`;
+                            });
+                            if (hiddenCount > 0) {
+                                const fullTagsHtml = allTags.map(tag => `<span class="inline-flex items-center whitespace-nowrap"><i class="fa-solid fa-tag text-[7px] text-amber-500/80 mr-1"></i>${window.MathBankSafe.escapeText(tag)}</span>`).join('<span class="mx-1.5 text-amber-300/50">|</span>');
+                                tagsHtml += `
+                                <div class="relative flex items-center" onclick="event.stopPropagation()">
+                                    <span class="peer text-[9px] font-bold text-amber-600 bg-amber-100 border border-amber-300/60 px-1.5 py-0.5 rounded-full cursor-default flex items-center shadow-sm hover:bg-amber-200 transition-colors">+${hiddenCount}</span>
+                                    <div class="absolute top-full right-0 mt-1.5 w-max max-w-[220px] bg-amber-50 border border-amber-200/80 text-amber-800 text-[10px] px-2.5 py-1.5 rounded-lg shadow-md opacity-0 pointer-events-none peer-hover:opacity-100 transition-opacity duration-150 z-50 font-medium invisible peer-hover:visible">
+                                        <div class="flex flex-wrap items-center leading-relaxed">
+                                            ${fullTagsHtml}
                                         </div>
-                                    </div>`;
-                                }
+                                    </div>
+                                </div>`;
                             }
                         }
 
@@ -1242,13 +1429,22 @@ let bankQuestionsRetryTimer = null;
                                     ${tagsHtml}
                                     ${difficultyBadge}
                                     <span class="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-brand-50 text-brand-600 shadow-sm">#${window.MathBankSafe.escapeText(item.seq_num)}</span>
+                                    <!-- 加入试卷 / 已入卷 切换 -->
+                                    ${inCart
+                                        ? `<button type="button" aria-label="移出试卷" onclick="event.stopPropagation(); window.bankToggleCart(${item.id}, false)" class="text-emerald-600 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-1.5 py-0.5 rounded-full text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-all flex items-center space-x-0.5" title="已在试卷中，点击移出"><i class="fa-solid fa-check text-[8px]"></i><span>已入卷</span></button>`
+                                        : `<button type="button" aria-label="加入试卷" onclick="event.stopPropagation(); window.bankToggleCart(${item.id}, true)" class="text-brand-600 bg-brand-50 border border-brand-200 hover:bg-brand-100 px-1.5 py-0.5 rounded-full text-[9px] font-bold opacity-0 group-hover:opacity-100 transition-all flex items-center space-x-0.5" title="加入组卷试卷"><i class="fa-solid fa-plus text-[8px]"></i><span>入卷</span></button>`}
                                     <!-- Delete Button -->
                                     <button type="button" aria-label="删除题目" onclick="event.stopPropagation(); deleteQuestion(${item.id})" class="text-slate-400 hover:text-red-500 p-0.5 rounded hover:bg-slate-100 transition-all opacity-0 group-hover:opacity-100" title="删除">
                                         <i class="fa-solid fa-trash-can text-[10px]"></i>
                                     </button>
                                 </div>
                             </div>
-                            <div class="text-xs text-slate-700 leading-relaxed font-medium line-clamp-2 card-formula-render">${cleanContent || '[空白题干]'}</div>
+                            <div class="text-xs text-slate-700 leading-relaxed font-medium line-clamp-3 card-formula-render">${cleanContent || '[空白题干]'}</div>
+                            <!-- 展开/收起完整题干 -->
+                            <button type="button" onclick="event.stopPropagation(); window.bankToggleExpand(${item.id})" class="self-start text-[9px] text-brand-500 hover:text-brand-700 font-semibold flex items-center space-x-0.5" title="展开/收起完整题干">
+                                <i class="fa-solid fa-angles-down text-[8px]" id="exp-ic-${item.id}"></i>
+                                <span id="exp-tx-${item.id}">展开全文</span>
+                            </button>
                             <!-- Time Badge -->
                             <div class="text-[8px] text-slate-400/80 flex items-center space-x-1 py-0.5">
                                 <i class="fa-regular fa-clock text-[8px]"></i>
@@ -1259,7 +1455,7 @@ let bankQuestionsRetryTimer = null;
                                 <span class="font-mono text-slate-400">${window.MathBankSafe.escapeText(item.source ? item.source.substring(0, 12) : '本地录入')}</span>
                             </div>
                         `;
-                        
+
                         // Render KaTeX inline for this card
                         try {
                             renderMathInElement(itemCard.querySelector('.card-formula-render'), {
@@ -1274,15 +1470,21 @@ let bankQuestionsRetryTimer = null;
                         } catch(e) {
                             console.error('KaTeX sidebar rendering error: ', e);
                         }
-                        
+
                         itemCard.onclick = () => {
                             checkAndSwitch(() => selectQuestion(item));
                         };
-                        
+
                         qListContainer.appendChild(itemCard);
                     });
-                    
+
                     renderSidebarPagination(totalItems, currentBankPage, 'bank');
+
+                    // 更新左侧题目列表计数
+                    const listCountEl = document.getElementById('sidebarListCount');
+                    if (listCountEl) {
+                        listCountEl.textContent = totalItems != null ? `共 ${totalItems} 题` : '题目列表';
+                    }
                 })
                 .catch(err => {
                     if ((err && err.name === 'AbortError') || loadSequence !== bankQuestionsLoadSequence) {
@@ -1319,13 +1521,57 @@ let bankQuestionsRetryTimer = null;
                 });
         }
 
+        // ---- 题库工作台与组卷联动：加入/移出试卷 & 展开题干 ----
+        // 在题库工作台也能把题目加入组卷"试题篮"，无需先切到组卷工作台
+        const bankExpandedIds = new Set();
+
+        window.bankToggleCart = function (qid, wantAdd) {
+            if (typeof window.isInCart !== 'function' || typeof window.PaperStore === 'undefined') {
+                if (window.showToast) window.showToast('组卷模块未就绪，请稍候重试', 'warning');
+                return;
+            }
+            if (wantAdd) {
+                if (!window.isInCart(qid)) {
+                    window.addToCart(qid);
+                    if (window.showToast) window.showToast('已加入组卷试题篮', 'success');
+                }
+            } else {
+                if (window.isInCart(qid)) {
+                    window.removeFromCart(qid);
+                }
+            }
+            // 局部刷新该卡片的入卷状态（仅重渲染列表，避免丢失滚动位置）
+            if (typeof loadQuestions === 'function') loadQuestions();
+            // 同步组卷工作台的提示条
+            if (typeof window.renderPaperWorkspace === 'function' && window.PaperStore.activeWorkspace === 'paper') {
+                window.renderPaperWorkspace();
+            }
+        };
+
+        window.bankToggleExpand = function (qid) {
+            if (bankExpandedIds.has(qid)) {
+                bankExpandedIds.delete(qid);
+            } else {
+                bankExpandedIds.add(qid);
+            }
+            const card = document.querySelector(`.question-card[data-id="${qid}"]`);
+            if (!card) return;
+            const body = card.querySelector('.card-formula-render');
+            const ic = document.getElementById('exp-ic-' + qid);
+            const tx = document.getElementById('exp-tx-' + qid);
+            if (body) body.classList.toggle('line-clamp-3', !bankExpandedIds.has(qid));
+            if (body) body.classList.toggle('expanded-body', bankExpandedIds.has(qid));
+            if (ic) ic.className = bankExpandedIds.has(qid) ? 'fa-solid fa-angles-up text-[8px]' : 'fa-solid fa-angles-down text-[8px]';
+            if (tx) tx.textContent = bankExpandedIds.has(qid) ? '收起' : '展开全文';
+        };
+
         // ==========================================
         //       SIDEBAR PAGINATION SYSTEM HELPERS
         // ==========================================
         function renderSidebarPagination(totalItems, currentPage, tabType) {
             const container = document.getElementById('sidebarPagination');
             if (!container) return;
-            
+
             if (totalItems === 0) {
                 container.innerHTML = '';
                 container.style.display = 'none';
@@ -2170,3 +2416,29 @@ let bankQuestionsRetryTimer = null;
         setInterval(() => {
             fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
         }, 15000);
+
+        // 右侧预览面板现已固定为单一「仿真试卷预览」卡片（无 Tab 切换）。
+        // 保留一个无副作用的占位函数，避免历史调用出错。
+        function switchPreviewTab() { /* no-op: 右侧预览始终显示 */ }
+        window.switchPreviewTab = switchPreviewTab;
+
+        // 安全的 KaTeX 渲染（带降级）
+        function safeRenderMath(el) {
+            if (!el) return;
+            try {
+                if (typeof renderMathInElement === 'function') {
+                    renderMathInElement(el, {
+                        delimiters: [
+                            { left: '$$', right: '$$', display: true },
+                            { left: '$', right: '$', display: false },
+                            { left: '\\(', right: '\\)', display: false },
+                            { left: '\\[', right: '\\]', display: true }
+                        ],
+                        throwOnError: false
+                    });
+                }
+            } catch (e) { /* 忽略渲染异常 */ }
+        }
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }

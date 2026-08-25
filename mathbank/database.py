@@ -15,6 +15,7 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import declarative_base, sessionmaker
 from mathbank.paths import DATABASE_FILE, sqlite_url
 
@@ -22,7 +23,13 @@ from mathbank.paths import DATABASE_FILE, sqlite_url
 SQLALCHEMY_DATABASE_URL = sqlite_url(DATABASE_FILE)
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    # 使用 StaticPool：SQLite 是文件数据库，不需要连接池。
+    # 默认 QueuePool (size=5 + overflow=10) 在批量入库+轮询并发时容易耗尽，
+    # 导致 "QueuePool limit reached" 超时错误。StaticPool 维持单一长连接，
+    # 由 SQLite 自身的文件锁保证并发安全，适合 FastAPI 多线程场景。
+    poolclass=StaticPool,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -89,6 +96,8 @@ class Question(Base):
     tikz_code = Column(Text, default="")  # TikZ 几何绘图源代码
     figure_align = Column(String(50), default="right")  # 插图排版位置: right (题干右侧), center (下方居中), bottom_right (下方居右)
     tags = Column(Text, default="")  # 自定义标签 (逗号分隔或字符串)
+    knowledge_list = Column(Text, default="")  # 知识点多标签 (逗号分隔，AI 自动打标 + 手动修正)
+    solve_method = Column(Text, default="")  # 解题方法多标签 (逗号分隔，AI 自动打标 + 手动修正)
     usage_count = Column(Integer, default=0, index=True)  # 组卷引用次数
     created_at = Column(DateTime, default=_utcnow_naive)
 
@@ -125,6 +134,8 @@ class Question(Base):
             "tikz_code": self.tikz_code,
             "figure_align": self.figure_align or "right",
             "tags": self.tags,
+            "knowledge_list": self.knowledge_list or "",
+            "solve_method": self.solve_method or "",
             "usage_count": self.usage_count or 0,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
@@ -145,6 +156,8 @@ class Question(Base):
             "tikz_code": self.tikz_code,
             "figure_align": self.figure_align or "right",
             "tags": self.tags,
+            "knowledge_list": self.knowledge_list or "",
+            "solve_method": self.solve_method or "",
             "usage_count": self.usage_count or 0,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
@@ -191,6 +204,7 @@ class Paper(Base):
     paper_type = Column(String(50), default="exam")  # exam, quiz, handout
     total_score = Column(Integer, default=150)
     metadata_json = Column(Text, default="{}")
+    is_template = Column(Integer, default=0)  # 1 = 个人预设模板
     created_at = Column(DateTime, default=_utcnow_naive)
 
     def to_dict(self):
@@ -208,6 +222,7 @@ class Paper(Base):
             "total_score": self.total_score,
             "show_secret": meta.get("show_secret", True),
             "show_notice": meta.get("show_notice", True),
+            "is_template": bool(self.is_template),
             "metadata_json": self.metadata_json,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
@@ -364,7 +379,15 @@ def init_db():
             if "usage_count" not in columns:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN usage_count INTEGER DEFAULT 0"))
                 print("Added column 'usage_count' to questions table successfully.")
-                
+
+            if "knowledge_list" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN knowledge_list TEXT DEFAULT ''"))
+                print("Added column 'knowledge_list' to questions table successfully.")
+
+            if "solve_method" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN solve_method TEXT DEFAULT ''"))
+                print("Added column 'solve_method' to questions table successfully.")
+
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_compulsory ON questions (category_compulsory)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_chapter ON questions (category_chapter)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_knowledge ON questions (category_knowledge)"))
@@ -373,6 +396,20 @@ def init_db():
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_association_group_id ON questions (association_group_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_tags ON questions (tags)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_usage_count ON questions (usage_count)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_knowledge_list ON questions (knowledge_list)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_solve_method ON questions (solve_method)"))
+
+            # Migrate papers table: add is_template column if missing (幂等)
+            try:
+                conn.execute(text("ALTER TABLE papers ADD COLUMN is_template INTEGER DEFAULT 0"))
+                print("Added column 'is_template' to papers table successfully.")
+            except Exception as alter_err:
+                # 列已存在（幂等场景）时忽略 duplicate column 错误
+                err_msg = str(alter_err).lower()
+                if "duplicate column" in err_msg or "already exists" in err_msg:
+                    pass
+                else:
+                    raise
 
             # Create indexes on question_curriculums
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_question_curriculums_lookup ON question_curriculums (version_code, compulsory, chapter, knowledge)"))
