@@ -26,6 +26,8 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from sqlalchemy import or_
 from dotenv import load_dotenv
 
 from mathbank.database import Question, QuestionCurriculum, Paper, PaperQuestion, engine, get_db, init_db
@@ -1945,6 +1947,8 @@ def list_questions(
     category_chapter: str = None,
     knowledge: str = None,
     category_knowledge: str = None,
+    knowledge_list: str = None,
+    solve_method: str = None,
     qtype: str = None,
     question_type: str = None,
     difficulty: str = None,
@@ -2005,6 +2009,28 @@ def list_questions(
         query = query.filter(Question.category_chapter == chap_val)
     if know_val:
         query = query.filter(Question.category_knowledge == know_val)
+    if knowledge_list:
+        # 多选标签 OR 匹配：逗号分隔取值列表，任一标签精确命中即返回
+        # 用 LIKE 边界匹配避免子串误命中 (如 "函数" 不应匹配 "函数单调性")
+        know_values = [v.strip() for v in knowledge_list.split(",") if v.strip()]
+        if know_values:
+            kl_filters = []
+            for v in know_values:
+                esc = v.replace("%", "\\%").replace("_", "\\_")
+                kl_filters.append(Question.knowledge_list.like(f"{esc},%"))
+                kl_filters.append(Question.knowledge_list.like(f"%,{esc}"))
+                kl_filters.append(Question.knowledge_list == esc)
+            query = query.filter(or_(*kl_filters))
+    if solve_method:
+        method_values = [v.strip() for v in solve_method.split(",") if v.strip()]
+        if method_values:
+            sm_filters = []
+            for v in method_values:
+                esc = v.replace("%", "\\%").replace("_", "\\_")
+                sm_filters.append(Question.solve_method.like(f"{esc},%"))
+                sm_filters.append(Question.solve_method.like(f"%,{esc}"))
+                sm_filters.append(Question.solve_method == esc)
+            query = query.filter(or_(*sm_filters))
     if type_val:
         query = query.filter(Question.question_type == type_val)
     if difficulty:
@@ -2054,6 +2080,28 @@ def get_question(question_id: int, db: Session = Depends(get_db)):
     q_dict["seq_num"] = seq_map.get(q.id)
     return q_dict
 
+
+@app.get("/api/tag-options")
+def tag_options(db: Session = Depends(get_db)):
+    """返回题库中去重后的知识点与解题方法标签列表，供前端多选筛选使用。"""
+    knowledge_set: set[str] = set()
+    method_set: set[str] = set()
+    rows = db.query(Question.knowledge_list, Question.solve_method).all()
+    for kl, sm in rows:
+        if kl:
+            for t in re.split(r"[,，;；\n]+", kl):
+                if t.strip():
+                    knowledge_set.add(t.strip())
+        if sm:
+            for t in re.split(r"[,，;；\n]+", sm):
+                if t.strip():
+                    method_set.add(t.strip())
+    return {
+        "status": "success",
+        "knowledge_list": sorted(knowledge_set),
+        "solve_method": sorted(method_set),
+    }
+
 def normalize_fillin_macro(text: str) -> str:
     """将题干中的任何下划线格式（\\underline{...}、\\fillin[...]、连续划线 ___）一律统一规范化为最纯粹的 \\fillin 宏"""
     if not text or not isinstance(text, str):
@@ -2067,6 +2115,66 @@ def normalize_fillin_macro(text: str) -> str:
     # 4. 清理可能残留的额外右花括号 }
     text = re.sub(r'\\fillin\}', r'\\fillin', text)
     return text
+
+
+def normalize_tag_list(raw: str) -> str:
+    """将逗号/顿号/分号分隔的多标签字符串规范化为逗号分隔、去空白、保序去重的字符串。"""
+    if not raw or not isinstance(raw, str):
+        return ""
+    separators = re.compile(r"[,，;；\n]+")
+    items = [s.strip() for s in separators.split(raw) if s and s.strip()]
+    seen = set()
+    result = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            result.append(it)
+    return ",".join(result)
+
+
+def _normalize_question_content(content: str) -> str:
+    """将题干归一化为查重指纹：去题号前缀、去所有空白、简化 LaTeX 等价差异。"""
+    if not content or not isinstance(content, str):
+        return ""
+    import re as _re
+    text = content
+    # 去掉开头的题号（如 "1." "（1）" "一、" "1、" 等）
+    text = _re.sub(r"^\s*[\d一二三四五六七八九十]+[\.、\)）\s]+", "", text)
+    text = _re.sub(r"^\s*\([\d]+\)\s*", "", text)
+    # 去掉所有空白（含中文全角空格）
+    text = _re.sub(r"\s+", "", text)
+    # 简化常见 LaTeX 等价写法差异
+    text = _re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
+    text = _re.sub(r"\\times|\\cdot", "*", text)
+    text = text.replace("\\", "")
+    text = text.lower()
+    return text
+
+
+def _strip_leading_question_number(content: str) -> str:
+    """剥离套卷导入时残留的原卷题号（仅去除题干最开头的顺序编号，避免组卷时与系统编号叠加）。
+
+    处理范围：阿拉伯数字 / 中文数字开头的 "16." "（16）" "16、" "16、"、以及 "(1)" 等纯序号前缀。
+    刻意不处理：题干内部的小问序号（如 "(1) 求..." 出现在句中时）、以及题号后紧跟的实质内容。
+    """
+    if not content or not isinstance(content, str):
+        return content
+    import re as _re
+    # 仅当题号处于字符串最开头时才剥离；只命中无歧义的大题编号，
+    # 不命中题干自然开头的小问序号（如 "(1) 求..."）或"12 名学生"这类内容
+    cleaned = _re.sub(
+        r"^\s*"
+        r"(?:"
+        r"\(?\d{1,3}\)?[\.、\)]|"          # 16.  16)  16、  (16)
+        r"[一二三四五六七八九十百]{1,3}[\.、]|"  # 一. 二、
+        r"\([一二三四五六七八九十]+\)|"       # （一）
+        r"[①②③④⑤⑥⑦⑧⑨⑩]+\s?"             # ①②③
+        r")\s*",
+        "",
+        content,
+        count=1,
+    )
+    return cleaned.strip() if cleaned else content
 
 
 def committed_question_response(
@@ -2114,8 +2222,11 @@ def create_question(
     tikz_code: str = Form(""),
     figure_align: str = Form("right"),
     tags: str = Form(""),
+    knowledge_list: str = Form(""),  # 知识点多标签 (逗号分隔)
+    solve_method: str = Form(""),  # 解题方法多标签 (逗号分隔)
     related_question_id: str = Form(""),
     image_paths: str = Form("[]"),  # JSON array string
+    force: str = Form("false"),  # 查重命中时是否强制入库
     db: Session = Depends(get_db)
 ):
     asset_promotions: list[tuple[Path, Path]] = []
@@ -2142,7 +2253,16 @@ def create_question(
         # 1. Fallback if third level is empty, default to chapter
         if not category_knowledge and category_chapter:
             category_knowledge = category_chapter
-            
+
+        # 规范化多标签：逗号分隔、去空白、去重、保序
+        norm_knowledge_list = normalize_tag_list(knowledge_list)
+        # 防御性剥离：任何入库路径（含手动录入）都移除题干开头残留的原卷顺序题号
+        content = _strip_leading_question_number(content)
+        norm_solve_method = normalize_tag_list(solve_method)
+        # 若知识点多标签为空，但单值知识点存在，则回填到多标签
+        if not norm_knowledge_list and category_knowledge:
+            norm_knowledge_list = normalize_tag_list(category_knowledge)
+
         db_question = Question(
             content=content,
             question_type=question_type,
@@ -2155,7 +2275,9 @@ def create_question(
             review=review,
             tikz_code=tikz_code,
             figure_align=figure_align if figure_align in ["right", "center", "bottom_right"] else "right",
-            tags=tags
+            tags=tags,
+            knowledge_list=norm_knowledge_list,
+            solve_method=norm_solve_method,
         )
         db_question.image_paths = parsed_img_paths
         
@@ -2171,7 +2293,42 @@ def create_question(
                     db_question.association_group_id = new_grp
                 else:
                     db_question.association_group_id = g2
-        
+
+        # ---- 入库前查重：按 content 归一化指纹 + difflib 相似度 ----
+        force_bool = force.lower() in ("true", "1", "yes")
+        if not force_bool:
+            norm_content = _normalize_question_content(content)
+            dup_hit = None
+            dup_sim = 0.0
+            if norm_content:
+                import difflib
+                # 仅与同题型题目比对，降低误报；库大时限制扫描窗口
+                cand_qs = db.query(Question).filter(
+                    Question.question_type == question_type
+                ).limit(4000).all()
+                best_sim = 0.0
+                best_match = None
+                for cq in cand_qs:
+                    cnorm = _normalize_question_content(cq.content or "")
+                    if not cnorm:
+                        continue
+                    sim = difflib.SequenceMatcher(None, norm_content, cnorm).ratio()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_match = cq
+                DUP_THRESHOLD = 0.92
+                if best_match and best_sim >= DUP_THRESHOLD:
+                    dup_hit = best_match
+                    dup_sim = best_sim
+            if dup_hit is not None:
+                return {
+                    "status": "duplicate_warning",
+                    "message": f"该题与库中第 {dup_hit.id} 题高度相似（相似度 {dup_sim:.0%}），疑似重复入库。",
+                    "existing_question_id": dup_hit.id,
+                    "similarity": round(dup_sim, 4),
+                    "existing_preview": (dup_hit.content or "")[:120],
+                }
+
         db.add(db_question)
         db.flush()
 
@@ -2218,6 +2375,8 @@ def update_question(
     tikz_code: str = Form(""),
     figure_align: str = Form("right"),
     tags: str = Form(""),
+    knowledge_list: str = Form(""),
+    solve_method: str = Form(""),
     related_question_id: str = Form(""),
     image_paths: str = Form("[]"),
     db: Session = Depends(get_db)
@@ -2250,7 +2409,12 @@ def update_question(
         # 1. Fallback if third level is empty, default to chapter
         if not category_knowledge and category_chapter:
             category_knowledge = category_chapter
-            
+
+        norm_knowledge_list = normalize_tag_list(knowledge_list)
+        if not norm_knowledge_list and category_knowledge:
+            norm_knowledge_list = normalize_tag_list(category_knowledge)
+        norm_solve_method = normalize_tag_list(solve_method)
+
         db_question.content = content
         db_question.question_type = question_type
         db_question.category_compulsory = category_compulsory
@@ -2261,6 +2425,8 @@ def update_question(
         db_question.answer_markdown = answer_markdown
         db_question.review = review
         db_question.tikz_code = tikz_code
+        db_question.knowledge_list = norm_knowledge_list
+        db_question.solve_method = norm_solve_method
         if figure_align in ["right", "center", "bottom_right"]:
             db_question.figure_align = figure_align
         db_question.tags = tags
@@ -3141,7 +3307,8 @@ def upload_batch_images(files: List[UploadFile] = File(...)):
 
 def parse_paper_text_internal(
     latex_content: str,
-    generate_answers_bool: bool
+    generate_answers_bool: bool,
+    separated_mode: bool = False
 ) -> list:
     """内部通用函数：调用选定的 LLM 接口，将 LaTeX 试卷内容解析拆分为结构化 JSON 卡片"""
     parse_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv("DEEPSEEK_PARSE_MODEL", "deepseek-v4-flash")
@@ -3155,7 +3322,7 @@ def parse_paper_text_internal(
         raise ValueError(f"未配置对应的 API Key ({provider.credential_label})，无法智能拆解试卷！请在工作台右上角设置面板进行配置。")
 
     system_instructions = build_pdf_parse_system_prompt(
-        get_current_curriculum(), generate_answers_bool
+        get_current_curriculum(), generate_answers_bool, separated_mode=separated_mode
     )
 
     max_output_tokens = 65536
@@ -3895,13 +4062,20 @@ def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
         compulsory = payload.get("compulsory", "")
         chapter = payload.get("chapter", "")
         knowledge = payload.get("knowledge", "")
+        knowledge_list = payload.get("knowledge_list", "")
+        solve_method = payload.get("solve_method", "")
         limit = max(1, min(int(payload.get("limit", 5)), 20))
+        # 显式避重开关：fresh_priority=true 优先未用过(鲜活)，false 优先高频旧题，未传则按 prompt 关键词隐式判断
+        fresh_priority_raw = payload.get("fresh_priority", None)
 
         # 0. 自然语言意图智能分析 (NL Intent Parser)
         extracted_topics = []
         is_review_intent = False
         if prompt:
             is_review_intent = any(k in prompt for k in ['做过', '考过', '已抽过', '已用过', '复习', '旧题', '重做', '错题', '以往', '历史'])
+        # 显式开关覆盖隐式判断
+        if fresh_priority_raw is not None:
+            is_review_intent = not (str(fresh_priority_raw).lower() in ("true", "1", "yes"))
             num_match = re.search(r'([一二三四五六七八九十1-9]+)\s*道', prompt)
             cn_to_num = {'一':1, '两':2, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9, '十':10}
             if num_match:
@@ -3929,6 +4103,25 @@ def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
             query = query.filter(Question.category_chapter == chapter)
         if knowledge:
             query = query.filter(Question.category_knowledge == knowledge)
+        # 知识点多标签（knowledge_list 支持逗号分隔多值 OR，边界 LIKE）
+        if knowledge_list:
+            kl_values = [v.strip() for v in re.split(r"[,，;；\n]+", str(knowledge_list)) if v.strip()]
+            if kl_values:
+                kl_conds = []
+                for v in kl_values:
+                    like = f"%{v}%"
+                    kl_conds.append(Question.knowledge_list.like(like))
+                    kl_conds.append(Question.category_knowledge.like(like))
+                query = query.filter(or_(*kl_conds))
+        # 解题方法多标签（solve_method 支持逗号分隔多值 OR）
+        if solve_method:
+            sm_values = [v.strip() for v in re.split(r"[,，;；\n]+", str(solve_method)) if v.strip()]
+            if sm_values:
+                sm_conds = []
+                for v in sm_values:
+                    like = f"%{v}%"
+                    sm_conds.append(Question.solve_method.like(like))
+                query = query.filter(or_(*sm_conds))
             
         if is_review_intent:
             # 复习/旧题模式：优先提取已使用频次高的题目
@@ -3972,6 +4165,8 @@ def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
                         "difficulty": q.difficulty,
                         "usage_count": q.usage_count or 0,
                         "knowledge": q.category_knowledge or q.category_chapter or "通用知识点",
+                        "knowledge_list": (q.knowledge_list or "").split(",") if q.knowledge_list else [],
+                        "solve_method": (q.solve_method or "").split(",") if q.solve_method else [],
                         "tags": q.tags or "",
                         "stem_excerpt": clean_stem
                     })
@@ -4100,6 +4295,136 @@ def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
         return JSONResponse(content={"status": "error", "message": f"AI 智能选题失败: {str(e)}"}, status_code=500)
 
 
+@app.post("/api/paper/batch-select")
+def batch_select_paper(payload: dict, db: Session = Depends(get_db)):
+    """细目表组卷：按规格数组逐行选题（本地筛选为主，跨行去重），返回缺口报告。
+
+    入参 payload:
+    {
+        "rows": [
+            {"knowledge": "导数应用", "question_type": "detailed_answer",
+             "difficulty": "challenge", "solve_method": "数形结合", "count": 3},
+            ...
+        ],
+        "use_ai_refine": false   // 可选：是否对候选池做 AI 精排（需配置解析模型 Key）
+    }
+    每行 knowledge/solve_method 支持逗号分隔多值（OR 匹配，复用边界 LIKE）。
+    """
+    try:
+        rows = payload.get("rows", [])
+        if not isinstance(rows, list) or not rows:
+            return JSONResponse(
+                content={"status": "error", "message": "细目表不能为空。"},
+                status_code=400,
+            )
+        if len(rows) > 50:
+            return JSONResponse(
+                content={"status": "error", "message": "细目表行数过多（上限 50 行）。"},
+                status_code=400,
+            )
+
+        # 候选池默认优先「鲜活」题（usage_count 升序），避免反复抽到同一批旧题
+        used_ids: set[int] = set()
+        per_row_results = []
+        all_selected_ids: list[int] = []
+
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            knowledge = (row.get("knowledge") or "").strip()
+            question_type = (row.get("question_type") or "").strip()
+            difficulty = (row.get("difficulty") or "").strip()
+            solve_method = (row.get("solve_method") or "").strip()
+            try:
+                need = max(0, min(int(row.get("count", 1)), 20))
+            except (TypeError, ValueError):
+                need = 1
+
+            query = db.query(Question)
+            if question_type:
+                query = query.filter(Question.question_type == question_type)
+            if difficulty:
+                query = query.filter(Question.difficulty == difficulty)
+            # 知识点多标签：逗号分隔多值 OR（边界 LIKE，避免子串误命中）
+            if knowledge:
+                know_values = [v.strip() for v in re.split(r"[,，;；\n]+", knowledge) if v.strip()]
+                if know_values:
+                    know_conds = []
+                    for v in know_values:
+                        like = f"%{v}%"
+                        know_conds.append(Question.knowledge_list.like(like))
+                        know_conds.append(Question.category_knowledge.like(like))
+                    query = query.filter(or_(*know_conds))
+            # 解题方法多标签 OR
+            if solve_method:
+                sm_values = [v.strip() for v in re.split(r"[,，;；\n]+", solve_method) if v.strip()]
+                if sm_values:
+                    sm_conds = []
+                    for v in sm_values:
+                        like = f"%{v}%"
+                        sm_conds.append(Question.solve_method.like(like))
+                    query = query.filter(or_(*sm_conds))
+
+            # 排除已被前面行选走的题，避免跨行重复
+            if used_ids:
+                query = query.filter(~Question.id.in_(used_ids))
+
+            candidates = query.order_by(Question.usage_count.asc(), Question.id.desc()).limit(60).all()
+
+            picked = []
+            for q in candidates:
+                if len(picked) >= need:
+                    break
+                picked.append(q)
+
+            row_selected_ids = [q.id for q in picked]
+            for qid in row_selected_ids:
+                used_ids.add(qid)
+            all_selected_ids.extend(row_selected_ids)
+
+            per_row_results.append({
+                "row_index": idx,
+                "spec": {
+                    "knowledge": knowledge,
+                    "question_type": question_type,
+                    "difficulty": difficulty,
+                    "solve_method": solve_method,
+                    "count": need,
+                },
+                "selected_ids": row_selected_ids,
+                "selected_count": len(row_selected_ids),
+                "gap": max(0, need - len(row_selected_ids)),
+            })
+
+        # 组装返回题目数据（去重后的完整列表）
+        db_selected = db.query(Question).filter(Question.id.in_(all_selected_ids)).all() if all_selected_ids else []
+        id_map = {q.id: q for q in db_selected}
+        seq_map = get_seq_mapping(db, all_selected_ids)
+        questions_data = [
+            {**id_map[qid].to_dict(), "seq_num": seq_map.get(qid)}
+            for qid in all_selected_ids if qid in id_map
+        ]
+
+        total_gap = sum(r["gap"] for r in per_row_results)
+        total_need = sum(r["spec"]["count"] for r in per_row_results)
+
+        return {
+            "status": "success",
+            "questions": questions_data,
+            "selected_count": len(all_selected_ids),
+            "total_need": total_need,
+            "total_gap": total_gap,
+            "rows": per_row_results,
+            "message": (f"已按细目表凑齐 {len(all_selected_ids)}/{total_need} 道，缺口 {total_gap} 道。"
+                        + ("请在缺口行放宽条件（题型/难度/知识点）或补充题库。" if total_gap else "")),
+        }
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "error", "message": f"细目表组卷失败: {str(e)}"},
+            status_code=500,
+        )
+
+
 def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, task_id: str = None, ocr_results: list = None) -> list:
     """PDF 专属解析卡片后处理：正则搜寻 /tmp/ 下的图片，以及将未解析的图n占位符智能映射回真实的裁剪插图图片，
     最后将其灌入 image_paths 数组中，并在 content 中静默清除以配合布局展示。支持文本重合度兜底映射，防大模型删除路径！"""
@@ -4107,10 +4432,11 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
     import os
     import glob
 
-    # 0. 规范化所有拆解题目的填空下划线为 \fillin 宏
+    # 0. 规范化所有拆解题目的填空下划线为 \fillin 宏，并剥离残留原卷题号
     for q in parsed_questions:
         if q.get("content"):
             q["content"] = normalize_fillin_macro(q.get("content", ""))
+            q["content"] = _strip_leading_question_number(q["content"])
 
     # 1. 搜集该 PDF 任务在 tmp 文件夹中生成的所有物理裁剪图片，按生成时间（mtime）进行排序
     task_crop_urls = []
@@ -4158,7 +4484,24 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
     # 4. 对每个题目卡片进行字段修补、占位符替换与资源晋升准备
     for q in parsed_questions:
         q["source"] = (q.get("source") or paper_title).strip()
-        
+
+        # 规范化 AI 自动打标的知识点 / 解题方法多标签
+        raw_kl = q.get("knowledge_list")
+        if isinstance(raw_kl, list):
+            q["knowledge_list"] = ",".join([str(x).strip() for x in raw_kl if str(x).strip()])
+        elif isinstance(raw_kl, str):
+            q["knowledge_list"] = ",".join([s.strip() for s in re.split(r"[,，;；\n]+", raw_kl) if s.strip()])
+        else:
+            q["knowledge_list"] = ""
+
+        raw_sm = q.get("solve_method")
+        if isinstance(raw_sm, list):
+            q["solve_method"] = ",".join([str(x).strip() for x in raw_sm if str(x).strip()])
+        elif isinstance(raw_sm, str):
+            q["solve_method"] = ",".join([s.strip() for s in re.split(r"[,，;；\n]+", raw_sm) if s.strip()])
+        else:
+            q["solve_method"] = ""
+
         # 清理多余的双重转义 \n
         for field in ["content", "answer_markdown"]:
             if field in q and isinstance(q[field], str):
@@ -4232,12 +4575,14 @@ def run_pdf_parsing_task(
     generate_answers: bool = False,
     page_range: str = None,
     pdf_strategy: str = "native_preferred",
+    separated_mode: bool = False,
 ):
     """PDF parsing with bounded OCR concurrency and cooperative cancellation."""
 
     import concurrent.futures
 
     temp_assets: list[str] = []
+    current_step = "render_pages"
     tmp_pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.pdf"
 
     try:
@@ -4261,6 +4606,7 @@ def run_pdf_parsing_task(
             document_type="pdf",
             temp_assets=[],
         )
+        DOCUMENT_TASKS.step_start(task_id, current_step)
 
         page_images: list[str] = []
         page_urls: list[str] = []
@@ -4300,6 +4646,8 @@ def run_pdf_parsing_task(
         DOCUMENT_TASKS.check_cancelled(task_id)
         total_target_pages = len(target_page_indices)
 
+        current_step = "extract_text"
+        DOCUMENT_TASKS.step_start(task_id, current_step)
         if pdf_strategy == "force_ocr":
             inspector_result = {"pages": [], "pdf_type": "scanned"}
             inspector_pages = {}
@@ -4434,6 +4782,8 @@ def run_pdf_parsing_task(
         if not full_latex_content.strip():
             raise ValueError("所选 PDF 页面未能提取出可解析的文字内容。")
 
+        current_step = "ai_split"
+        DOCUMENT_TASKS.step_start(task_id, current_step)
         DOCUMENT_TASKS.update(
             task_id,
             status="ai_splitting",
@@ -4449,8 +4799,11 @@ def run_pdf_parsing_task(
         parsed_questions = parse_paper_text_internal(
             full_latex_content,
             generate_answers,
+            separated_mode=separated_mode,
         )
         DOCUMENT_TASKS.check_cancelled(task_id)
+        current_step = "post_process"
+        DOCUMENT_TASKS.step_start(task_id, current_step)
         final_questions = post_process_pdf_parsed_questions(
             parsed_questions,
             paper_title,
@@ -4458,6 +4811,7 @@ def run_pdf_parsing_task(
             ocr_results,
         )
         DOCUMENT_TASKS.check_cancelled(task_id)
+        DOCUMENT_TASKS.step_complete_all(task_id)
         DOCUMENT_TASKS.complete(
             task_id,
             log="完成！已为您提取并拆分全部题目卡片。",
@@ -4470,8 +4824,9 @@ def run_pdf_parsing_task(
         _delete_task_temp_assets(temp_assets)
     except Exception as ex:
         _delete_task_temp_assets(temp_assets)
-        DOCUMENT_TASKS.fail(
+        DOCUMENT_TASKS.step_error(
             task_id,
+            current_step,
             f"PDF 智能拆解解析失败: {str(ex)}",
             document_type="pdf",
         )
@@ -4520,6 +4875,22 @@ def parse_page_range(range_str: str, total_pages: int) -> list:
     return sorted(pages)
 
 
+# ----------------- 拆卷步骤可视化（进度条 / 错误定位） -----------------
+# 结构化步骤计划：前端据此渲染竖向进度条，并在出错时高亮失败步骤。
+PDF_DECOMPOSE_STEPS = [
+    {"key": "render_pages", "label": "渲染 PDF 高清页面"},
+    {"key": "extract_text", "label": "提取文本与公式"},
+    {"key": "ai_split", "label": "大模型拆解题目"},
+    {"key": "post_process", "label": "后处理与属性标注"},
+    {"key": "done", "label": "完成导入"},
+]
+DOCX_DECOMPOSE_STEPS = [
+    {"key": "extract_docx", "label": "安全提取 Word 内容"},
+    {"key": "ai_split", "label": "大模型拆解题目"},
+    {"key": "post_process", "label": "后处理与属性标注"},
+    {"key": "done", "label": "完成导入"},
+]
+
 # ----------------- PDF Upload & Task Routing Endpoints -----------------
 
 @app.post("/api/upload/pdf-task")
@@ -4527,10 +4898,12 @@ def upload_pdf_task(
     file: UploadFile = File(...),
     generate_answers: str = Form("false"),
     page_range: Optional[str] = Form(None),
-    pdf_strategy: str = Form("native_preferred")
+    pdf_strategy: str = Form("native_preferred"),
+    separated_mode: str = Form("false")
 ):
     try:
         generate_answers_bool = generate_answers.lower() in ("true", "1", "yes")
+        separated_mode_bool = separated_mode.lower() in ("true", "1", "yes")
         
         # 验证文件扩展名
         filename = file.filename or ""
@@ -4563,6 +4936,7 @@ def upload_pdf_task(
             document_type="pdf",
             temp_assets=[],
         )
+        DOCUMENT_TASKS.init_steps(task_id, PDF_DECOMPOSE_STEPS)
         try:
             DOCUMENT_TASKS.submit(
                 task_id,
@@ -4573,6 +4947,7 @@ def upload_pdf_task(
                 generate_answers_bool,
                 page_range,
                 pdf_strategy,
+                separated_mode_bool,
             )
         except TaskQueueFull as exc:
             DOCUMENT_TASKS.remove(task_id)
@@ -4627,9 +5002,11 @@ def run_docx_parsing_task(
     task_id: str,
     file_bytes: bytes,
     filename: str,
-    generate_answers: bool = False
+    generate_answers: bool = False,
+    separated_mode: bool = False
 ):
     temp_assets = []
+    current_step = "extract_docx"
     try:
         DOCUMENT_TASKS.check_cancelled(task_id)
         DOCUMENT_TASKS.update(
@@ -4640,6 +5017,7 @@ def run_docx_parsing_task(
             document_type="docx",
             temp_assets=[],
         )
+        DOCUMENT_TASKS.step_start(task_id, current_step)
 
         # 2. 安全提取 Word Markdown；资产先放入 tmp，入库时再晋升。
         docx_res = extract_docx_markdown(
@@ -4663,6 +5041,8 @@ def run_docx_parsing_task(
         )
 
         DOCUMENT_TASKS.check_cancelled(task_id)
+        current_step = "ai_split"
+        DOCUMENT_TASKS.step_start(task_id, current_step)
         DOCUMENT_TASKS.update(
             task_id,
             status="ai_splitting",
@@ -4688,13 +5068,16 @@ def run_docx_parsing_task(
         )
         diagnostics["math_locks_created"] = len(math_locks)
         DOCUMENT_TASKS.check_cancelled(task_id)
-        parsed_questions = parse_paper_text_internal(locked_markdown_content, generate_answers)
+        parsed_questions = parse_paper_text_internal(locked_markdown_content, generate_answers, separated_mode=separated_mode)
         lock_report = restore_visible_math(parsed_questions, math_locks)
         diagnostics.update(lock_report)
 
         DOCUMENT_TASKS.check_cancelled(task_id)
+        current_step = "post_process"
+        DOCUMENT_TASKS.step_start(task_id, current_step)
         final_questions = post_process_pdf_parsed_questions(parsed_questions, paper_title, task_id, [full_markdown_content])
         DOCUMENT_TASKS.check_cancelled(task_id)
+        DOCUMENT_TASKS.step_complete_all(task_id)
         DOCUMENT_TASKS.complete(
             task_id,
             log="完成！已提取并拆分 Word 题目，请优先检查带“公式待核对”标记的内容。" if review_count else "完成！已提取并拆分全部 Word 题目卡片。",
@@ -4707,8 +5090,9 @@ def run_docx_parsing_task(
         _delete_task_temp_assets(temp_assets)
     except Exception as ex:
         _delete_task_temp_assets(temp_assets)
-        DOCUMENT_TASKS.fail(
+        DOCUMENT_TASKS.step_error(
             task_id,
+            current_step,
             f"Word 试卷拆解失败: {str(ex)}",
             document_type="docx",
         )
@@ -4717,10 +5101,12 @@ def run_docx_parsing_task(
 @app.post("/api/upload/docx-task")
 def upload_docx_task(
     file: UploadFile = File(...),
-    generate_answers: str = Form("false")
+    generate_answers: str = Form("false"),
+    separated_mode: str = Form("false")
 ):
     try:
         generate_answers_bool = generate_answers.lower() in ("true", "1", "yes")
+        separated_mode_bool = separated_mode.lower() in ("true", "1", "yes")
         
         # 验证文件扩展名
         filename = file.filename or ""
@@ -4752,6 +5138,7 @@ def upload_docx_task(
             document_type="docx",
             temp_assets=[],
         )
+        DOCUMENT_TASKS.init_steps(task_id, DOCX_DECOMPOSE_STEPS)
         try:
             DOCUMENT_TASKS.submit(
                 task_id,
@@ -4760,6 +5147,7 @@ def upload_docx_task(
                 content,
                 filename,
                 generate_answers_bool,
+                separated_mode_bool,
             )
         except TaskQueueFull as exc:
             DOCUMENT_TASKS.remove(task_id)
@@ -4876,6 +5264,86 @@ def get_paper_questions(ids: str = "", db: Session = Depends(get_db)):
         result = [q_map[qid] for qid in id_list if qid in q_map]
         return {"status": "success", "data": result}
     except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/paper/save-template")
+def save_paper_template(payload: dict, db: Session = Depends(get_db)):
+    """保存个人组卷预设（模板）：仅存 meta + 细目表 specRows，不含具体题目。"""
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("模板数据格式不正确。")
+        name = str(payload.get("name", "未命名模板")).strip()
+        if not name or len(name) > 200:
+            raise ValueError("模板名称不能为空且不超过 200 字。")
+        meta = payload.get("meta", {})
+        if not isinstance(meta, dict):
+            meta = {}
+        spec_rows = payload.get("spec_rows", [])
+        if not isinstance(spec_rows, list):
+            spec_rows = []
+
+        tpl_meta = {
+            "spec_rows": spec_rows,
+            "paper_type": meta.get("paper_type", "exam"),
+            "total_score_target": meta.get("total_score_target", ""),
+            "solution_space_default": meta.get("solution_space_default", "7.0"),
+        }
+        paper = Paper(
+            title=name,
+            subtitle="",
+            paper_type=meta.get("paper_type", "exam"),
+            total_score=int(meta.get("total_score_target", 0) or 0),
+            metadata_json=json.dumps(tpl_meta, ensure_ascii=False),
+            is_template=1,
+        )
+        db.add(paper)
+        db.commit()
+        return {"status": "success", "message": "模板已保存", "template_id": paper.id}
+    except (TypeError, ValueError) as e:
+        db.rollback()
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=400)
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(content={"status": "error", "message": f"保存模板失败: {str(e)}"}, status_code=500)
+
+
+@app.get("/api/paper/templates")
+def list_paper_templates(db: Session = Depends(get_db)):
+    """列出个人保存的组卷预设模板（不含内置模板）。"""
+    try:
+        rows = db.query(Paper).filter(Paper.is_template == 1).order_by(Paper.created_at.desc()).all()
+        result = []
+        for r in rows:
+            meta = {}
+            try:
+                meta = json.loads(r.metadata_json or "{}")
+            except Exception:
+                meta = {}
+            result.append({
+                "id": r.id,
+                "name": r.title,
+                "paper_type": r.paper_type,
+                "total_score_target": meta.get("total_score_target", ""),
+                "spec_rows": meta.get("spec_rows", []),
+                "created_at": (r.created_at.isoformat() + "Z") if r.created_at else None,
+            })
+        return {"status": "success", "data": result}
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.delete("/api/paper/template/{template_id}")
+def delete_paper_template(template_id: int, db: Session = Depends(get_db)):
+    try:
+        tpl = db.query(Paper).filter(Paper.id == template_id, Paper.is_template == 1).first()
+        if not tpl:
+            return JSONResponse(content={"status": "error", "message": "模板不存在"}, status_code=404)
+        db.delete(tpl)
+        db.commit()
+        return {"status": "success", "message": "模板已删除"}
+    except Exception as e:
+        db.rollback()
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/paper/save")
@@ -5253,14 +5721,26 @@ def export_paper_pdf(payload: dict, db: Session = Depends(get_db)):
 
         image_paths = collect_referenced_images(questions_data, UPLOAD_DIR, UPLOAD_DIR_REL)
         pdf_bytes, log_or_err = compile_tex_to_pdf(tex_content, image_paths)
-        
+
         if pdf_bytes:
             filename = f"sheet_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf" if target == "sheet" else f"paper_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
             return Response(content=pdf_bytes, media_type="application/pdf", headers={
                 "Content-Disposition": f'inline; filename="{filename}"'
             })
         else:
-            diagnostic = explain_latex_compile_error(log_or_err, tex_content)
+            # If the compiler is simply missing, return a clean, AI-free
+            # diagnostic immediately instead of risking a slow/failing model call.
+            if "xelatex" in (log_or_err or "").lower() and (
+                "未检测到" in (log_or_err or "") or "not found" in (log_or_err or "").lower()
+                or "no such file" in (log_or_err or "").lower()
+            ):
+                diagnostic = build_local_latex_diagnostic(log_or_err or "", tex_content)
+            else:
+                diagnostic = explain_latex_compile_error(log_or_err, tex_content)
+            # Surface the raw source + full compiler log so the user can debug
+            # even when the local diagnostic cannot pinpoint the offending line.
+            diagnostic.setdefault("tex_source", tex_content)
+            diagnostic.setdefault("full_log", (log_or_err or "")[:6000])
             return JSONResponse(
                 content={
                     "status": "error",
@@ -5384,6 +5864,19 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
             content={"status": "error", "message": f"生成 Word 试卷包失败: {str(e)}"},
             status_code=500,
         )
+
+# ----------------- Disable browser cache for static assets -----------------
+# 前端 JS/HTML/CSS 频繁改动，默认 StaticFiles 会让浏览器长期缓存，
+# 导致每次改完都得强制刷新。这里统一给 /static 响应加 no-cache 头。
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 
 # ----------------- Mount Static Folder last to allow API override -----------------
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

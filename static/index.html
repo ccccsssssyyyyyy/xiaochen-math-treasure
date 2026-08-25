@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>判桃MATH</title>
+    <title>小陈的数学宝藏</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="icon" type="image/png" sizes="256x256" href="/static/favicon.png">
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
@@ -83,24 +83,24 @@
         <div class="flex items-center space-x-3">
             <!-- 1. Absolute Top-Left Anchor: Logo & Title -->
             <div id="appLogoMark" class="h-10 w-10 rounded-xl overflow-hidden shadow-sm shrink-0 flex items-center justify-center">
-                <img src="/static/favicon.png" alt="MathBank Logo" class="w-full h-full object-cover">
+                <img src="/static/favicon.png" alt="小陈的数学宝藏 Logo" class="w-full h-full object-cover">
             </div>
             <div class="relative" id="workspaceDropdownContainer">
                 <div onclick="toggleWorkspaceDropdown(event)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleWorkspaceDropdown(event)}" id="workspaceDropdownBtn" role="button" tabindex="0" aria-label="切换工作台" aria-haspopup="menu" aria-expanded="false" class="group cursor-pointer rounded-xl px-2 py-1 -mx-2 hover:bg-slate-200/50 dark:hover:bg-slate-800/60 active:scale-95 transition-all" title="点击切换工作台">
-                    <span class="font-semibold text-lg tracking-tight font-['Outfit'] brand-title block">MathBank</span>
+                    <span class="font-semibold text-lg tracking-tight font-['Outfit'] brand-title block">小陈的数学宝藏</span>
                     <div class="flex items-center space-x-1 -mt-1">
-                        <span id="currentWorkspaceName" class="text-sm font-medium text-slate-700 dark:text-slate-200">题库研讨工作台</span>
+                        <span id="currentWorkspaceName" class="text-sm font-medium text-slate-700 dark:text-slate-200">题库工作台</span>
                         <i class="fa-solid fa-chevron-down text-[9px] text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300 transition-transform duration-200" id="workspaceDropdownArrow"></i>
                     </div>
                 </div>
                 <!-- Workspace Dropdown Menu -->
                 <div id="workspaceDropdownMenu" role="menu" class="glass-dropdown absolute left-0 mt-2 w-52 py-1.5 rounded-2xl border border-slate-200/70 bg-white/95 backdrop-blur-xl shadow-xl transition-all duration-200 scale-90 opacity-0 pointer-events-none origin-top-left z-50">
-                    <button onclick="selectWorkspace('bank', '题库研讨工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between font-medium rounded-xl" id="ws-btn-bank">
-                        <span>题库研讨工作台</span>
+                    <button onclick="selectWorkspace('bank', '题库工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between font-medium rounded-xl" id="ws-btn-bank">
+                        <span>题库工作台</span>
                         <i class="fa-solid fa-check text-[10px] text-brand-600 dark:text-brand-500" id="ws-check-bank"></i>
                     </button>
-                    <button onclick="selectWorkspace('paper', '组卷排版工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between rounded-xl" id="ws-btn-paper">
-                        <span>组卷排版工作台</span>
+                    <button onclick="selectWorkspace('paper', '组卷工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between rounded-xl" id="ws-btn-paper">
+                        <span>组卷工作台</span>
                         <i class="fa-solid fa-check text-[10px] text-brand-600 dark:text-brand-500 hidden" id="ws-check-paper"></i>
                     </button>
                 </div>
@@ -188,7 +188,7 @@
             </button>
 
             <!-- Shutdown Button - Apple Glass Danger Style -->
-            <button onclick="confirmShutdown()" aria-label="安全关闭题库" class="glass-btn-danger flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-semibold" title="安全关闭本地题库后端服务">
+            <button onclick="confirmShutdown()" aria-label="安全关闭题库" class="glass-btn-danger flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-semibold" title="安全关闭小陈的数学宝藏后端服务">
                 <i class="fa-solid fa-power-off"></i>
                 <span>关闭题库</span>
             </button>
@@ -196,104 +196,125 @@
     </header>
 
     <!-- Main Content Container -->
-    <main class="flex-1 flex overflow-hidden h-[calc(100vh-4rem)]">
-        
-        <!-- Workspace 1: Bank研讨工作台 (3-Column Layout) -->
-        <div id="bankWorkspaceSection" class="w-full h-full flex overflow-hidden">
-            <!-- Left Panel: Sidebar & Questions List - Apple Glass Style -->
-            <section id="sidebarSection" class="glass-sidebar flex flex-col h-full shrink-0 overflow-hidden" style="width: 320px; min-width: 0px;">
-            <!-- Sidebar Top Panel: Search, Buttons, Tabs -->
-            <div id="sidebarTopPanel" class="flex flex-col shrink-0 overflow-y-auto overflow-x-hidden custom-scrollbar">
-                <!-- Search & Filters -->
-                <div class="p-3 border-b border-slate-100 space-y-2">
-                    <div class="relative mx-2">
-                        <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <i class="fa-solid fa-magnifying-glass text-slate-400 text-xs"></i>
-                        </span>
-                        <input type="text" id="searchInput" placeholder="搜索题目内容..."
-                               class="glass-input w-full pl-8 pr-4 py-1.5 text-xs rounded-xl">
-                    </div>
+    <main class="flex-1 flex flex-col overflow-hidden h-[calc(100vh-4rem)]">
 
-                    <div class="grid grid-cols-2 gap-2">
-                        <select id="filterType" class="glass-select text-xs px-2.5 py-2.5 rounded-xl">
-                            <option value="">所有题型</option>
-                            <option value="single_choice">单选题</option>
-                            <option value="multi_choice">多选题</option>
-                            <option value="fill_in_blank">填空题</option>
-                            <option value="detailed_answer">解答题</option>
-                        </select>
-                        <select id="filterDifficulty" class="glass-select text-xs px-2.5 py-2.5 rounded-xl">
-                            <option value="">所有级别</option>
-                            <option value="easy_error">易错题</option>
-                            <option value="challenge">挑战题</option>
-                            <option value="qiangji">强基题</option>
-                        </select>
-                    </div>
+        <!-- Top Filter Bar: 题库工作台顶部横向筛选栏 (搜索/题型/难度/学段/排序 + 更多筛选 + 操作按钮) -->
+        <div id="bankTopFilterBar" class="shrink-0 glass-panel border-b border-slate-100 px-3 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 z-30">
+            <!-- 搜索框 -->
+            <div class="relative flex items-center">
+                <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <i class="fa-solid fa-magnifying-glass text-slate-400 text-xs"></i>
+                </span>
+                <input type="text" id="searchInput" placeholder="搜索题目内容..."
+                       class="glass-input w-56 pl-8 pr-4 py-1.5 text-xs rounded-xl">
+            </div>
 
-                    <!-- Custom Cascading Filter - Apple Glass Style -->
-                    <div class="space-y-1.5">
-                        <select id="filterCompulsory" class="glass-select w-full text-xs px-2.5 py-2.5 rounded-xl">
-                            <option value="">所有学段</option>
-                        </select>
-                        <select id="filterChapter" class="glass-select w-full text-xs px-2.5 py-2.5 rounded-xl hidden">
-                            <option value="">所有章节</option>
-                        </select>
-                    </div>
+            <!-- 常用筛选：题型 / 难度 / 学段 / 章节 / 排序 -->
+            <select id="filterType" class="glass-select text-xs px-2.5 py-1.5 rounded-xl">
+                <option value="">所有题型</option>
+                <option value="single_choice">单选题</option>
+                <option value="multi_choice">多选题</option>
+                <option value="fill_in_blank">填空题</option>
+                <option value="detailed_answer">解答题</option>
+            </select>
+            <select id="filterDifficulty" class="glass-select text-xs px-2.5 py-1.5 rounded-xl">
+                <option value="">所有级别</option>
+                <option value="easy_error">易错题</option>
+                <option value="challenge">挑战题</option>
+                <option value="qiangji">强基题</option>
+            </select>
+            <select id="filterCompulsory" class="glass-select text-xs px-2.5 py-1.5 rounded-xl">
+                <option value="">所有学段</option>
+            </select>
+            <select id="filterChapter" class="glass-select text-xs px-2.5 py-1.5 rounded-xl hidden">
+                <option value="">所有章节</option>
+            </select>
+            <select id="filterSort" class="glass-select text-xs px-2.5 py-1.5 rounded-xl">
+                <option value="desc" selected>时间倒序</option>
+                <option value="asc">时间正序</option>
+            </select>
 
-                    <!-- Searchable Source Filter - Apple Glass Style -->
+            <!-- 更多筛选下拉：知识点多选 / 解题方法多选 / 来源 -->
+            <div class="relative" id="topMoreFilterContainer">
+                <button type="button" onclick="toggleTopMoreFilter()" id="topMoreFilterBtn" class="glass-btn flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs text-slate-600">
+                    <i class="fa-solid fa-sliders text-[10px]"></i>
+                    <span>更多筛选</span>
+                    <i class="fa-solid fa-chevron-down text-[9px] transition-transform duration-200" id="topMoreFilterIcon"></i>
+                </button>
+                <!-- 已选标签计数徽标 -->
+                <span id="topMoreFilterBadge" class="hidden absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-brand-600 text-white text-[9px] font-bold flex items-center justify-center">0</span>
+
+                <!-- 下拉面板 -->
+                <div id="topMoreFilterPanel" class="hidden absolute left-0 mt-1.5 w-[320px] glass-dropdown p-3 z-40 space-y-3">
+                    <!-- 知识点 搜索式多选 -->
+                    <div>
+                        <label class="block text-[10px] font-bold text-slate-400 mb-1">知识点筛选 (搜索多选)</label>
+                        <div class="tag-search-box" data-tag-type="knowledge">
+                            <div class="tsb-selected flex flex-wrap gap-1 p-1.5 border border-slate-200/70 rounded-xl bg-white/40 min-h-[34px]"></div>
+                            <div class="relative mt-1">
+                                <input type="text" class="tsb-input w-full text-[11px] px-2 py-1 rounded-lg border border-slate-200/70 bg-white/60 focus:outline-none focus:border-brand-400" placeholder="输入并选择标签，如：集合" autocomplete="off">
+                                <div class="tsb-dropdown hidden absolute z-50 w-full mt-1 max-h-40 overflow-y-auto custom-scrollbar bg-white border border-slate-200 rounded-xl shadow-lg"></div>
+                            </div>
+                            <div id="filterKnowledgeTags" class="hidden"></div>
+                        </div>
+                    </div>
+                    <!-- 解题方法 搜索式多选 -->
+                    <div>
+                        <label class="block text-[10px] font-bold text-slate-400 mb-1">解题方法筛选 (搜索多选)</label>
+                        <div class="tag-search-box" data-tag-type="solve">
+                            <div class="tsb-selected flex flex-wrap gap-1 p-1.5 border border-slate-200/70 rounded-xl bg-white/40 min-h-[34px]"></div>
+                            <div class="relative mt-1">
+                                <input type="text" class="tsb-input w-full text-[11px] px-2 py-1 rounded-lg border border-slate-200/70 bg-white/60 focus:outline-none focus:border-brand-400" placeholder="输入并选择标签，如：配方法" autocomplete="off">
+                                <div class="tsb-dropdown hidden absolute z-50 w-full mt-1 max-h-40 overflow-y-auto custom-scrollbar bg-white border border-slate-200 rounded-xl shadow-lg"></div>
+                            </div>
+                            <div id="filterSolveMethodTags" class="hidden"></div>
+                        </div>
+                    </div>
+                    <!-- 来源 -->
                     <div class="flex items-center space-x-2 relative" id="filterSourceContainer">
-                        <span class="text-slate-400 text-[10px] font-bold shrink-0">
-                            <span>来源</span>
-                        </span>
+                        <span class="text-slate-400 text-[10px] font-bold shrink-0">来源</span>
                         <div class="relative flex-1">
                             <input type="text" id="filterSource" placeholder="输入题目来源..."
-                                   class="glass-input w-full pl-3 pr-7 py-1.5 text-xs rounded-xl bg-white/40"
-                                   autocomplete="off">
+                                   class="glass-input w-full pl-3 pr-7 py-1.5 text-xs rounded-xl bg-white/40" autocomplete="off">
                             <span class="absolute inset-y-0 right-0 pr-2.5 flex items-center cursor-pointer text-slate-400 hover:text-slate-600" id="toggleFilterSourceBtn">
                                 <i class="fa-solid fa-chevron-down text-[9px] transition-transform duration-200" id="chevronFilterSourceIcon"></i>
                             </span>
                             <span class="absolute inset-y-0 right-6 pr-1 flex items-center cursor-pointer text-slate-400 hover:text-slate-600 hidden" id="clearFilterSourceBtn">
                                 <i class="fa-solid fa-circle-xmark text-[10px]"></i>
                             </span>
-                            <!-- Custom Suggestions Dropdown - Apple Glass Style -->
-                            <div id="filterSourceSuggestions" class="glass-dropdown absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto z-30 hidden custom-scrollbar">
-                                <!-- Options will be injected here -->
-                            </div>
+                            <div id="filterSourceSuggestions" class="glass-dropdown absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto z-50 hidden custom-scrollbar"></div>
                         </div>
                     </div>
-
-                    <!-- Time Sorting Dropdown - Apple Glass Style -->
-                    <div class="flex items-center space-x-2 pt-1 border-t border-slate-100/50">
-                        <span class="text-slate-400 text-[10px] font-bold shrink-0">
-                            <span>排序</span>
-                        </span>
-                        <select id="filterSort" class="glass-select flex-1 text-xs px-2.5 py-1.5 rounded-xl bg-white/40">
-                            <option value="desc" selected>时间倒序 (最新优先)</option>
-                            <option value="asc">时间正序 (最早优先)</option>
-                        </select>
-                    </div>
                 </div>
+            </div>
 
-                <!-- Create New Buttons Group - Apple Glass Style -->
-                <div class="px-4 py-2 grid grid-cols-2 gap-2 shrink-0">
-                    <button onclick="checkAndSwitch(() => startNewQuestion())" class="glass-btn-primary flex items-center justify-center space-x-1.5 py-2.5 rounded-xl font-medium text-xs">
-                        <i class="fa-solid fa-plus text-[10px]"></i>
-                        <span>录入单题</span>
-                    </button>
-                    <button onclick="openImportModal()" class="glass-btn flex items-center justify-center space-x-1.5 py-2.5 rounded-xl font-medium text-xs text-slate-600">
-                        <i class="fa-solid fa-file-import text-[10px]"></i>
-                        <span>导入试卷</span>
-                    </button>
-                </div>
+            <!-- 右侧操作按钮 -->
+            <div class="ml-auto flex items-center space-x-2">
+                <button onclick="checkAndSwitch(() => startNewQuestion())" class="glass-btn-primary flex items-center space-x-1.5 px-4 py-2 rounded-xl font-medium text-xs">
+                    <i class="fa-solid fa-plus text-[10px]"></i>
+                    <span>录入单题</span>
+                </button>
+                <button onclick="openImportModal()" class="glass-btn flex items-center space-x-1.5 px-4 py-2 rounded-xl font-medium text-xs text-slate-600">
+                    <i class="fa-solid fa-file-import text-[10px]"></i>
+                    <span>导入试卷</span>
+                </button>
+            </div>
+        </div>
 
+        <!-- Workspace 1: Bank研讨工作台 (3-Column Layout) -->
+        <div id="bankWorkspaceSection" class="w-full flex-1 min-h-0 flex overflow-hidden">
+            <!-- Left Panel: Sidebar & Questions List - Apple Glass Style -->
+            <section id="sidebarSection" class="glass-sidebar flex flex-col h-full shrink-0 overflow-hidden" style="width: 280px; min-width: 0px;">
+            <!-- Sidebar Top Panel: Navigation Tabs Only (filters moved to top bar) -->
+            <div id="sidebarTopPanel" class="flex flex-col shrink-0" style="height: auto;">
                 <!-- Sidebar Navigation Tabs - Apple Glass Style -->
-                <div class="px-4 pt-1.5 pb-0 shrink-0">
+                <div class="px-3 pt-1.5 pb-0 shrink-0">
                     <div class="glass-tab flex space-x-1">
-                        <button onclick="switchSidebarTab('bank')" id="sidebarTab-bank" class="glass-tab-item active flex-1 py-2.5 rounded-lg text-[11px] font-semibold text-center flex items-center justify-center space-x-1.5">
+                        <button onclick="switchSidebarTab('bank')" id="sidebarTab-bank" class="glass-tab-item active flex-1 py-1.5 rounded-lg text-[11px] font-semibold text-center flex items-center justify-center space-x-1.5">
                             <i class="fa-solid fa-database text-[10px]"></i>
                             <span>本地题库</span>
                         </button>
-                        <button onclick="switchSidebarTab('drafts')" id="sidebarTab-drafts" class="glass-tab-item flex-1 py-2.5 rounded-lg text-[11px] font-semibold text-center flex items-center justify-center space-x-1.5">
+                        <button onclick="switchSidebarTab('drafts')" id="sidebarTab-drafts" class="glass-tab-item flex-1 py-1.5 rounded-lg text-[11px] font-semibold text-center flex items-center justify-center space-x-1.5">
                             <i class="fa-solid fa-box-archive text-[10px]"></i>
                             <span>草稿箱 (<span id="draftCount">0</span>)</span>
                         </button>
@@ -301,8 +322,27 @@
                 </div>
             </div>
 
-            <!-- Vertical Resizer inside Sidebar -->
-            <div id="sidebar-resizer-v" class="h-[3px] hover:h-[5px] bg-slate-200/80 hover:bg-brand-500 cursor-row-resize w-full transition-all duration-150 shrink-0 z-20"></div>
+            <!-- 试题篮快速提示条：在题库工作台也能看到组卷进度并一键切换 -->
+            <div id="bankCartHintBar" class="shrink-0 bg-brand-50/70 dark:bg-brand-900/30 border-y border-brand-200/60 dark:border-brand-900/50 px-3 py-2 hidden">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-2 text-xs">
+                        <i class="fa-solid fa-scroll text-brand-600 dark:text-brand-300"></i>
+                        <span class="font-semibold text-brand-800 dark:text-brand-200">试题篮</span>
+                        <span class="px-1.5 py-0.5 rounded-md bg-white dark:bg-slate-800 text-brand-700 dark:text-brand-200 font-bold text-[10px] border border-brand-200/60 dark:border-brand-900">
+                            <span class="paper-cart-badge">0</span> 题
+                        </span>
+                    </div>
+                    <button onclick="selectWorkspace('paper', '组卷工作台')" class="text-[10px] px-2 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all flex items-center space-x-1">
+                        <span>去组卷</span>
+                        <i class="fa-solid fa-arrow-right text-[9px]"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Questions List Header -->
+            <div class="px-3 pt-1 pb-1 flex items-center justify-between shrink-0">
+                <span class="text-[11px] font-bold text-slate-500" id="sidebarListCount">题目列表</span>
+            </div>
 
             <!-- Questions List Scroll -->
             <div class="flex-1 overflow-y-auto px-2 pb-6 space-y-2" id="questionsList">
@@ -395,6 +435,30 @@
                             <select id="editKnowledge" class="glass-select w-full px-2.5 text-xs rounded-xl disabled:opacity-50" disabled>
                                 <option value="">先选章节</option>
                             </select>
+                        </div>
+                    </div>
+
+                    <!-- Row 2.5: 知识点 / 解题方法 多标签 -->
+                    <div class="grid grid-cols-1 gap-3 mt-3">
+                        <div>
+                            <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                <i class="fa-solid fa-lightbulb text-slate-400 mr-1"></i>
+                                <span>知识点 (多标签，可 AI 自动打标)</span>
+                            </label>
+                            <div id="editKnowledgeTags" class="flex flex-wrap gap-1 items-center border border-slate-200 rounded-xl px-2.5 py-2 bg-white/50" data-field="knowledge_list">
+                                <span id="editKnowledgeTagsChips" class="flex flex-wrap gap-1"></span>
+                                <input type="text" id="editKnowledgeTagInput" class="flex-1 min-w-[80px] bg-transparent text-xs outline-none" placeholder="输入后回车添加">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                <i class="fa-solid fa-wand-magic-sparkles text-slate-400 mr-1"></i>
+                                <span>解题方法 (多标签，可 AI 自动打标)</span>
+                            </label>
+                            <div id="editSolveMethodTags" class="flex flex-wrap gap-1 items-center border border-slate-200 rounded-xl px-2.5 py-2 bg-white/50" data-field="solve_method">
+                                <span id="editSolveMethodTagsChips" class="flex flex-wrap gap-1"></span>
+                                <input type="text" id="editSolveMethodTagInput" class="flex-1 min-w-[80px] bg-transparent text-xs outline-none" placeholder="输入后回车添加">
+                            </div>
                         </div>
                     </div>
 
@@ -862,8 +926,8 @@
         <!-- Resizer Right -->
         <div id="resizer-2" class="w-[3px] hover:w-[5px] bg-slate-200/80 hover:bg-brand-500 cursor-col-resize h-full transition-all duration-150 shrink-0 z-20"></div>
 
-        <!-- Right Panel: Full Premium Live Preview (Paper View) - Apple Glass Style -->
-        <section class="glass-sidebar flex flex-col h-full shrink-0 overflow-y-auto" style="width: 450px; min-width: 0px;" id="previewSection">
+        <!-- Right Panel: 题目预览 (单一仿真试卷卡片) - Apple Glass Style -->
+        <section class="glass-sidebar flex flex-col h-full shrink-0 overflow-hidden" style="width: 450px; min-width: 0px;" id="previewSection">
             <!-- Title Bar - Apple Glass Style -->
             <div class="sticky top-0 glass-panel px-5 py-4 flex justify-between items-center z-10">
                 <span class="font-bold text-sm tracking-wide text-slate-600 flex items-center space-x-1.5">
@@ -872,8 +936,8 @@
                 </span>
             </div>
 
-            <!-- Beautiful Paper View Card -->
-            <div class="p-6">
+            <!-- Sub-view: 录入预览 (Beautiful Paper View Card) - 默认显示 -->
+            <div class="p-6 flex-1 overflow-y-auto custom-scrollbar" id="tab-edit-preview">
                 <div class="border border-slate-300 rounded-2xl shadow-lg paper-card overflow-hidden min-h-[500px] flex flex-col select-text">
                     <!-- Accent color bar -->
                     <div class="h-2 bg-brand-600 w-full shrink-0"></div>
@@ -955,7 +1019,7 @@
                     <!-- Footer of Paper -->
                     <div class="p-4 border-t bg-slate-50 flex items-center justify-between text-[10px] text-slate-400">
                         <span id="paperFooterSource">来源: 未分类</span>
-                        <span>教研工作台 @ MathBank</span>
+                        <span>小陈的数学宝藏</span>
                     </div>
                 </div>
             </div>
@@ -964,8 +1028,8 @@
 
         <!-- Workspace 2: Standalone 4-Part Paper Studio Workspace Section -->
         <div id="paperWorkspaceSection" class="w-full h-full flex overflow-hidden hidden bg-slate-50 dark:bg-slate-950">
-            <!-- Left Side: Parts ② & ③ (60% width) -->
-            <div class="w-[60%] flex flex-col h-full border-r border-slate-200/80 dark:border-slate-800 shrink-0 bg-slate-50/50 dark:bg-slate-900/50">
+            <!-- Left Side: Parts ② & ③ (55% width, more room for question stream) -->
+            <div class="w-[55%] flex flex-col h-full border-r border-slate-200/80 dark:border-slate-800 shrink-0 bg-slate-50/50 dark:bg-slate-900/50">
                 <!-- Part ②: Collapsible Control Bar -->
                 <div id="paperFilterSection" class="p-2.5 sm:p-3 transition-all duration-300 shrink-0">
                     <!-- Rendered by paper.js -->
@@ -985,9 +1049,12 @@
                 </div>
             </div>
 
-            <!-- Right Side: Part ④ (40% width) -->
-            <div class="w-[40%] flex flex-col h-full bg-slate-100/60 dark:bg-slate-950 p-4 overflow-hidden shrink-0" id="paperCanvasSection">
-                <!-- Rendered by paper.js -->
+            <!-- Right Side: Part ④ (45% width) -->
+            <div class="w-[45%] flex flex-col h-full bg-slate-100/60 dark:bg-slate-950 overflow-hidden shrink-0">
+                <!-- Part ④: A4 Canvas (full height, no tool drawer) -->
+                <div class="flex-1 p-4 overflow-hidden shrink-0 flex flex-col" id="paperCanvasSection">
+                    <!-- Rendered by paper.js -->
+                </div>
             </div>
         </div>
         <!-- End of Paper Workspace Section -->
@@ -1337,7 +1404,7 @@
                         </div>
                         <div class="flex-1">
                             <div class="flex items-center space-x-2">
-                                <h4 class="font-bold text-base text-slate-800 dark:text-white">MathBank 本地数学题库系统</h4>
+                                <h4 class="font-bold text-base text-slate-800 dark:text-white">小陈的数学宝藏 本地数学题库系统</h4>
                                 <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-brand-600 text-white" id="aboutCurrentVersionBadge">v2.0.1</span>
                             </div>
                             <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">本地轻量化数学题库</p>
@@ -1696,7 +1763,7 @@
 
     <!-- LATEX BATCH IMPORT MODAL - Apple Glass Style -->
     <div id="latexImportModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="latexImportModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
-        <div class="glass-modal rounded-2xl w-full max-w-6xl h-[90vh] flex flex-col transform scale-95 transition-transform duration-300 overflow-hidden">
+        <div class="glass-modal rounded-2xl w-[95vw] h-[95vh] max-w-none flex flex-col transform scale-95 transition-transform duration-300 overflow-hidden">
             <!-- Modal Header -->
             <div class="flex justify-between items-center border-b border-slate-200/50 px-6 py-4 shrink-0">
                 <h3 id="latexImportModalTitle" class="font-bold text-lg text-slate-800 flex items-center space-x-2">
@@ -1726,10 +1793,14 @@
                             <i class="fa-solid fa-file-lines text-slate-400 text-xl mb-1.5" id="texFileIcon"></i>
                             <span class="text-xs text-slate-600 font-medium" id="texFileName">点击或拖放 .tex / .pdf / .docx 试卷文件</span>
                         </div>
-                        <input id="texFileInput" type="file" accept=".tex,.pdf,.docx,application/x-tex,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hidden">
+                        <input id="texFileInput" type="file" multiple accept=".tex,.pdf,.docx,application/x-tex,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hidden">
                         <textarea id="importLatexContent" placeholder="在此粘贴试卷的 LaTeX 源代码..." 
                                   class="w-full flex-1 p-3.5 border border-slate-200 rounded-xl outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono text-xs bg-slate-50/50 resize-none"></textarea>
                     </div>
+
+                    <!-- 多文件批量队列（选多个文件后显示，串行拆解 + 人工审核） -->
+                    <div id="importQueueProgress" class="hidden text-[10px] font-bold text-brand-600 bg-brand-50/60 border border-brand-100 rounded-lg px-2.5 py-1.5 shrink-0"></div>
+                    <div id="importFileQueue" class="hidden shrink-0"></div>
 
                     <!-- Step 3: Optional assets referenced by single-file TeX -->
                     <div class="space-y-1.5 shrink-0" id="texImagesSection">
@@ -1743,7 +1814,7 @@
                         <div id="importImagesList" class="hidden flex flex-wrap gap-1.5"></div>
                     </div>
 
-                    <div class="flex items-start space-x-3 p-3 bg-slate-50/80 border border-slate-200/60 rounded-xl shrink-0">
+                    <div data-queue-collapse="1" class="flex items-start space-x-3 p-3 bg-slate-50/80 border border-slate-200/60 rounded-xl shrink-0">
                         <input type="checkbox" id="importGenerateAnswers" class="w-4 h-4 text-brand-600 border-slate-300 rounded focus:ring-brand-500 cursor-pointer mt-0.5">
                         <div class="flex-1">
                             <label for="importGenerateAnswers" class="block text-xs font-bold text-slate-700 cursor-pointer">自动生成 AI 解答与详细解析</label>
@@ -1751,8 +1822,16 @@
                         </div>
                     </div>
 
+                    <div data-queue-collapse="1" class="flex items-start space-x-3 p-3 bg-amber-50/70 border border-amber-200/70 rounded-xl shrink-0">
+                        <input type="checkbox" id="importSeparatedMode" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500 cursor-pointer mt-0.5">
+                        <div class="flex-1">
+                            <label for="importSeparatedMode" class="block text-xs font-bold text-amber-800 cursor-pointer">题目与解析分离（题在前、解析在后）</label>
+                            <span class="text-[10px] text-amber-700/80 block leading-normal mt-0.5">适用于前半部分是全部题干、后半部分按题号排列解析的文档。开启后 AI 会按题号锚点把每段解析精确配对到对应题目；缺失解析的题目会标记「[缺解析]」。</span>
+                        </div>
+                    </div>
+
                     <!-- PDF Advanced Parsing Options (Visible only when PDF selected) -->
-                    <div id="pdfPageRangeContainer" class="hidden space-y-2.5 p-3 bg-indigo-50/40 border border-indigo-100 rounded-xl shrink-0">
+                    <div id="pdfPageRangeContainer" data-queue-collapse="1" class="hidden space-y-2.5 p-3 bg-indigo-50/40 border border-indigo-100 rounded-xl shrink-0">
                         <div class="flex items-center justify-between">
                             <label class="block text-xs font-bold text-indigo-950 flex items-center space-x-1.5">
                                 <i class="fa-solid fa-microchip text-brand-600"></i>
@@ -1785,7 +1864,7 @@
 
                     <!-- Step 4: Run AI Parse & Reset buttons -->
                     <div class="flex items-center space-x-2.5 shrink-0 pt-1">
-                        <button onclick="runAIPaperParse()" id="runParseBtn" class="flex-1 glass-btn-primary flex items-center justify-center space-x-2 py-3 rounded-xl font-bold text-sm">
+                        <button onclick="startImportParseClick()" id="runParseBtn" class="flex-1 glass-btn-primary flex items-center justify-center space-x-2 py-3 rounded-xl font-bold text-sm">
                             <i class="fa-solid fa-wand-magic-sparkles"></i>
                             <span>一键 AI 智能拆解并关联</span>
                         </button>
@@ -1822,6 +1901,8 @@
                             <div class="w-full bg-slate-200 rounded-full h-1.5 mt-2 hidden" id="importProgressBarContainer">
                                 <div class="bg-brand-600 h-1.5 rounded-full transition-all duration-300" style="width: 0%" id="importProgressBar"></div>
                             </div>
+                            <!-- 拆卷步骤进度条：实时显示拆解进行到哪一步，出错时高亮失败步骤 -->
+                            <div id="importStepsContainer" class="w-full max-w-xs mt-3 hidden" aria-label="拆卷步骤进度"></div>
                             <p class="text-xs text-slate-500 max-w-xs leading-relaxed mt-1" id="importSubLoadingText">
                                 正在探测 PDF 试卷格式并准备提取...
                             </p>
@@ -1840,7 +1921,7 @@
                     </div>
 
                     <!-- Parsed Questions List Container -->
-                    <div id="parsedQuestionsWrapper" class="flex-1 flex flex-col space-y-4 hidden">
+                    <div id="parsedQuestionsWrapper" class="flex-1 flex flex-col space-y-4 hidden min-h-0">
                         <!-- Top actions bar -->
                         <div class="flex flex-wrap items-center justify-between gap-3 shrink-0 bg-white/70 backdrop-blur-sm p-3.5 border border-white/50 rounded-xl shadow-sm">
                             <div class="flex items-center space-x-3.5">
@@ -1876,9 +1957,16 @@
                             </div>
                         </div>
 
-                        <!-- Card scroll list -->
-                        <div class="flex-1 overflow-y-auto space-y-4 pr-1.5 custom-scrollbar pb-6" id="parsedCardsContainer">
-                            <!-- Injected Card details -->
+                        <!-- Card scroll list + 目录 -->
+                        <div class="flex-1 flex overflow-hidden gap-3 min-h-0">
+                            <!-- 左侧目录竖栏：题型+题号，点击跳转，滚动高亮 -->
+                            <div id="parsedTOC" class="w-24 shrink-0 h-full min-h-0 overflow-y-auto custom-scrollbar bg-white/60 border border-slate-200/60 rounded-xl p-2 space-y-1 hidden">
+                                <!-- 目录项动态注入 -->
+                            </div>
+                            <!-- 右侧卡片列表（可滚动） -->
+                            <div class="flex-1 h-full min-h-0 overflow-y-auto space-y-4 pr-1.5 custom-scrollbar pb-6" id="parsedCardsContainer">
+                                <!-- Injected Card details -->
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1900,7 +1988,7 @@
     <script src="/static/js/api.js?v=1.0.1"></script>
     <script src="/static/js/editor.js?v=1.0.1"></script>
     <script src="/static/js/ocr.js?v=1.0.1"></script>
-    <script src="/static/js/import.js?v=1.0.1"></script>
+    <script src="/static/js/import.js?v=1.0.2"></script>
     <script src="/static/js/paper.js?v=1.0.1"></script>
     
     <!-- PDF PAGE VIEWER & MANUAL CROP LIGHTBOX MODAL - Apple Glass Style -->

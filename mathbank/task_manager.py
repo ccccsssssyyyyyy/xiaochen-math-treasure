@@ -118,6 +118,108 @@ class TaskManager:
     def complete(self, task_id: str, **result: Any) -> bool:
         return self.update(task_id, status="completed", progress=100, **result)
 
+    # ---- Structured decomposition step tracking ----
+    # Step status vocabulary: "pending" | "active" | "done" | "error".
+    # These helpers drive a progress stepper so the UI can show which step the
+    # decomposition is on, and pinpoint the exact failing step on error.
+    def init_steps(self, task_id: str, steps: list[Any]) -> bool:
+        """Register an ordered step plan used to render a progress stepper."""
+
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("步骤列表不能为空")
+        with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                return False
+            if record.state.get("status") in TERMINAL_STATUSES:
+                return False
+            normalized: list[dict[str, Any]] = []
+            for item in steps:
+                if isinstance(item, dict):
+                    key = item.get("key")
+                    label = item.get("label", key)
+                else:
+                    key, label = item[0], item[1]
+                if not key:
+                    raise ValueError("步骤必须包含唯一 key")
+                normalized.append(
+                    {"key": key, "label": label, "status": "pending", "detail": ""}
+                )
+            record.state["steps"] = normalized
+            record.state["current_step"] = None
+            record.updated_at = dt.datetime.now(dt.timezone.utc)
+            return True
+
+    def step_start(self, task_id: str, key: str, detail: str = "") -> bool:
+        """Mark a step active; any previously active step auto-completes."""
+
+        with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                return False
+            if record.state.get("status") in TERMINAL_STATUSES:
+                return False
+            steps = record.state.get("steps")
+            if not isinstance(steps, list):
+                return False
+            target: dict[str, Any] | None = None
+            for step in steps:
+                if step.get("status") == "active":
+                    step["status"] = "done"
+                if step.get("key") == key:
+                    target = step
+            if target is None:
+                return False
+            target["status"] = "active"
+            if detail:
+                target["detail"] = detail
+            record.state["current_step"] = key
+            record.updated_at = dt.datetime.now(dt.timezone.utc)
+            return True
+
+    def step_error(
+        self, task_id: str, key: str, error_message: str, **extra: Any
+    ) -> bool:
+        """Mark the failing step and set the task to a terminal error state."""
+
+        with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                return False
+            steps = record.state.get("steps")
+            label = key
+            if isinstance(steps, list):
+                for step in steps:
+                    if step.get("key") == key:
+                        step["status"] = "error"
+                        step["detail"] = error_message
+                        label = step.get("label", key)
+            record.state.update(
+                {
+                    "status": "error",
+                    "error": f"拆解在「{label}」步骤失败：{error_message}",
+                    "failed_step": key,
+                    **extra,
+                }
+            )
+            record.updated_at = dt.datetime.now(dt.timezone.utc)
+            return True
+
+    def step_complete_all(self, task_id: str) -> bool:
+        """Mark every registered step as done (call on a successful finish)."""
+
+        with self._lock:
+            record = self._records.get(task_id)
+            if record is None:
+                return False
+            steps = record.state.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    step["status"] = "done"
+            record.state["current_step"] = None
+            record.updated_at = dt.datetime.now(dt.timezone.utc)
+            return True
+
     def cancel(self, task_id: str) -> dict[str, Any] | None:
         with self._lock:
             record = self._records.get(task_id)

@@ -200,6 +200,26 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
 }
 
+/* 题库工作台：已加入试卷题目的卡片高亮 */
+.question-card.cart-active {
+    background: rgba(var(--brand-50-rgb), 0.55);
+    border-color: rgba(var(--brand-500-rgb), 0.35);
+    border-left: 3.5px solid rgb(var(--brand-600-rgb));
+}
+.dark .question-card.cart-active {
+    background: rgba(var(--brand-rgb), 0.14) !important;
+    border-color: rgba(var(--brand-rgb), 0.4) !important;
+    border-left: 3.5px solid rgb(var(--brand-500-rgb)) !important;
+}
+
+/* 展开全文时取消行截断 */
+.question-card .card-formula-render.expanded-body {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+    overflow: visible;
+}
+
 /* 3. Button and Interactive Elements Dark Mode Overrides */
 .dark button.bg-white,
 .dark a.bg-white {
@@ -1180,10 +1200,9 @@ button, a, input, select, textarea {
     }
 }
 
-/* Sidebar Vertical Resizer Styles */
+/* Sidebar Top Panel: 仅含本地题库/草稿箱 Tab，高度由内容自然决定 */
 #sidebarTopPanel {
     height: auto;
-    min-height: 120px;
     transition: background-color 0.25s ease;
 }
 
