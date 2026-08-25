@@ -1739,11 +1739,14 @@
                 latexTextarea.disabled = false;
                 window.currentTexDiagnostics = diagnostics;
                 const titleInput = document.getElementById('importPaperTitle');
-                const autoTitle = serverTitle || extractTitleFromLatex(source || '');
-                if (autoTitle) {
-                    titleInput.value = autoTitle;
-                } else if (!titleInput.value.trim()) {
-                    titleInput.value = file.name.replace(/\.[^/.]+$/, '');
+                let autoTitle = '';
+                if (!window.__isMultiFileQueueMode()) {
+                    autoTitle = serverTitle || extractTitleFromLatex(source || '');
+                    if (autoTitle) {
+                        titleInput.value = autoTitle;
+                    } else if (!titleInput.value.trim()) {
+                        titleInput.value = file.name.replace(/\.[^/.]+$/, '');
+                    }
                 }
                 return autoTitle;
             }
@@ -1769,7 +1772,7 @@
                     latexTextarea.disabled = true;
 
                     const titleInput = document.getElementById('importPaperTitle');
-                    if (!titleInput.value) {
+                    if (!window.__isMultiFileQueueMode() && !titleInput.value) {
                         titleInput.value = file.name.replace(/\.[^/.]+$/, "");
                     }
 
@@ -1786,7 +1789,7 @@
                     latexTextarea.disabled = true;
 
                     const titleInput = document.getElementById('importPaperTitle');
-                    if (!titleInput.value) {
+                    if (!window.__isMultiFileQueueMode() && !titleInput.value) {
                         titleInput.value = file.name.replace(/\.[^/.]+$/, "");
                     }
 
@@ -1899,16 +1902,17 @@
             const pendingFiles = [];
             let queueProcessing = false;
 
+            // 多文件队列模式（≥2 个文件已入队）下隐藏「第一步：试卷标题」输入框：
+            // 每道题会自动带上各自来源文件名，单标题框只会显示第一个文件名，多余且易误导。
+            // 挂到 window 上，供不同作用域（handleTexFileSelect / runAIPaperParse 等）访问。
+            window.__isMultiFileQueueMode = function() {
+                return Array.isArray(pendingFiles) && pendingFiles.length >= 2;
+            };
+
             function enqueueFiles(fileList) {
                 if (!fileList || fileList.length === 0) return;
                 let added = 0;
                 let skipped = 0;
-                // 多文件（≥2）模式下，单文件 TeX 配套图片区无意义，隐藏它；
-                // 仅剩 1 个文件或清空时恢复显示（由下方 renderFileQueue 收尾处理）。
-                const texImagesSection = document.getElementById('texImagesSection');
-                if (texImagesSection) {
-                    texImagesSection.classList.toggle('hidden', fileList.length >= 2);
-                }
                 fileList.forEach(file => {
                     const lower = (file.name || '').toLowerCase();
                     const valid = lower.endsWith('.tex') || lower.endsWith('.pdf') || lower.endsWith('.docx');
@@ -1954,6 +1958,13 @@
                 document.querySelectorAll('[data-queue-collapse="1"]').forEach(el => {
                     el.classList.toggle('hidden', inBatchMode);
                 });
+                // 多文件队列模式（≥2 个文件）下，隐藏单文件专属的标题输入框与 TeX 配套图片区：
+                // 每道题已自动带上各自来源文件名，单标题框只会显示第一份文件的名字，易误导。
+                const multiFileMode = pendingFiles.length >= 2;
+                const titleGroup = document.getElementById('importTitleGroup');
+                if (titleGroup) titleGroup.classList.toggle('hidden', multiFileMode);
+                const texImagesSection = document.getElementById('texImagesSection');
+                if (texImagesSection) texImagesSection.classList.toggle('hidden', multiFileMode);
                 updateFileQueueProgress();
                 updateParseButtonState();
                 // 同步队列快照到全局，供 saveAllParsedQuestions 跨作用域判断阶段
@@ -2523,7 +2534,7 @@
                 return;
             }
 
-            if (!title) {
+            if (!title && !window.__isMultiFileQueueMode()) {
                 if (!confirm('试卷标题为空，导入后题目来源将显示为空。\n确定继续吗？')) {
                     titleInput.focus();
                     if (appendMode) {
@@ -3186,6 +3197,9 @@
             // 清空左侧输入栏
             const titleInput = document.getElementById('importPaperTitle');
             if (titleInput) titleInput.value = '';
+            // 重置后恢复标题输入框显示（多文件模式会隐藏它）
+            const titleGroupEl = document.getElementById('importTitleGroup');
+            if (titleGroupEl) titleGroupEl.classList.remove('hidden');
 
             const latexTextarea = document.getElementById('importLatexContent');
             if (latexTextarea) {
