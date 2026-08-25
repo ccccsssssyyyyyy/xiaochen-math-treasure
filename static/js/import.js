@@ -3348,6 +3348,8 @@
                 const card = document.createElement('div');
                 card.className = "glass-card rounded-xl p-4 space-y-3 flex flex-col relative";
                 card.id = `parsed-card-${index}`;
+                // 按当前审查筛选决定是否立即可见（不改动数组下标）
+                if (!isCardVisibleByFilter(q)) card.classList.add('hidden');
                 
                 card.innerHTML = `
                     ${q.source_file ? `<div class="flex items-center space-x-1.5 mb-3 shrink-0"><i class="fa-solid fa-file-lines text-brand-500 text-[10px]"></i><span class="text-[10px] font-bold text-brand-700 bg-brand-50 border border-brand-100 rounded px-2 py-0.5 truncate max-w-full" title="${window.MathBankSafe.escapeAttribute(q.source_file)}">${window.MathBankSafe.escapeText(q.source_file)}</span></div>` : ''}
@@ -3510,12 +3512,13 @@
             const total = parsedFileGroups.length;
             const header = document.createElement('div');
             header.className = 'flex items-center justify-between gap-2 mt-5 mb-2 px-3 py-2 rounded-xl bg-brand-50/80 border border-brand-200/80 sticky top-0 z-10 backdrop-blur-sm';
+            header.dataset.groupHeader = groupIndex;
             header.innerHTML = `
                 <div class="flex items-center space-x-2 min-w-0">
                     <i class="fa-solid fa-file-lines text-brand-600 text-sm shrink-0"></i>
                     <span class="text-[11px] font-bold text-brand-800 truncate" title="${window.MathBankSafe.escapeAttribute(group.name)}">文件 ${groupIndex + 1}/${total}：${window.MathBankSafe.escapeText(group.name)}</span>
                 </div>
-                <span class="text-[10px] font-bold text-brand-600 bg-white/70 border border-brand-100 rounded-full px-2 py-0.5 shrink-0">${group.count} 题</span>
+                <span data-group-visible class="text-[10px] font-bold text-brand-600 bg-white/70 border border-brand-100 rounded-full px-2 py-0.5 shrink-0">${group.count} 题</span>
             `;
             container.appendChild(header);
         }
@@ -3544,6 +3547,7 @@
             });
             if (typeof updateSelectedCount === 'function') updateSelectedCount();
             initParsedTOCScrollSpy();
+            applyReviewFilter();
         }
 
         // 多文件模式：增量渲染新追加的卡片（不清空既有列表，仅渲染 startIndex 之后的新题）
@@ -3561,6 +3565,7 @@
             }
             if (typeof updateSelectedCount === 'function') updateSelectedCount();
             initParsedTOCScrollSpy();
+            applyReviewFilter();
         }
 
         // 点击目录项：平滑滚动到对应卡片
@@ -4119,7 +4124,7 @@
             checkboxes.forEach(cb => {
                 const idx = parseInt(cb.getAttribute('data-index'), 10);
                 const q = parsedQuestionsData[idx];
-                if (q && !q.saved && cb.checked) {
+                if (q && !q.saved && cb.checked && isCardVisibleByFilter(q)) {
                     indices.push(idx);
                 }
             });
@@ -4134,7 +4139,7 @@
             checkboxes.forEach(cb => {
                 const idx = parseInt(cb.getAttribute('data-index'), 10);
                 const q = parsedQuestionsData[idx];
-                if (q && !q.saved) {
+                if (q && !q.saved && isCardVisibleByFilter(q)) {
                     unsavedCount++;
                     if (cb.checked) {
                         checkedCount++;
@@ -4188,9 +4193,11 @@
         function toggleSelectAllParsed(checked) {
             const checkboxes = document.querySelectorAll('.card-select-checkbox');
             checkboxes.forEach(cb => {
-                if (!cb.disabled) {
-                    cb.checked = checked;
-                }
+                if (cb.disabled) return;
+                const idx = parseInt(cb.getAttribute('data-index'), 10);
+                const q = parsedQuestionsData[idx];
+                if (q && !isCardVisibleByFilter(q)) return;
+                cb.checked = checked;
             });
             updateSelectedCount();
         }
@@ -4198,11 +4205,93 @@
         function invertSelectParsed() {
             const checkboxes = document.querySelectorAll('.card-select-checkbox');
             checkboxes.forEach(cb => {
-                if (!cb.disabled) {
-                    cb.checked = !cb.checked;
-                }
+                if (cb.disabled) return;
+                const idx = parseInt(cb.getAttribute('data-index'), 10);
+                const q = parsedQuestionsData[idx];
+                if (q && !isCardVisibleByFilter(q)) return;
+                cb.checked = !cb.checked;
             });
             updateSelectedCount();
+        }
+
+        // ==========================================
+        // 拆解结果审查筛选（未导入 / 已导入 / 全部）
+        // ==========================================
+        // 按当前筛选判断单题是否可见：仅控制 DOM 显示，不改动数组下标
+        function isCardVisibleByFilter(q) {
+            const f = window.__parsedReviewFilter;
+            if (f === 'imported') return !!q.saved;
+            if (f === 'unimported') return !q.saved;
+            return true; // all
+        }
+
+        // 刷新筛选 Tab 上的计数徽标
+        function refreshFilterCounts() {
+            const total = parsedQuestionsData.length;
+            const imported = parsedQuestionsData.filter(q => !!q.saved).length;
+            const unimported = total - imported;
+            const set = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
+            set('filterCountAll', total);
+            set('filterCountImported', imported);
+            set('filterCountUnimported', unimported);
+        }
+
+        // 根据当前筛选：切换卡片可见性、刷新分组头可见题数、空状态提示、计数
+        function applyReviewFilter() {
+            const container = document.getElementById('parsedCardsContainer');
+            if (!container) return;
+            let visibleCount = 0;
+            parsedQuestionsData.forEach((q, index) => {
+                const card = document.getElementById(`parsed-card-${index}`);
+                if (!card) return;
+                const visible = isCardVisibleByFilter(q);
+                card.classList.toggle('hidden', !visible);
+                if (visible) visibleCount++;
+            });
+            // 分组头：按可见题数刷新计数，整组为空则隐藏
+            if (parsedFileGroups && parsedFileGroups.length) {
+                parsedFileGroups.forEach((group, gi) => {
+                    const header = container.querySelector(`[data-group-header="${gi}"]`);
+                    if (!header) return;
+                    const nextStart = (gi + 1 < parsedFileGroups.length) ? parsedFileGroups[gi + 1].startIndex : parsedQuestionsData.length;
+                    let grpVisible = 0;
+                    for (let i = group.startIndex; i < nextStart; i++) {
+                        const q = parsedQuestionsData[i];
+                        if (q && isCardVisibleByFilter(q)) grpVisible++;
+                    }
+                    const countSpan = header.querySelector('[data-group-visible]');
+                    if (countSpan) countSpan.textContent = `${grpVisible} 题`;
+                    header.classList.toggle('hidden', grpVisible === 0);
+                });
+            }
+            const badge = document.getElementById('parsedCountBadge');
+            if (badge) badge.textContent = `共 ${visibleCount} 题`;
+            // 空状态提示（有题但当前筛选下全被隐藏）
+            const oldEmpty = document.getElementById('reviewFilterEmpty');
+            if (oldEmpty) oldEmpty.remove();
+            if (visibleCount === 0 && parsedQuestionsData.length > 0) {
+                const div = document.createElement('div');
+                div.id = 'reviewFilterEmpty';
+                const f = window.__parsedReviewFilter;
+                div.className = 'p-12 text-center text-slate-400 text-xs';
+                div.textContent = f === 'imported' ? '暂无已导入的题目。' : (f === 'unimported' ? '🎉 所有题目都已成功导入题库！' : '当前筛选下没有题目。');
+                container.appendChild(div);
+            }
+            refreshFilterCounts();
+            updateSelectedCount();
+        }
+
+        // 切换筛选：更新 Tab 高亮 + 应用筛选（供 HTML onclick 调用）
+        function setReviewFilter(f) {
+            window.__parsedReviewFilter = f;
+            document.querySelectorAll('.review-filter-btn').forEach(btn => {
+                const active = btn.getAttribute('data-filter') === f;
+                btn.classList.toggle('bg-brand-600', active);
+                btn.classList.toggle('text-white', active);
+                btn.classList.toggle('text-slate-500', !active);
+                btn.classList.toggle('hover:bg-slate-100', !active);
+            });
+            applyReviewFilter();
         }
 
         function saveAllParsedQuestions() {
@@ -4276,6 +4365,7 @@
                     const successCount = results.filter(r => r === true).length;
 
                     updateSelectedCount();
+                    applyReviewFilter();
                     const remainingUnsavedCount = parsedQuestionsData.filter(q => !q.saved).length;
 
                     if (remainingUnsavedCount === 0) {

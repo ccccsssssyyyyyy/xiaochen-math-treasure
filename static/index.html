@@ -1929,6 +1929,11 @@
                                     <span class="text-xs font-bold text-slate-700">拆解结果审查</span>
                                     <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-brand-50 text-brand-600 border border-brand-100" id="parsedCountBadge">共 0 题</span>
                                 </div>
+                                <div class="flex items-center space-x-1 border border-slate-200 rounded-lg bg-slate-50 p-0.5 shrink-0" id="reviewFilterBar">
+                                    <button type="button" data-filter="unimported" onclick="setReviewFilter('unimported')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors bg-brand-600 text-white">未导入 <span id="filterCountUnimported" class="opacity-60">0</span></button>
+                                    <button type="button" data-filter="imported" onclick="setReviewFilter('imported')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">已导入 <span id="filterCountImported" class="opacity-60">0</span></button>
+                                    <button type="button" data-filter="all" onclick="setReviewFilter('all')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">全部 <span id="filterCountAll" class="opacity-60">0</span></button>
+                                </div>
                                 <div class="flex items-center space-x-3 border-l pl-3.5 border-slate-200" id="batchSelectActions">
                                     <label class="flex items-center space-x-1.5 cursor-pointer text-[10px] font-semibold text-slate-500 hover:text-brand-600 transition-colors select-none">
                                         <input type="checkbox" id="selectAllCheckbox" class="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 transition-colors" checked onchange="toggleSelectAllParsed(this.checked)">
