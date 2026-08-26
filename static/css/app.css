@@ -1754,8 +1754,7 @@ main {
 
     #settingsModal > .glass-modal,
     #statsModal > .glass-modal,
-    #updateModal > .glass-modal,
-    #aiClassifyModal > .glass-modal {
+    #updateModal > .glass-modal {
         padding: 1rem;
     }
 

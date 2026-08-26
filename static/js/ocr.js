@@ -80,30 +80,6 @@
                 }
             });
 
-            // Initialize and persist state of skipTikz checkboxes in localStorage
-            const contentSkipBox = document.getElementById('contentOcrSkipTikz');
-            const answerSkipBox = document.getElementById('answerOcrSkipTikz');
-
-            if (contentSkipBox) {
-                const savedContentState = localStorage.getItem('contentOcrSkipTikz');
-                if (savedContentState !== null) {
-                    contentSkipBox.checked = (savedContentState === 'true');
-                }
-                contentSkipBox.addEventListener('change', () => {
-                    localStorage.setItem('contentOcrSkipTikz', contentSkipBox.checked);
-                });
-            }
-
-            if (answerSkipBox) {
-                const savedAnswerState = localStorage.getItem('answerOcrSkipTikz');
-                if (savedAnswerState !== null) {
-                    answerSkipBox.checked = (savedAnswerState === 'true');
-                }
-                answerSkipBox.addEventListener('change', () => {
-                    localStorage.setItem('answerOcrSkipTikz', answerSkipBox.checked);
-                });
-            }
-
             // Global smart clipboard paste routing for images/screenshots (Euclidean distance matching to closest visible DropZone)
             window.addEventListener('paste', (e) => {
                 const items = (e.clipboardData || e.originalEvent.clipboardData).items;
@@ -657,12 +633,10 @@
             const signal = answerOcrAbortController.signal;
             
             const engine = 'default';
-            const skipTikz = document.getElementById('answerOcrSkipTikz') ? document.getElementById('answerOcrSkipTikz').checked : false;
             
             const formData = new FormData();
             formData.append('file', file);
             formData.append('engine', engine);
-            formData.append('skip_tikz', skipTikz ? "true" : "false");
             
             fetch('/api/ocr', {
                 method: 'POST',
@@ -687,35 +661,6 @@
                     
                     if (data.image_path) {
                         window.lastOcrOriginalImagePath = data.image_path;
-                    }
-                    
-                    if (data.tikz_code) {
-                        const tikzTextarea = document.getElementById('editAnswerTikzCode');
-                        if (tikzTextarea) {
-                            tikzTextarea.value = data.tikz_code;
-                        }
-                        
-                        const container = document.getElementById('answerTikzContainer');
-                        if (container) {
-                            container.classList.remove('hidden');
-                        }
-                        
-                        if (data.tikz_image_path) {
-                            window.answerLastCompiledTikzPath = data.tikz_image_path;
-                            
-                            // Set preview image source immediately
-                            const previewImg = document.getElementById('answerTikzPreviewImage');
-                            const placeholder = document.getElementById('answerTikzPreviewPlaceholder');
-                            if (previewImg && placeholder) {
-                                placeholder.classList.add('hidden');
-                                previewImg.src = data.tikz_image_path + '?t=' + new Date().getTime();
-                                previewImg.classList.remove('hidden');
-                            }
-                            const statusText = document.getElementById('answerTikzStatusText');
-                            if (statusText) {
-                                statusText.textContent = '编译成功';
-                            }
-                        }
                     }
                     
                     // Automatically load OCR results into final review editor silently
@@ -781,12 +726,10 @@
             const signal = contentOcrAbortController.signal;
             
             const engine = 'default';
-            const skipTikz = document.getElementById('contentOcrSkipTikz') ? document.getElementById('contentOcrSkipTikz').checked : false;
             
             const formData = new FormData();
             formData.append('file', file);
             formData.append('engine', engine);
-            formData.append('skip_tikz', skipTikz ? "true" : "false");
             
             fetch('/api/ocr', {
                 method: 'POST',
@@ -816,45 +759,10 @@
                         window.lastOcrOriginalImagePath = data.image_path;
                     }
                     
-                    if (data.tikz_code) {
-                        const tikzTextarea = document.getElementById('editContentTikzCode');
-                        if (tikzTextarea) {
-                            tikzTextarea.value = data.tikz_code;
-                        }
-                        
-                        const container = document.getElementById('contentTikzContainer');
-                        if (container) {
-                            container.classList.remove('hidden');
-                        }
-                        
-                        if (data.tikz_image_path) {
-                            if (typeof uploadedImages !== 'undefined' && !uploadedImages.includes(data.tikz_image_path)) {
-                                uploadedImages.push(data.tikz_image_path);
-                            }
-                            if (typeof renderIllustrationBadges === 'function') {
-                                renderIllustrationBadges();
-                            }
-                            window.contentLastCompiledTikzPath = data.tikz_image_path;
-                            
-                            // Set preview image source immediately
-                            const previewImg = document.getElementById('contentTikzPreviewImage');
-                            const placeholder = document.getElementById('contentTikzPreviewPlaceholder');
-                            if (previewImg && placeholder) {
-                                placeholder.classList.add('hidden');
-                                previewImg.src = data.tikz_image_path + '?t=' + new Date().getTime();
-                                previewImg.classList.remove('hidden');
-                            }
-                            const statusText = document.getElementById('contentTikzStatusText');
-                            if (statusText) {
-                                statusText.textContent = '编译成功';
-                            }
-                        }
-                    }
-                    
-
-                    
                     // 2. Automatically load results into the persistent content editor
                     loadToContentEditor('ocr');
+                    // 3. 题干写入后自动触发 AI 分类并填充表单（无弹窗）
+                    autoClassifyFromContent();
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -872,6 +780,29 @@
                 contentOcrAbortController = null;
                 showToast('题干 OCR 识别出错: ' + err, 'error');
             });
+        }
+
+        // 题干 OCR 成功后自动触发 AI 分类并填充录入表单（无弹窗，覆盖式填充，用户可手改）
+        function autoClassifyFromContent() {
+            const content = document.getElementById('editContent').value.trim();
+            if (!content) return;
+            const formData = new FormData();
+            formData.append('content', content);
+            formData.append('use_free_model', 'true');
+            fetch('/api/ai/classify', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.applyClassifyResultToEditor === 'function') {
+                            window.applyClassifyResultToEditor(data);
+                        }
+                    } else {
+                        showToast(data.message || 'AI 自动分类失败，请手动填写分类', 'info');
+                    }
+                })
+                .catch(() => {
+                    showToast('AI 自动分类失败，请手动填写分类', 'info');
+                });
         }
 
         // Switch Question Content workflow tab - Apple Glass Style
@@ -945,9 +876,6 @@
             // Refresh previews
             textarea.dispatchEvent(new Event('input'));
             showToast('已载入至题干编辑框！');
-            if (typeof window.extractTikzCodeFromTextarea === 'function') {
-                window.extractTikzCodeFromTextarea('editContent');
-            }
         }
 
         // Clear OCR image preview and OCR result box
@@ -1275,9 +1203,6 @@
             // Refresh preview
             finalEdit.dispatchEvent(new Event('input'));
             showToast('已成功载入至终审编辑框！');
-            if (typeof window.extractTikzCodeFromTextarea === 'function') {
-                window.extractTikzCodeFromTextarea('editAnswerMarkdown');
-            }
         }
 
         // Clear Draft

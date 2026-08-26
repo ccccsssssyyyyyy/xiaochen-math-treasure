@@ -614,6 +614,22 @@
                         drawProv.value = drawCfg.provider;
                         renderModelSelector('draw', drawCfg.provider, drawCfg.model);
                     }
+
+                    // 免费模型 tab 预填（未配置时默认硅基流动 + 推荐免费大模型）
+                    const freeDefaults = {
+                        freeParse: 'deepseek-ai/DeepSeek-V3',
+                        freeClassify: 'deepseek-ai/DeepSeek-V3',
+                        freeSolve: 'deepseek-ai/DeepSeek-R1',
+                        freeEval: 'deepseek-ai/DeepSeek-V3',
+                    };
+                    Object.keys(freeDefaults).forEach(typeKey => {
+                        const cfg = parseModelConfig(settings['prefer_' + typeKey + '_model'], 'siliconflow', freeDefaults[typeKey]);
+                        const provEl = document.getElementById(typeKey + 'ModelProvider');
+                        if (provEl) {
+                            provEl.value = cfg.provider;
+                            renderModelSelector(typeKey, cfg.provider, cfg.model);
+                        }
+                    });
                 })
                 .catch(err => {
                     console.error('获取偏好识图引擎设置失败:', err);
@@ -936,7 +952,13 @@
             
             // 默认取个常用模型初始化
             let defVal = "";
-            if (provider === 'deepseek') defVal = "deepseek-v4-flash";
+            if (typeKey.startsWith('free')) {
+                // 免费模型 tab：默认推荐免费大模型
+                if (provider === 'siliconflow') defVal = "deepseek-ai/DeepSeek-V3";
+                else if (provider === 'bailian') defVal = "qwen-plus";
+                else if (provider === 'deepseek') defVal = "deepseek-chat";
+                else defVal = "";
+            } else if (provider === 'deepseek') defVal = "deepseek-v4-flash";
             else if (provider === 'siliconflow') {
                 defVal = typeKey === 'ocr' ? "Qwen/Qwen3-VL-8B-Instruct" : "deepseek-ai/DeepSeek-V4-Flash";
             } else if (provider === 'bailian') {
@@ -1016,6 +1038,22 @@
                     const drawCfg = parseModelConfig(settings.prefer_draw_model, 'siliconflow', 'Qwen/Qwen3-VL-32B-Instruct');
                     document.getElementById('drawModelProvider').value = drawCfg.provider;
                     renderModelSelector('draw', drawCfg.provider, drawCfg.model);
+
+                    // 5. 免费模型 tab 预填
+                    const freeDefaults = {
+                        freeParse: 'deepseek-ai/DeepSeek-V3',
+                        freeClassify: 'deepseek-ai/DeepSeek-V3',
+                        freeSolve: 'deepseek-ai/DeepSeek-R1',
+                        freeEval: 'deepseek-ai/DeepSeek-V3',
+                    };
+                    Object.keys(freeDefaults).forEach(typeKey => {
+                        const cfg = parseModelConfig(settings['prefer_' + typeKey + '_model'], 'siliconflow', freeDefaults[typeKey]);
+                        const provEl = document.getElementById(typeKey + 'ModelProvider');
+                        if (provEl) {
+                            provEl.value = cfg.provider;
+                            renderModelSelector(typeKey, cfg.provider, cfg.model);
+                        }
+                    });
                 })
                 .catch(err => {
                     console.error('获取系统配置失败:', err);
@@ -1174,7 +1212,19 @@
             const drawProvider = document.getElementById('drawModelProvider').value;
             const drawModel = getSelectedModelValue('draw', drawProvider);
             const preferDrawModel = `${drawProvider.toUpperCase()}/${drawModel}`;
-            
+
+            // 6. 免费模型（自动路由）
+            function readFreeModelValue(typeKey) {
+                const prov = document.getElementById(typeKey + 'ModelProvider');
+                if (!prov) return '';
+                const m = getSelectedModelValue(typeKey, prov.value);
+                return m ? `${prov.value.toUpperCase()}/${m}` : '';
+            }
+            const preferFreeParseModel = readFreeModelValue('freeParse');
+            const preferFreeClassifyModel = readFreeModelValue('freeClassify');
+            const preferFreeSolveModel = readFreeModelValue('freeSolve');
+            const preferFreeEvalModel = readFreeModelValue('freeEval');
+
             const formData = new FormData();
             formData.append('deepseek_key', key);
             formData.append('siliconflow_key', siliconflowKey);
@@ -1194,6 +1244,10 @@
             formData.append('prefer_parse_model', preferParseModel);
             formData.append('prefer_classify_model', preferClassifyModel);
             formData.append('prefer_draw_model', preferDrawModel);
+            formData.append('prefer_free_parse_model', preferFreeParseModel);
+            formData.append('prefer_free_classify_model', preferFreeClassifyModel);
+            formData.append('prefer_free_solve_model', preferFreeSolveModel);
+            formData.append('prefer_free_eval_model', preferFreeEvalModel);
             
             // Chain both saves: metadata JSON and ENV settings parameters
             let metaPayload = null;
@@ -1367,23 +1421,25 @@
             const btnApi = document.getElementById('btn-settings-api');
             const btnMeta = document.getElementById('btn-settings-metadata');
             const btnAbout = document.getElementById('btn-settings-about');
+            const btnFree = document.getElementById('btn-settings-free');
             const tabApi = document.getElementById('settings-tab-api');
             const tabMeta = document.getElementById('settings-tab-metadata');
             const tabAbout = document.getElementById('settings-tab-about');
+            const tabFree = document.getElementById('settings-tab-free');
             const btnSave = document.getElementById('btnSettingsSave');
-            
+
             // Reset all buttons
-            [btnApi, btnMeta, btnAbout].forEach(b => {
+            [btnApi, btnMeta, btnAbout, btnFree].forEach(b => {
                 if (b) {
                     b.classList.remove('border-brand-500', 'text-brand-600');
                     b.classList.add('border-transparent', 'text-slate-500');
                 }
             });
             // Hide all tabs
-            [tabApi, tabMeta, tabAbout].forEach(t => {
+            [tabApi, tabMeta, tabAbout, tabFree].forEach(t => {
                 if (t) t.classList.add('hidden');
             });
-            
+
             if (tabName === 'api') {
                 if (btnApi) {
                     btnApi.classList.add('border-brand-500', 'text-brand-600');
@@ -1419,6 +1475,13 @@
                 
                 // Refresh update status in About tab
                 refreshAboutTabUpdateInfo();
+            } else if (tabName === 'free') {
+                if (btnFree) {
+                    btnFree.classList.add('border-brand-500', 'text-brand-600');
+                    btnFree.classList.remove('border-transparent', 'text-slate-500');
+                }
+                if (tabFree) tabFree.classList.remove('hidden');
+                if (btnSave) btnSave.classList.remove('hidden');
             }
         };
 

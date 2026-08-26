@@ -499,15 +499,11 @@
                         
                         <!-- TAB 1: Content OCR -->
                         <div id="contentTabContent-ocr" class="space-y-4">
-                            <div class="flex items-center justify-between">
+                            <div class="flex items-center">
                                 <p class="text-xs text-slate-500 flex items-center space-x-1.5 font-medium">
                                     <i class="fa-solid fa-camera text-brand-500"></i>
                                     <span>拖拽或上传题目截图</span>
                                 </p>
-                                <label class="inline-flex items-center text-[10px] text-slate-500 cursor-pointer select-none">
-                                    <input type="checkbox" id="contentOcrSkipTikz" class="rounded border-slate-300 text-brand-500 focus:ring-brand-500/20 mr-1">
-                                    <span>仅识别文本公式 (禁用 TikZ 绘图)</span>
-                                </label>
                             </div>
                             
                             <!-- Content OCR Dropzone -->
@@ -595,44 +591,6 @@
                                         <!-- Dynamic injected uploaded illustration badges -->
                                     </div>
                                     
-                                    <!-- Content TikZ Geometry Panel -->
-                                    <div id="contentTikzContainer" class="hidden border border-slate-100 bg-slate-50/50 rounded-xl p-3.5 space-y-3 mt-3">
-                                        <div class="flex justify-between items-center pb-1">
-                                            <span class="text-xs font-bold text-slate-600 flex items-center space-x-1">
-                                                <i class="fa-solid fa-compass-drafting text-brand-500"></i>
-                                                <span>题干几何绘图 (TikZ)</span>
-                                            </span>
-                                            <button type="button" onclick="clearContentTikzCode()" class="px-2 py-0.5 rounded bg-red-50 text-red-700 hover:bg-red-100 text-[10px] font-medium transition-all">清空代码</button>
-                                        </div>
-                                        <textarea id="editContentTikzCode" rows="6" placeholder="在此输入题干 \begin{tikzpicture} ... \end{tikzpicture} 代码..."
-                                                  class="w-full p-3 rounded-lg font-mono text-xs leading-relaxed resize-y border border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-100 bg-white transition-all"></textarea>
-                                        <div class="flex items-center space-x-2">
-                                            <input type="text" id="contentTikzUserPrompt" placeholder="输入人工指导意见，如：'把点 C 移到右侧' (选填)..."
-                                                   class="flex-1 px-3 py-1.5 rounded-lg border border-slate-200 text-[11px] focus:border-brand-500 focus:ring-1 focus:ring-brand-500 bg-white/85 transition-all">
-                                        </div>
-                                        <div class="flex space-x-2">
-                                            <button type="button" id="btnRenderContentTikz" onclick="renderContentTikzToImage()" class="flex-1 py-1.5 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-all flex justify-center items-center space-x-1 shadow-sm active:scale-[0.98]">
-                                                <i class="fa-solid fa-circle-play"></i>
-                                                <span>编译并插入题干</span>
-                                            </button>
-                                            <button type="button" id="btnDrawContentTikzFromImage" onclick="drawContentTikzFromImageWithAI()" class="py-1.5 px-3 rounded-lg text-xs bg-teal-50 text-teal-700 font-bold hover:bg-teal-100 border border-teal-200 active:scale-[0.98] transition-all flex items-center space-x-1">
-                                                <i class="fa-solid fa-circle-nodes"></i>
-                                                <span>AI 识图绘图</span>
-                                            </button>
-                                            <button type="button" id="btnCorrectContentTikz" onclick="correctContentTikzWithAI()" class="py-1.5 px-3 rounded-lg text-xs bg-amber-50 text-amber-700 font-bold hover:bg-amber-100 border border-amber-200 active:scale-[0.98] transition-all flex items-center space-x-1">
-                                                <i class="fa-solid fa-wand-magic-sparkles animate-pulse"></i>
-                                                <span>AI 纠错</span>
-                                            </button>
-                                        </div>
-                                        <div class="border border-slate-200 rounded-lg bg-white overflow-hidden p-2 flex items-center justify-center min-h-[140px] relative">
-                                            <span id="contentTikzStatusText" class="absolute top-2 right-2 text-[9px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">未编译</span>
-                                            <div id="contentTikzPreviewPlaceholder" class="text-center text-slate-400 text-[10px] py-8">
-                                                <i class="fa-solid fa-image text-2xl text-slate-200 mb-1"></i>
-                                                <p>编译后在此展示插图预览</p>
-                                            </div>
-                                            <img id="contentTikzPreviewImage" class="max-h-[160px] max-w-full hidden object-contain rounded" src="" alt="Content TikZ Preview">
-                                        </div>
-                                    </div>
                                 </div>
                             </div>
 
@@ -731,15 +689,11 @@
 
                         <!-- TAB 2: OCR Recognition -->
                         <div id="tabContent-ocr" class="space-y-4 hidden">
-                            <div class="flex items-center justify-between">
+                            <div class="flex items-center">
                                 <p class="text-xs text-slate-500 flex items-center space-x-1.5 font-medium">
                                     <i class="fa-solid fa-camera text-brand-500"></i>
                                     <span>拖拽或上传答案截图</span>
                                 </p>
-                                <label class="inline-flex items-center text-[10px] text-slate-500 cursor-pointer select-none">
-                                    <input type="checkbox" id="answerOcrSkipTikz" class="rounded border-slate-300 text-brand-500 focus:ring-brand-500/20 mr-1">
-                                    <span>仅识别文本公式 (禁用 TikZ 绘图)</span>
-                                </label>
                             </div>
                             
                             <!-- OCR Drag Upload Area -->
@@ -818,49 +772,10 @@
                         </div>
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <!-- Left: Final Text Area & Answer TikZ Geometry Panel -->
+                            <!-- Left: Final Text Area -->
                             <div class="flex flex-col">
-                                <textarea id="editAnswerMarkdown" rows="10" placeholder="在此处精细排版或合并您的答案与详细解析过程... 支持 MathJax / KaTeX 公式、TikZ 绘图块、Markdown 段落..."
+                                <textarea id="editAnswerMarkdown" rows="10" placeholder="在此处精细排版或合并您的答案与详细解析过程... 支持 MathJax / KaTeX 公式、Markdown 段落..."
                                           class="w-full p-4 rounded-xl font-mono text-sm leading-relaxed resize-y border border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-100 transition-all flex-1 min-h-[200px]"></textarea>
-                                
-                                <!-- Answer TikZ Geometry Panel -->
-                                <div id="answerTikzContainer" class="hidden border border-slate-100 bg-slate-50/50 rounded-xl p-3.5 space-y-3 mt-3">
-                                    <div class="flex justify-between items-center pb-1">
-                                        <span class="text-xs font-bold text-slate-600 flex items-center space-x-1">
-                                            <i class="fa-solid fa-compass-drafting text-brand-500"></i>
-                                            <span>解答几何绘图 (TikZ)</span>
-                                        </span>
-                                        <button type="button" onclick="clearAnswerTikzCode()" class="px-2 py-0.5 rounded bg-red-50 text-red-700 hover:bg-red-100 text-[10px] font-medium transition-all">清空代码</button>
-                                    </div>
-                                    <textarea id="editAnswerTikzCode" rows="6" placeholder="在此输入解答 \begin{tikzpicture} ... \end{tikzpicture} 代码..."
-                                              class="w-full p-3 rounded-lg font-mono text-xs leading-relaxed resize-y border border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-100 bg-white transition-all"></textarea>
-                                    <div class="flex items-center space-x-2">
-                                        <input type="text" id="answerTikzUserPrompt" placeholder="输入人工指导意见，如：'把点 C 移到右侧' (选填)..."
-                                               class="flex-1 px-3 py-1.5 rounded-lg border border-slate-200 text-[11px] focus:border-brand-500 focus:ring-1 focus:ring-brand-500 bg-white/85 transition-all">
-                                    </div>
-                                    <div class="flex space-x-2">
-                                        <button type="button" id="btnRenderAnswerTikz" onclick="renderAnswerTikzToImage()" class="flex-1 py-1.5 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-all flex justify-center items-center space-x-1 shadow-sm active:scale-[0.98]">
-                                            <i class="fa-solid fa-play"></i>
-                                            <span>编译并插入解答</span>
-                                        </button>
-                                        <button type="button" id="btnDrawAnswerTikzFromImage" onclick="drawAnswerTikzFromImageWithAI()" class="py-1.5 px-3 rounded-lg text-xs bg-teal-50 text-teal-700 font-bold hover:bg-teal-100 border border-teal-200 active:scale-[0.98] transition-all flex items-center space-x-1">
-                                            <i class="fa-solid fa-circle-nodes"></i>
-                                            <span>AI 识图绘图</span>
-                                        </button>
-                                        <button type="button" id="btnCorrectAnswerTikz" onclick="correctAnswerTikzWithAI()" class="py-1.5 px-3 rounded-lg text-xs bg-amber-50 text-amber-700 font-bold hover:bg-amber-100 border border-amber-200 active:scale-[0.98] transition-all flex items-center space-x-1">
-                                            <i class="fa-solid fa-wand-magic-sparkles animate-pulse"></i>
-                                            <span>AI 纠错</span>
-                                        </button>
-                                    </div>
-                                    <div class="border border-slate-200 rounded-lg bg-white overflow-hidden p-2 flex items-center justify-center min-h-[140px] relative">
-                                        <span id="answerTikzStatusText" class="absolute top-2 right-2 text-[9px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">未编译</span>
-                                        <div id="answerTikzPreviewPlaceholder" class="text-center text-slate-400 text-[10px] py-8">
-                                            <i class="fa-solid fa-image text-2xl text-slate-200 mb-1"></i>
-                                            <p>编译后在此展示插图预览</p>
-                                        </div>
-                                        <img id="answerTikzPreviewImage" class="max-h-[160px] max-w-full hidden object-contain rounded" src="" alt="Answer TikZ Preview">
-                                    </div>
-                                </div>
                             </div>
                             
                             <!-- Right: Final Preview -->
@@ -1061,79 +976,6 @@
 
     </main>
 
-    <!-- AI CLASSIFICATION MODAL - Apple Glass Style -->
-    <div id="aiClassifyModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="aiClassifyModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
-        <div class="glass-modal rounded-2xl w-full max-w-md p-6 transform scale-95 transition-transform duration-300 space-y-5">
-            <div class="flex justify-between items-center border-b border-slate-200/50 pb-3">
-                <h3 id="aiClassifyModalTitle" class="font-bold text-base text-slate-800 flex items-center space-x-2">
-                    <i class="fa-solid fa-wand-magic-sparkles text-brand-600"></i>
-                    <span>教材分类智能分析</span>
-                </h3>
-                <button type="button" data-modal-close onclick="closeClassifyModal()" aria-label="关闭教材分类分析弹窗" class="glass-btn w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all">
-                    <i class="fa-solid fa-xmark text-lg"></i>
-                </button>
-            </div>
-
-            <div class="space-y-4">
-                <p class="text-xs text-slate-500 leading-relaxed">
-                    您当前未选择 <strong>学段</strong> 或 <strong>所属章节</strong>。系统将结合题干结构规则与 AI 完成教材定位和粗粒度题型识别；选择题仍需您手动确认单选或多选。
-                </p>
-
-                <!-- Loading State -->
-                <div id="classifyLoading" role="status" aria-live="polite" class="hidden glass-card rounded-xl p-6 text-center space-y-3">
-                    <i class="fa-solid fa-spinner animate-spin text-brand-500 text-2xl"></i>
-                    <p class="text-xs text-slate-500 font-medium">正在分析题干结构、题型与教材定位...</p>
-                </div>
-
-                <!-- Recommendation Result -->
-                <div id="classifyResult" aria-live="polite" class="hidden space-y-3">
-                    <div class="p-4 rounded-xl bg-brand-50 border border-brand-100 space-y-3">
-                        <div>
-                            <span class="text-[10px] uppercase font-bold text-brand-600 tracking-wider flex items-center mb-1.5"><i class="fa-solid fa-robot mr-1.5 animate-bounce"></i>AI 推荐教材定位：</span>
-                            <div class="flex items-center space-x-2 font-semibold text-slate-800 text-xs flex-wrap gap-y-1.5">
-                                <span id="recCompulsory" class="bg-brand-100 text-brand-700 px-2.5 py-0.5 rounded-lg text-[10px] font-bold">选择性必修二</span>
-                                <i class="fa-solid fa-chevron-right text-[10px] text-slate-500"></i>
-                                <span id="recChapter" class="text-slate-800 font-bold">5. 一元函数的导数及其应用</span>
-                            </div>
-                        </div>
-                        <div class="border-t border-brand-100/60 pt-3 space-y-2">
-                            <div class="flex items-center justify-between gap-2">
-                                <span class="text-[10px] uppercase font-bold text-brand-600 tracking-wider flex items-center"><i class="fa-solid fa-tags mr-1.5 text-indigo-500"></i>题型识别：</span>
-                                <span id="recQuestionFormSource" class="text-[10px] text-slate-500 font-medium">AI 建议</span>
-                            </div>
-                            <span id="recQuestionForm" class="inline-flex bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-lg text-[11px] font-bold">待识别</span>
-                            <div id="choiceTypeConfirm" class="hidden space-y-2" role="radiogroup" aria-label="确认选择题类型">
-                                <p class="text-[11px] text-amber-700 font-medium"><i class="fa-solid fa-circle-info mr-1"></i>已识别为选择题，请手动确认是单选题还是多选题。</p>
-                                <div class="grid grid-cols-2 gap-2">
-                                    <button type="button" id="classifySingleChoiceBtn" role="radio" aria-checked="false" onclick="selectClassifiedChoiceType('single_choice')" class="question-type-choice-button min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold">
-                                        <i class="fa-solid fa-circle-check question-type-choice-check" aria-hidden="true"></i>
-                                        <span>单选题</span>
-                                    </button>
-                                    <button type="button" id="classifyMultiChoiceBtn" role="radio" aria-checked="false" onclick="selectClassifiedChoiceType('multi_choice')" class="question-type-choice-button min-h-[44px] px-3 py-2 rounded-xl text-xs font-semibold">
-                                        <i class="fa-solid fa-circle-check question-type-choice-check" aria-hidden="true"></i>
-                                        <span>多选题</span>
-                                    </button>
-                                </div>
-                            </div>
-                            <p id="unknownQuestionFormNotice" class="hidden text-[11px] text-slate-500 font-medium">无法可靠判断题型，将保留当前手动选择。</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="flex justify-end space-x-2 pt-3 border-t border-slate-200/50">
-                <button type="button" onclick="closeClassifyModal()" class="glass-btn px-4 py-2 rounded-xl text-xs font-medium text-slate-500">手动选择</button>
-                <button type="button" id="classifyAIButton" onclick="runAIClassify()" class="glass-btn-primary px-5 py-2 rounded-xl font-medium text-xs flex items-center space-x-1.5">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    <span>一键 AI 分析</span>
-                </button>
-                <button type="button" id="classifyApplyButton" onclick="applyClassifyRecommendation()" class="hidden glass-btn-primary px-5 py-2 rounded-xl font-medium text-xs">
-                    确认分类并保存题目
-                </button>
-            </div>
-        </div>
-    </div>
-
     <!-- SETTINGS MODAL (API Configuration) - Apple Glass Style -->
     <div id="settingsModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="settingsModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
         <div class="glass-modal rounded-2xl w-full max-w-5xl p-6 transform scale-95 transition-transform duration-300 flex flex-col max-h-[90vh] overflow-hidden">
@@ -1161,6 +1003,10 @@
                     <button type="button" onclick="switchSettingsTab('about')" id="btn-settings-about" class="px-4 py-2 border-b-2 border-transparent text-slate-500 hover:text-slate-700 font-medium text-xs transition-all flex items-center space-x-1.5 focus:outline-none">
                         <i class="fa-solid fa-circle-info"></i>
                         <span>版本更新</span>
+                    </button>
+                    <button type="button" onclick="switchSettingsTab('free')" id="btn-settings-free" class="px-4 py-2 border-b-2 border-transparent text-slate-500 hover:text-slate-700 font-medium text-xs transition-all flex items-center space-x-1.5 focus:outline-none">
+                        <i class="fa-solid fa-coins"></i>
+                        <span>免费模型</span>
                     </button>
                 </div>
 
@@ -1349,6 +1195,86 @@
                     </div>
                 </div>
                 <!-- End of settings-tab-api -->
+
+                <!-- Free Model Tab Content -->
+                <div id="settings-tab-free" class="hidden space-y-4">
+                    <div class="border-b border-slate-200/60 pb-2">
+                        <h4 class="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-2">
+                            <i class="fa-solid fa-coins text-brand-500"></i>
+                            <span>免费模型配置（自动路由）</span>
+                        </h4>
+                        <p class="text-[10px] text-slate-400 mt-1">配置后，拆解与分类将<strong>自动评估难度</strong>：简单/中等走免费大模型，困难自动回退付费。Key 复用『API 接口设置』里对应供应商的 Key。</p>
+                    </div>
+
+                    <div class="space-y-3">
+                        <!-- 免费：拆解 -->
+                        <div class="p-3 glass-card rounded-xl space-y-1.5 shadow-sm">
+                            <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-200">免费·试卷拆解模型 (PREFER_FREE_PARSE_MODEL)</label>
+                            <div class="flex items-center space-x-2">
+                                <select id="freeParseModelProvider" onchange="onModelProviderChange('freeParse')" class="glass-select w-[92px] shrink-0 px-2 py-1.5 rounded-lg text-xs">
+                                    <option value="siliconflow">硅基流动</option>
+                                    <option value="bailian">阿里百炼</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="zhongzhan_gpt">中转站 A</option>
+                                    <option value="zhongzhan_claude">中转站 B</option>
+                                </select>
+                                <div id="freeParseModelValueContainer" class="flex-1 flex items-center space-x-1.5 min-w-0"><!-- Dynamic Load --></div>
+                            </div>
+                        </div>
+
+                        <!-- 免费：分类 -->
+                        <div class="p-3 glass-card rounded-xl space-y-1.5 shadow-sm">
+                            <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-200">免费·题目分类模型 (PREFER_FREE_CLASSIFY_MODEL)</label>
+                            <div class="flex items-center space-x-2">
+                                <select id="freeClassifyModelProvider" onchange="onModelProviderChange('freeClassify')" class="glass-select w-[92px] shrink-0 px-2 py-1.5 rounded-lg text-xs">
+                                    <option value="siliconflow">硅基流动</option>
+                                    <option value="bailian">阿里百炼</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="zhongzhan_gpt">中转站 A</option>
+                                    <option value="zhongzhan_claude">中转站 B</option>
+                                </select>
+                                <div id="freeClassifyModelValueContainer" class="flex-1 flex items-center space-x-1.5 min-w-0"><!-- Dynamic Load --></div>
+                            </div>
+                        </div>
+
+                        <!-- 免费：解题 -->
+                        <div class="p-3 glass-card rounded-xl space-y-1.5 shadow-sm">
+                            <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-200">免费·智能解题模型 (PREFER_FREE_SOLVE_MODEL)</label>
+                            <div class="flex items-center space-x-2">
+                                <select id="freeSolveModelProvider" onchange="onModelProviderChange('freeSolve')" class="glass-select w-[92px] shrink-0 px-2 py-1.5 rounded-lg text-xs">
+                                    <option value="siliconflow">硅基流动</option>
+                                    <option value="bailian">阿里百炼</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="zhongzhan_gpt">中转站 A</option>
+                                    <option value="zhongzhan_claude">中转站 B</option>
+                                </select>
+                                <div id="freeSolveModelValueContainer" class="flex-1 flex items-center space-x-1.5 min-w-0"><!-- Dynamic Load --></div>
+                            </div>
+                        </div>
+
+                        <!-- 免费：评估 -->
+                        <div class="p-3 glass-card rounded-xl space-y-1.5 shadow-sm">
+                            <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-200">免费·难度评估模型 (PREFER_FREE_EVAL_MODEL)</label>
+                            <div class="flex items-center space-x-2">
+                                <select id="freeEvalModelProvider" onchange="onModelProviderChange('freeEval')" class="glass-select w-[92px] shrink-0 px-2 py-1.5 rounded-lg text-xs">
+                                    <option value="siliconflow">硅基流动</option>
+                                    <option value="bailian">阿里百炼</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="zhongzhan_gpt">中转站 A</option>
+                                    <option value="zhongzhan_claude">中转站 B</option>
+                                </select>
+                                <div id="freeEvalModelValueContainer" class="flex-1 flex items-center space-x-1.5 min-w-0"><!-- Dynamic Load --></div>
+                            </div>
+                            <p class="text-[10px] text-slate-400">用于拆解前判断难度的小模型，消耗极低，建议保留免费大模型。</p>
+                        </div>
+                    </div>
+
+                    <div class="p-3 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-900/60 text-[10px] text-amber-800 dark:text-amber-300 rounded-xl flex items-start space-x-2 leading-relaxed">
+                        <i class="fa-solid fa-circle-exclamation mt-0.5"></i>
+                        <span><strong>路由规则：</strong>免费模型留空 = 全程走付费；已配置且 Key 有效时，简单/中等难度自动用免费大模型，困难文档自动回退付费；若免费 Key 缺失则安全回退付费，绝不裸奔。</span>
+                    </div>
+                </div>
+                <!-- End of settings-tab-free -->
 
                 <!-- Metadata Tab Content (JSON Editor) -->
                 <div id="settings-tab-metadata" class="hidden space-y-4">
@@ -2003,7 +1929,7 @@
             <div class="flex justify-between items-center border-b border-slate-200/50 px-6 py-4 shrink-0">
                 <h3 id="pdfCropModalTitle" class="font-bold text-base text-slate-800 flex items-center space-x-2">
                     <i class="fa-solid fa-scissors text-brand-600"></i>
-                    <span>PDF 试卷页面预览与手动插图裁剪</span>
+                    <span>原卷页面预览与手动插图裁剪（可放大看清公式）</span>
                 </h3>
                 <div class="flex items-center space-x-3">
                     <span class="text-xs text-slate-400 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200" id="pdfCropPageIndicator">第 1 / 1 页</span>
@@ -2038,7 +1964,7 @@
                             </button>
                         </div>
                         <div class="relative inline-block" id="pdfCropImageContainer" style="cursor: crosshair; margin: auto;">
-                            <img id="pdfCropActiveImage" src="" alt="Active PDF Page" class="max-w-[70vw] max-h-[60vh] select-none pointer-events-none shadow-2xl">
+                            <img id="pdfCropActiveImage" src="" alt="Active PDF Page" class="select-none pointer-events-none shadow-2xl" style="max-width:none;max-height:none;">
                             <!-- SVG overlay or relative overlay for selection rectangle -->
                             <div id="pdfCropOverlayRect" class="absolute border-2 border-brand-500 bg-brand-500/25 hidden pointer-events-none">
                                 <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-brand-600 border border-white rounded-full"></div>
