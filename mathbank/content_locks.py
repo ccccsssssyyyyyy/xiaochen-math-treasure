@@ -133,16 +133,23 @@ def _restore_lock_in_text(value: str, lock: ContentLock) -> tuple[str, int, bool
 def restore_visible_math(
     questions: list[dict[str, Any]],
     locks: list[ContentLock],
-) -> dict[str, int]:
-    """Restore every lock exactly once across question content and original answers."""
-    report = {
+    strict: bool = True,
+) -> dict[str, Any]:
+    """Restore every lock across question content and original answers.
+
+    In strict mode (default) each lock must appear exactly once; otherwise a
+    ContentLockIntegrityError is raised.  In non-strict mode the function tries to
+    recover missing or duplicated locks and returns a report with warnings so
+    that callers can continue importing instead of failing the whole document.
+    """
+    report: dict[str, Any] = {
         "math_locks_created": len(locks),
         "math_locks_restored": 0,
         "math_locks_overwritten": 0,
         "math_locks_missing": 0,
         "math_locks_duplicated": 0,
     }
-    missing: list[str] = []
+    missing: list[ContentLock] = []
     duplicated: list[str] = []
 
     for lock in locks:
@@ -158,27 +165,71 @@ def restore_visible_math(
                     occurrences.append((question, field, restored, count, modified))
                     total += count
         if total == 0:
-            missing.append(lock.lock_id)
+            missing.append(lock)
             continue
-        if total != 1:
+        if strict and total != 1:
             duplicated.append(lock.lock_id)
             continue
-        question, field, restored, _count, modified = occurrences[0]
-        question[field] = restored
+        # In non-strict mode, restore every occurrence even if duplicated; the
+        # formula simply appears in multiple questions, which is still correct.
+        for question, field, restored, _count, modified in occurrences:
+            question[field] = restored
         report["math_locks_restored"] += 1
         if modified:
             report["math_locks_overwritten"] += 1
 
-    report["math_locks_missing"] = len(missing)
+    # Non-strict recovery: try to salvage missing locks by locating their
+    # original formula text verbatim in the model output. Only restore if the
+    # formula appears exactly once to avoid attaching it to the wrong question.
+    still_missing: list[str] = []
+    if missing and not strict:
+        for lock in missing:
+            found_count = 0
+            found_target: tuple[dict[str, Any], str] | None = None
+            for question in questions:
+                for field in ("content", "answer_markdown"):
+                    value = question.get(field, "")
+                    if not isinstance(value, str):
+                        continue
+                    count = value.count(lock.original)
+                    if count:
+                        found_count += count
+                        found_target = (question, field)
+            if found_count == 1 and found_target is not None:
+                question, field = found_target
+                question[field] = question[field].replace(lock.original, lock.original, 1)
+                report["math_locks_restored"] += 1
+            else:
+                still_missing.append(lock.lock_id)
+        missing_ids = still_missing
+    else:
+        missing_ids = [lock.lock_id for lock in missing]
+
+    report["math_locks_missing"] = len(missing_ids)
     report["math_locks_duplicated"] = len(duplicated)
-    if missing or duplicated:
-        details = []
-        if missing:
-            details.append("丢失 " + ", ".join(missing[:6]))
+
+    if missing_ids or duplicated:
+        if strict:
+            details = []
+            if missing_ids:
+                details.append("丢失 " + ", ".join(missing_ids[:6]))
+            if duplicated:
+                details.append("重复 " + ", ".join(duplicated[:6]))
+            raise ContentLockIntegrityError(
+                "AI 拆题时未完整保留公式定位标记（" + "；".join(details) + "），"
+                "系统已停止本次结果，避免公式静默丢失或串题。"
+            )
+        warnings: list[str] = []
+        if missing_ids:
+            warnings.append(
+                f"AI 拆题时有 {len(missing_ids)} 个公式锁定标记丢失，"
+                "已尽量按原文恢复；请重点核对公式是否完整、是否有串题。"
+            )
         if duplicated:
-            details.append("重复 " + ", ".join(duplicated[:6]))
-        raise ContentLockIntegrityError(
-            "AI 拆题时未完整保留公式定位标记（" + "；".join(details) + "），"
-            "系统已停止本次结果，避免公式静默丢失或串题。"
-        )
+            warnings.append(
+                f"AI 拆题时有 {len(duplicated)} 个公式锁定标记被重复使用，"
+                "已在多处自动恢复。"
+            )
+        report["warnings"] = warnings
+
     return report

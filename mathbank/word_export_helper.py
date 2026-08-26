@@ -518,7 +518,8 @@ def _formula_fallback_png(formula: str) -> bytes | None:
     xelatex = shutil.which("xelatex")
     if not xelatex:
         return None
-    tex = rf"""\documentclass[preview,border=2pt]{{standalone}}
+    # 仅用 preview（无边框），避免每个公式外都套一圈可见的方框
+    tex = rf"""\documentclass[preview]{{standalone}}
 \usepackage{{amsmath,amssymb,mathtools,cancel,extarrows,yhmath}}
 \begin{{document}}
 $\displaystyle {formula}$
@@ -544,13 +545,15 @@ $\displaystyle {formula}$
             from PIL import Image, ImageChops
 
             pdf = fitz.open(pdf_path)
-            pixmap = pdf[0].get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+            # 4x 渲染，保证清晰度；白底避免透明黑边
+            pixmap = pdf[0].get_pixmap(matrix=fitz.Matrix(4, 4), alpha=False)
             image = Image.open(BytesIO(pixmap.tobytes("png"))).convert("RGB")
             background = Image.new("RGB", image.size, "white")
             bbox = ImageChops.difference(image, background).getbbox()
             if bbox:
                 left, top, right, bottom = bbox
-                image = image.crop((max(0, left - 8), max(0, top - 6), min(image.width, right + 8), min(image.height, bottom + 6)))
+                # 仅留 2px 余量，去除多余白边
+                image = image.crop((max(0, left - 2), max(0, top - 2), min(image.width, right + 2), min(image.height, bottom + 2)))
             output = BytesIO()
             image.save(output, format="PNG")
             return output.getvalue()
@@ -677,9 +680,11 @@ class WordExamBuilder:
 
                     image = Image.open(BytesIO(image_bytes))
                     ratio = image.width / max(image.height, 1)
-                    height = 0.24 if not token.display else 0.34
-                    width = min(6.1, max(0.3, ratio * height))
-                    run.add_picture(BytesIO(image_bytes), width=Inches(width), height=Inches(height))
+                    # 目标视觉高度约 0.22 英寸（与正文字号匹配）；只设宽度，保留原始宽高比，避免被拉伸变形
+                    target_height_in = 0.22 if not token.display else 0.30
+                    width = target_height_in * ratio
+                    width = min(6.0, max(0.25, width))
+                    run.add_picture(BytesIO(image_bytes), width=Inches(width))
                     self.diagnostics.fallback_formulas += 1
                     continue
                 except Exception:

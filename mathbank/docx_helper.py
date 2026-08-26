@@ -868,6 +868,45 @@ def _parse_block(
     return blocks
 
 
+_MATH_TYPE_GARBAGE = re.compile(r"!/(?:[A-Za-z]{1,4}/)?[A-Za-z_][^#\n]{0,200}?#")
+
+
+def _clean_mathtype_garbage(markdown: str, diagnostics: MutableMapping) -> str:
+    """清洗 MathType/OLE 公式被当纯文本提取后残留的私有编码乱码。
+
+    典型样本：`!/ED/APG_APAPAE%B_AC_AE*_HA@AHA*_D_E_E_A#`，常出现在 `$...$` 内、
+    其后紧跟 `{...}`。这类编码在 Word 里能正常渲染为公式，但 Python 提取只能拿到底层
+    私有字符，必须删除以避免污染 LaTeX。清洗后若仍有残留则标记人工核对。
+    """
+    before = markdown.count("!/")
+    cleaned = _MATH_TYPE_GARBAGE.sub("", markdown)
+    removed = before - cleaned.count("!/")
+    if removed > 0:
+        diagnostics["mathtype_garbage_cleaned"] = (
+            diagnostics.get("mathtype_garbage_cleaned", 0) + removed
+        )
+        diagnostics["review_required"] = diagnostics.get("review_required", 0) + removed
+        _warn(
+            diagnostics,
+            f"已自动清洗 {removed} 处 MathType 公式私有编码乱码，请人工核对对应公式。",
+        )
+    if "!/" in cleaned:
+        diagnostics["review_required"] = diagnostics.get("review_required", 0) + 1
+        _warn(diagnostics, "仍存在未识别的 MathType 公式私有编码，请人工核对。")
+    return cleaned
+
+
+# 清洗后仍在单题文本中可能残留的 MathType/OLE 私有编码特征，用于方案 C 单题标记。
+_GARBAGE_RESIDUAL = re.compile(r"(!/\S*#|APG_|ED/APG|%/B_)", re.IGNORECASE)
+
+
+def detect_mathtype_garbage_residual(text: str) -> bool:
+    """题目级：判断是否仍含 MathType 私有编码残留（供前端红色警告）。"""
+    if not text:
+        return False
+    return bool(_GARBAGE_RESIDUAL.search(text))
+
+
 def extract_docx_markdown(
     file_bytes_or_path,
     *,
@@ -906,6 +945,7 @@ def extract_docx_markdown(
             markdown = re.sub(r"\n{3,}", "\n\n", "\n\n".join(blocks).strip())
             from mathbank.ai_json import normalize_subquestions_double_newlines
             markdown = normalize_subquestions_double_newlines(markdown)
+            markdown = _clean_mathtype_garbage(markdown, diagnostics)
             diagnostics["unsupported_omml_tags"].sort()
             if diagnostics["unsupported_omml_tags"]:
                 _warn(

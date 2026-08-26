@@ -67,6 +67,10 @@ from mathbank.ai_providers import (
     resolve_ocr_provider,
     resolve_text_provider,
 )
+from mathbank.free_model_routing import (
+    decide_parse_model,
+    decide_classify_model,
+)
 from mathbank.curriculums import (
     build_default_metadata,
     get_curriculum_preset,
@@ -1248,7 +1252,11 @@ def get_settings():
     prefer_parse_model = os.getenv("PREFER_PARSE_MODEL", "deepseek-v4-flash")
     prefer_classify_model = os.getenv("PREFER_CLASSIFY_MODEL") or os.getenv("DEEPSEEK_CLASSIFY_MODEL", "deepseek-v4-flash")
     prefer_draw_model = os.getenv("PREFER_DRAW_MODEL", "Qwen/Qwen3-VL-32B-Instruct")
-    
+    prefer_free_parse_model = os.getenv("PREFER_FREE_PARSE_MODEL", "")
+    prefer_free_classify_model = os.getenv("PREFER_FREE_CLASSIFY_MODEL", "")
+    prefer_free_solve_model = os.getenv("PREFER_FREE_SOLVE_MODEL", "")
+    prefer_free_eval_model = os.getenv("PREFER_FREE_EVAL_MODEL", "")
+
     masked_ds = ""
     if ds_key:
         masked_ds = ds_key[:4] + "••••" + ds_key[-4:] if len(ds_key) > 8 else "••••••••"
@@ -1285,7 +1293,11 @@ def get_settings():
         "prefer_solve_model": prefer_solve_model,
         "prefer_parse_model": prefer_parse_model,
         "prefer_classify_model": prefer_classify_model,
-        "prefer_draw_model": prefer_draw_model
+        "prefer_draw_model": prefer_draw_model,
+        "prefer_free_parse_model": prefer_free_parse_model,
+        "prefer_free_classify_model": prefer_free_classify_model,
+        "prefer_free_solve_model": prefer_free_solve_model,
+        "prefer_free_eval_model": prefer_free_eval_model
     }
 
 @app.post("/api/settings/save")
@@ -1305,7 +1317,11 @@ def save_settings(
     prefer_solve_model: str = Form("deepseek-v4-pro"),
     prefer_parse_model: str = Form("deepseek-v4-flash"),
     prefer_classify_model: str = Form("deepseek-v4-flash"),
-    prefer_draw_model: str = Form("Qwen/Qwen3-VL-32B-Instruct")
+    prefer_draw_model: str = Form("Qwen/Qwen3-VL-32B-Instruct"),
+    prefer_free_parse_model: str = Form(""),
+    prefer_free_classify_model: str = Form(""),
+    prefer_free_solve_model: str = Form(""),
+    prefer_free_eval_model: str = Form("")
 ):
     try:
         settings_values = {
@@ -1325,6 +1341,10 @@ def save_settings(
             "prefer_parse_model": prefer_parse_model,
             "prefer_classify_model": prefer_classify_model,
             "prefer_draw_model": prefer_draw_model,
+            "prefer_free_parse_model": prefer_free_parse_model,
+            "prefer_free_classify_model": prefer_free_classify_model,
+            "prefer_free_solve_model": prefer_free_solve_model,
+            "prefer_free_eval_model": prefer_free_eval_model,
         }
         if any("\r" in value or "\n" in value for value in settings_values.values()):
             raise ValueError("配置值不能包含换行符。")
@@ -1363,7 +1383,11 @@ def save_settings(
             "PREFER_SOLVE_MODEL": False,
             "PREFER_PARSE_MODEL": False,
             "PREFER_CLASSIFY_MODEL": False,
-            "PREFER_DRAW_MODEL": False
+            "PREFER_DRAW_MODEL": False,
+            "PREFER_FREE_PARSE_MODEL": False,
+            "PREFER_FREE_CLASSIFY_MODEL": False,
+            "PREFER_FREE_SOLVE_MODEL": False,
+            "PREFER_FREE_EVAL_MODEL": False
         }
         new_lines = []
         
@@ -1421,6 +1445,18 @@ def save_settings(
             elif line_strip.startswith("PREFER_DRAW_MODEL="):
                 new_lines.append(f"PREFER_DRAW_MODEL={prefer_draw_model}\n")
                 keys_replaced["PREFER_DRAW_MODEL"] = True
+            elif line_strip.startswith("PREFER_FREE_PARSE_MODEL="):
+                new_lines.append(f"PREFER_FREE_PARSE_MODEL={prefer_free_parse_model}\n")
+                keys_replaced["PREFER_FREE_PARSE_MODEL"] = True
+            elif line_strip.startswith("PREFER_FREE_CLASSIFY_MODEL="):
+                new_lines.append(f"PREFER_FREE_CLASSIFY_MODEL={prefer_free_classify_model}\n")
+                keys_replaced["PREFER_FREE_CLASSIFY_MODEL"] = True
+            elif line_strip.startswith("PREFER_FREE_SOLVE_MODEL="):
+                new_lines.append(f"PREFER_FREE_SOLVE_MODEL={prefer_free_solve_model}\n")
+                keys_replaced["PREFER_FREE_SOLVE_MODEL"] = True
+            elif line_strip.startswith("PREFER_FREE_EVAL_MODEL="):
+                new_lines.append(f"PREFER_FREE_EVAL_MODEL={prefer_free_eval_model}\n")
+                keys_replaced["PREFER_FREE_EVAL_MODEL"] = True
             else:
                 new_lines.append(line)
                 
@@ -1457,6 +1493,14 @@ def save_settings(
             new_lines.append(f"PREFER_CLASSIFY_MODEL={prefer_classify_model}\n")
         if not keys_replaced["PREFER_DRAW_MODEL"]:
             new_lines.append(f"PREFER_DRAW_MODEL={prefer_draw_model}\n")
+        if not keys_replaced["PREFER_FREE_PARSE_MODEL"]:
+            new_lines.append(f"PREFER_FREE_PARSE_MODEL={prefer_free_parse_model}\n")
+        if not keys_replaced["PREFER_FREE_CLASSIFY_MODEL"]:
+            new_lines.append(f"PREFER_FREE_CLASSIFY_MODEL={prefer_free_classify_model}\n")
+        if not keys_replaced["PREFER_FREE_SOLVE_MODEL"]:
+            new_lines.append(f"PREFER_FREE_SOLVE_MODEL={prefer_free_solve_model}\n")
+        if not keys_replaced["PREFER_FREE_EVAL_MODEL"]:
+            new_lines.append(f"PREFER_FREE_EVAL_MODEL={prefer_free_eval_model}\n")
             
         write_private_text_atomic(ENV_FILE, "".join(new_lines))
             
@@ -1481,6 +1525,10 @@ def save_settings(
         os.environ["PREFER_PARSE_MODEL"] = prefer_parse_model
         os.environ["PREFER_CLASSIFY_MODEL"] = prefer_classify_model
         os.environ["PREFER_DRAW_MODEL"] = prefer_draw_model
+        os.environ["PREFER_FREE_PARSE_MODEL"] = prefer_free_parse_model
+        os.environ["PREFER_FREE_CLASSIFY_MODEL"] = prefer_free_classify_model
+        os.environ["PREFER_FREE_SOLVE_MODEL"] = prefer_free_solve_model
+        os.environ["PREFER_FREE_EVAL_MODEL"] = prefer_free_eval_model
         
         return {"status": "success", "message": "API 与首选大模型配置已成功保存并即时生效！"}
     except Exception as e:
@@ -1694,7 +1742,7 @@ def compile_tikz_to_png(tikz_code: str) -> str:
         if len(doc) == 0:
             raise RuntimeError("生成的 PDF 文件为空。")
         page = doc.load_page(0)
-        pix = page.get_pixmap(dpi=150)
+        pix = page.get_pixmap(dpi=250)
         pix.save(png_path)
         doc.close()
 
@@ -3129,15 +3177,11 @@ def list_categories(db: Session = Depends(get_db)):
 # ----------------- AI Auto-Classification API -----------------
 
 @app.post("/api/ai/classify")
-def ai_classify(content: str = Form(...)):
-    classify_model = (
-        os.getenv("PREFER_CLASSIFY_MODEL") 
-        or os.getenv("DEEPSEEK_CLASSIFY_MODEL") 
-        or os.getenv("PREFER_PARSE_MODEL") 
-        or "deepseek-v4-flash"
-    )
-    
-    provider = resolve_text_provider(classify_model)
+def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
+    use_free = use_free_model.lower() in ("true", "1", "yes")
+    classify_decision = decide_classify_model(use_free)
+    classify_model = classify_decision["raw_model"]
+    provider = classify_decision["provider"]
     api_key = provider.api_key
     api_base = provider.api_base
     model_name = provider.model_name
@@ -3201,37 +3245,80 @@ def ai_classify(content: str = Form(...)):
             ai_message = "\n".join(lines).strip()
             
         result = json.loads(ai_message)
+        curr = get_current_curriculum()
+
+        # 题型（细粒度）：优先用 AI 的 question_type，否则回退到结构规则识别
+        VALID_TYPES = {"single_choice", "multi_choice", "fill_in_blank", "detailed_answer"}
+        raw_type = result.get("question_type", "")
+        if raw_type in VALID_TYPES:
+            question_type = raw_type
+        else:
+            structured_form = detect_structured_question_form(content)
+            question_type = structured_form or normalize_ai_question_form(raw_type)
+            if question_type == "choice":
+                question_type = "single_choice"
+            if question_type not in VALID_TYPES:
+                question_type = "single_choice"
+
+        # 难度
+        VALID_DIFF = {"easy_error", "challenge", "qiangji"}
+        difficulty = result.get("difficulty", "")
+        if difficulty not in VALID_DIFF:
+            difficulty = "easy_error"
+
+        # 来源：清洗分隔符（· • 、 ， 等）与多余空白
+        source = (result.get("source") or "").strip()
+        for sep in ["·", "•", "・", "、", "，", ",", "。"]:
+            source = source.replace(sep, "")
+        source = re.sub(r"\s+", "", source)
+
+        # 学段 / 章节：校验必须存在于 curriculum，否则回退到第一个可用学段/章节
         compulsory = result.get("compulsory", "")
         chapter = result.get("chapter", "")
-        structured_question_form = detect_structured_question_form(content)
-        question_form = structured_question_form or normalize_ai_question_form(
-            result.get("question_form")
-        )
-        question_form_source = "structure" if structured_question_form else "ai"
-        
-        # Verification: make sure returned values exist in get_current_curriculum()
-        curr = get_current_curriculum()
-        if compulsory in curr and chapter in curr[compulsory]:
-            return {
-                "status": "success",
-                "compulsory": compulsory,
-                "chapter": chapter,
-                "question_form": question_form,
-                "question_form_source": question_form_source,
-            }
+        is_fallback = False
+        raw_recommendation = ""
+        if not (compulsory in curr and chapter in curr.get(compulsory, {})):
+            raw_recommendation = f"{compulsory} -> {chapter}"
+            is_fallback = True
+            if curr:
+                if compulsory in curr:
+                    chapter = next(iter(curr[compulsory]), "")
+                else:
+                    compulsory = next(iter(curr), "必修一")
+                    chapter = next(iter(curr[compulsory]), "")
+            else:
+                compulsory, chapter = "必修一", "1. 集合与常用逻辑用语"
+
+        # 小节：必须存在于 curriculum[compulsory][chapter]
+        category_knowledge = result.get("category_knowledge", "")
+        if compulsory in curr and chapter in curr.get(compulsory, {}):
+            valid_sections = curr[compulsory][chapter]
+            if category_knowledge not in valid_sections:
+                category_knowledge = chapter  # 默认小节=章节
         else:
-            # Fallback dynamically to the first available category book/chapter
-            first_comp = list(curr.keys())[0] if curr else "必修一"
-            first_chap = list(curr[first_comp].keys())[0] if curr and first_comp in curr and curr[first_comp] else "1. 集合与常用逻辑用语"
-            return {
-                "status": "success",
-                "compulsory": first_comp,
-                "chapter": first_chap,
-                "question_form": question_form,
-                "question_form_source": question_form_source,
-                "is_fallback": True,
-                "raw_recommendation": f"{compulsory} -> {chapter}"
-            }
+            category_knowledge = chapter
+
+        # 知识点 / 解题方法（支持数组或字符串）
+        knowledge_list = result.get("knowledge_list", []) or []
+        solve_method = result.get("solve_method", []) or []
+        if isinstance(knowledge_list, str):
+            knowledge_list = [x.strip() for x in re.split(r"[,，;；\n]+", knowledge_list) if x.strip()]
+        if isinstance(solve_method, str):
+            solve_method = [x.strip() for x in re.split(r"[,，;；\n]+", solve_method) if x.strip()]
+
+        return {
+            "status": "success",
+            "question_type": question_type,
+            "difficulty": difficulty,
+            "source": source,
+            "compulsory": compulsory,
+            "chapter": chapter,
+            "category_knowledge": category_knowledge,
+            "knowledge_list": knowledge_list,
+            "solve_method": solve_method,
+            "is_fallback": is_fallback,
+            "raw_recommendation": raw_recommendation,
+        }
             
     except Exception as e:
         return JSONResponse(
@@ -3324,8 +3411,8 @@ def parse_paper_text_internal(
     separated_mode: bool = False
 ) -> list:
     """内部通用函数：调用选定的 LLM 接口，将 LaTeX 试卷内容解析拆分为结构化 JSON 卡片"""
-    parse_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv("DEEPSEEK_PARSE_MODEL", "deepseek-v4-flash")
-    provider = resolve_text_provider(parse_model)
+    decision = decide_parse_model(latex_content)
+    provider = decision["provider"]
     api_key = provider.api_key
     api_base = provider.api_base
     model_name = provider.model_name
@@ -3339,40 +3426,58 @@ def parse_paper_text_internal(
     )
 
     max_output_tokens = 65536
+    PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟
 
-    data = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": system_instructions},
-            {"role": "user", "content": latex_content}
-        ],
-        "response_format": {
-            "type": "json_object"
-        },
-        "temperature": 0.2,
-        "max_tokens": max_output_tokens
-    }
-    
-    is_deepseek = ("deepseek" in model_name.lower() or "deepseek" in api_base.lower()) and "deepseek-chat" not in model_name.lower() and "deepseek-reasoner" not in model_name.lower()
-    if is_deepseek and provider.reasoning_effort in {None, "default"}:
-        data["thinking"] = {
-            "type": "disabled"
+    def build_parse_payload(target_provider, target_model):
+        """按给定 provider/model 构造拆题请求体（含 DeepSeek thinking / 推理强度 / 百炼策略）。"""
+        data = {
+            "model": target_model,
+            "messages": [
+                {"role": "system", "content": system_instructions},
+                {"role": "user", "content": latex_content}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+            "max_tokens": max_output_tokens
         }
-    data = inject_reasoning_effort(data, provider.reasoning_effort)
-    data = apply_bailian_thinking_policy(
-        data,
-        provider_code=provider.provider_code,
-        model_name=model_name,
-        task="parse",
-    )
-    
-    response = post_chat_completion(
-        provider,
-        data,
-        timeout=180,
-        provider_name=provider_name,
-    )
-        
+        is_deepseek = (
+            "deepseek" in target_model.lower() or "deepseek" in (target_provider.api_base or "").lower()
+        ) and "deepseek-chat" not in target_model.lower() and "deepseek-reasoner" not in target_model.lower()
+        if is_deepseek and target_provider.reasoning_effort in {None, "default"}:
+            data["thinking"] = {"type": "disabled"}
+        data = inject_reasoning_effort(data, target_provider.reasoning_effort)
+        data = apply_bailian_thinking_policy(
+            data,
+            provider_code=target_provider.provider_code,
+            model_name=target_model,
+            task="parse",
+        )
+        return data
+
+    data = build_parse_payload(provider, model_name)
+
+    try:
+        response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+        # 免费模型网络超时/连接失败：自动用付费模型重试一次，保证一定能出结果。
+        paid_provider = decision.get("paid_provider")
+        if decision.get("used_free") and paid_provider is not None:
+            print(
+                f"[Parse Router] 免费模型 {provider_name} 请求失败"
+                f"（{type(net_err).__name__}），自动回退到付费模型重试..."
+            )
+            provider = paid_provider
+            api_key = provider.api_key
+            api_base = provider.api_base
+            model_name = provider.model_name
+            provider_name = provider.provider_label
+            data = build_parse_payload(provider, model_name)
+            response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
+            decision["used_free"] = False
+            decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
+        else:
+            raise
+
     res_json = response.json()
     raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
     
@@ -3421,8 +3526,8 @@ def ai_parse_paper(
     generate_answers: str = Form("false")
 ):
     generate_answers_bool = generate_answers.lower() in ("true", "1", "yes")
-    parse_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv("DEEPSEEK_PARSE_MODEL", "deepseek-v4-flash")
-    provider = resolve_text_provider(parse_model)
+    decision = decide_parse_model(latex_content)
+    provider = decision["provider"]
     api_key = provider.api_key
     api_base = provider.api_base
     model_name = provider.model_name
@@ -3458,41 +3563,56 @@ def ai_parse_paper(
         system_instructions = build_import_parse_system_prompt(get_current_curriculum())
 
         max_output_tokens = 65536
+        PARSE_TIMEOUT = 300
 
-        data = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_instructions},
-                {"role": "user", "content": model_source}
-            ],
-            "response_format": {
-                "type": "json_object"
-            },
-            "temperature": 0.2,
-            "max_tokens": max_output_tokens
-        }
-        
-        # Only add thinking if using a DeepSeek model or DeepSeek base URL, excluding legacy models that don't support it
-        is_deepseek = ("deepseek" in model_name.lower() or "deepseek" in api_base.lower()) and "deepseek-chat" not in model_name.lower() and "deepseek-reasoner" not in model_name.lower()
-        if is_deepseek and provider.reasoning_effort in {None, "default"}:
-            data["thinking"] = {
-                "type": "disabled"
+        def build_parse_payload(target_provider, target_model):
+            data = {
+                "model": target_model,
+                "messages": [
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": model_source}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+                "max_tokens": max_output_tokens
             }
-        data = inject_reasoning_effort(data, provider.reasoning_effort)
-        data = apply_bailian_thinking_policy(
-            data,
-            provider_code=provider.provider_code,
-            model_name=model_name,
-            task="parse",
-        )
-        
-        response = post_chat_completion(
-            provider,
-            data,
-            timeout=180,
-            provider_name=provider_name,
-        )
-            
+            is_deepseek = (
+                "deepseek" in target_model.lower() or "deepseek" in (target_provider.api_base or "").lower()
+            ) and "deepseek-chat" not in target_model.lower() and "deepseek-reasoner" not in target_model.lower()
+            if is_deepseek and target_provider.reasoning_effort in {None, "default"}:
+                data["thinking"] = {"type": "disabled"}
+            data = inject_reasoning_effort(data, target_provider.reasoning_effort)
+            data = apply_bailian_thinking_policy(
+                data,
+                provider_code=target_provider.provider_code,
+                model_name=target_model,
+                task="parse",
+            )
+            return data
+
+        data = build_parse_payload(provider, model_name)
+
+        try:
+            response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+            paid_provider = decision.get("paid_provider")
+            if decision.get("used_free") and paid_provider is not None:
+                print(
+                    f"[Parse Router] 免费模型 {provider_name} 请求失败"
+                    f"（{type(net_err).__name__}），自动回退到付费模型重试..."
+                )
+                provider = paid_provider
+                api_key = provider.api_key
+                api_base = provider.api_base
+                model_name = provider.model_name
+                provider_name = provider.provider_label
+                data = build_parse_payload(provider, model_name)
+                response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
+                decision["used_free"] = False
+                decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
+            else:
+                raise
+
         res_json = response.json()
         raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
         
@@ -3524,8 +3644,10 @@ def ai_parse_paper(
             if not isinstance(question.get("referenced_images"), list):
                 question["referenced_images"] = []
 
-        lock_report = restore_visible_math(parsed_questions, math_locks)
+        lock_report = restore_visible_math(parsed_questions, math_locks, strict=False)
         tex_diagnostics.update(lock_report)
+        if "warnings" in lock_report:
+            tex_diagnostics.setdefault("warnings", []).extend(lock_report["warnings"])
         tex_diagnostics["question_count_actual"] = len(parsed_questions)
         estimated_count = tex_diagnostics.get("question_count_estimate", 0)
         if estimated_count and estimated_count != len(parsed_questions):
@@ -3648,6 +3770,13 @@ def ai_parse_paper(
             "status": "success",
             "questions": parsed_questions,
             "tex_diagnostics": tex_diagnostics,
+            "eval_decision": {
+                "difficulty": decision.get("difficulty"),
+                "used_free": decision.get("used_free"),
+                "reason": decision.get("reason"),
+                "model": model_name,
+                "provider_label": provider_name,
+            },
         }
     except Exception as e:
         return JSONResponse(
@@ -4641,7 +4770,7 @@ def run_pdf_parsing_task(
                 )
                 if estimated_pixels > 30_000_000:
                     raise ValueError(f"第 {page_num + 1} 页尺寸异常，已停止高清渲染。")
-                pixmap = page.get_pixmap(dpi=150)
+                pixmap = page.get_pixmap(dpi=250)
                 image_filename = f"pdf_page_{task_id}_{page_num}.png"
                 image_path = Path(TMP_UPLOAD_DIR) / image_filename
                 pixmap.save(image_path)
@@ -5011,6 +5140,46 @@ if not IS_TESTING:
     DOCUMENT_TASKS.start_maintenance(interval_seconds=60.0)
 
 
+def _find_soffice() -> str:
+    """定位 LibreOffice 的 soffice 可执行文件；未安装则返回空字符串。"""
+    candidates = [
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "/opt/homebrew/bin/soffice",
+        "/usr/local/bin/soffice",
+        "/usr/bin/soffice",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    import shutil
+    return shutil.which("soffice") or ""
+
+
+def _render_pdf_bytes_to_page_images(pdf_bytes, task_id, temp_assets):
+    """把 PDF 字节渲染成逐页 PNG（dpi=150），返回可访问 URL 列表，并追加到 temp_assets。"""
+    import fitz
+    page_urls = []
+    tmp_pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}_preview.pdf"
+    tmp_pdf_path.write_bytes(pdf_bytes)
+    try:
+        with fitz.open(tmp_pdf_path) as document:
+            total_pages = len(document)
+            if total_pages == 0:
+                return page_urls
+            for page_num in range(total_pages):
+                page = document.load_page(page_num)
+                pixmap = page.get_pixmap(dpi=250)
+                image_filename = f"docx_page_{task_id}_{page_num}.png"
+                image_path = Path(TMP_UPLOAD_DIR) / image_filename
+                pixmap.save(image_path)
+                image_url = f"/{UPLOAD_DIR_REL}/tmp/{image_filename}"
+                page_urls.append(image_url)
+                temp_assets.append(image_url)
+    finally:
+        tmp_pdf_path.unlink(missing_ok=True)
+    return page_urls
+
+
 def run_docx_parsing_task(
     task_id: str,
     file_bytes: bytes,
@@ -5082,8 +5251,10 @@ def run_docx_parsing_task(
         diagnostics["math_locks_created"] = len(math_locks)
         DOCUMENT_TASKS.check_cancelled(task_id)
         parsed_questions = parse_paper_text_internal(locked_markdown_content, generate_answers, separated_mode=separated_mode)
-        lock_report = restore_visible_math(parsed_questions, math_locks)
+        lock_report = restore_visible_math(parsed_questions, math_locks, strict=False)
         diagnostics.update(lock_report)
+        if "warnings" in lock_report:
+            diagnostics.setdefault("warnings", []).extend(lock_report["warnings"])
 
         DOCUMENT_TASKS.check_cancelled(task_id)
         current_step = "post_process"
@@ -5091,6 +5262,48 @@ def run_docx_parsing_task(
         final_questions = post_process_pdf_parsed_questions(parsed_questions, paper_title, task_id, [full_markdown_content])
         DOCUMENT_TASKS.check_cancelled(task_id)
         DOCUMENT_TASKS.step_complete_all(task_id)
+
+        # 方案C：标记公式可能异常的单题（供前端卡片红色警告）
+        from mathbank.docx_helper import detect_mathtype_garbage_residual
+        for _q in final_questions:
+            _c = _q.get("content", "") or ""
+            _a = _q.get("answer_markdown", "") or ""
+            if detect_mathtype_garbage_residual(_c) or detect_mathtype_garbage_residual(_a):
+                _q["needs_review"] = True
+
+        # 生成原卷预览页图（与 PDF 一致，供编辑页内嵌“查看原文件”对照核对）
+        page_images: list[str] = []
+        import subprocess
+        try:
+            soffice = _find_soffice()
+            if soffice:
+                DOCUMENT_TASKS.update(
+                    task_id,
+                    log="正在生成原卷预览图，便于对照核对公式...",
+                    document_type="docx",
+                )
+                src_docx_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.docx"
+                src_docx_path.write_bytes(file_bytes)
+                try:
+                    subprocess.run(
+                        [soffice, "--headless", "--norestore", "--convert-to", "pdf",
+                         "--outdir", TMP_UPLOAD_DIR, str(src_docx_path)],
+                        capture_output=True, timeout=240,
+                    )
+                except subprocess.TimeoutExpired:
+                    diagnostics.setdefault("warnings", []).append("LibreOffice 转换超时，未生成原卷预览图。")
+                pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.pdf"
+                if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                    page_images = _render_pdf_bytes_to_page_images(pdf_path.read_bytes(), task_id, temp_assets)
+                src_docx_path.unlink(missing_ok=True)
+                pdf_path.unlink(missing_ok=True)
+            else:
+                diagnostics.setdefault("warnings", []).append(
+                    "未找到 LibreOffice，无法生成原卷预览图（不影响拆题，可在编辑页手动核对）。"
+                )
+        except Exception as exc:
+            diagnostics.setdefault("warnings", []).append(f"生成原卷预览图失败：{exc}")
+
         DOCUMENT_TASKS.complete(
             task_id,
             log="完成！已提取并拆分 Word 题目，请优先检查带“公式待核对”标记的内容。" if review_count else "完成！已提取并拆分全部 Word 题目卡片。",
@@ -5098,6 +5311,7 @@ def run_docx_parsing_task(
             document_type="docx",
             diagnostics=diagnostics,
             temp_assets=list(temp_assets),
+            page_images=list(page_images),
         )
     except TaskCancelled:
         _delete_task_temp_assets(temp_assets)

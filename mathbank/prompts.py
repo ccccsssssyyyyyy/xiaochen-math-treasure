@@ -47,12 +47,21 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         "1. 仔细阅读并推导题目考点。\n"
         "2. 必须在上面的可选教材范围中为本题挑选最合适的一个【学段】（例如：必修一）和一个【所属章节】（例如：5. 三角函数，必须是可选章节中的精确字符串）。\n"
         f"3. {CLASSIFICATION_PRIORITY_RULE}\n"
-        "4. 只判定粗粒度题型 `question_form`：填空题为 `fill_in_blank`，解答题为 `detailed_answer`，任何选择题一律为 `choice`，无法可靠判断时为 `unknown`。严禁输出或猜测 `single_choice`、`multi_choice`、单选题、多选题。题干出现 `\\fillin` 时应判为填空题，出现 `\\begin{choices}` 时应判为选择题。\n"
-        "5. 你的输出必须是一个合法的 JSON 字符串，包含且仅包含以下三个 key，不要有任何多余的 Markdown 标记、代码块或解释文字：\n"
+        "4. 判定细粒度题型 `question_type`，取值只能是如下之一：单选题为 `single_choice`，多选题为 `multi_choice`，填空题为 `fill_in_blank`，解答题为 `detailed_answer`。通过题干判断单选/多选（如题干含\"多选题\"、\"(多选)\"、要求选出多个选项等）。题干出现 `\\fillin` 时判为 `fill_in_blank`，出现 `\\begin{choices}` 时判为选择题；无法可靠判断时默认为 `single_choice`。\n"
+        "5. 判定难度 `difficulty`：易错题为 `easy_error`，挑战题为 `challenge`，强基题为 `qiangji`；无法判断时默认为 `easy_error`。\n"
+        "6. 从题干开头剥离出处信息填入 `source`，例如 \"2024·全国·高考真题\" 清洗为 \"2024全国高考真题\"（去掉 \"·\"、\"•\" 等分隔符与多余空格，合并连续空白）。无出处则为空字符串。\n"
+        "7. 必须在上面的可选教材范围中为本题挑选最合适的一个 `compulsory`（学段，精确字符串）、一个 `chapter`（章节，精确字符串）、一个 `category_knowledge`（小节，必须是可选小节中的精确字符串，不存在则给最接近的章节名）。\n"
+        "8. `knowledge_list` 与 `solve_method` 均为字符串数组：knowledge_list 为本题知识点文本标签（如 [\"函数单调性\",\"导数应用\"]），solve_method 为本题解题方法文本标签（如 [\"导数法\",\"分类讨论\"]）。\n"
+        "9. 你的输出必须是一个合法 JSON 字符串，包含且仅包含以下 key，不要有任何多余的 Markdown 标记、代码块或解释文字：\n"
         "{\n"
+        '  "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
+        '  "difficulty": "easy_error / challenge / qiangji",\n'
+        '  "source": "清洗后的来源字符串",\n'
         '  "compulsory": "学段名称",\n'
         '  "chapter": "具体章节名称",\n'
-        '  "question_form": "choice / fill_in_blank / detailed_answer / unknown"\n'
+        '  "category_knowledge": "小节名称",\n'
+        '  "knowledge_list": ["知识点1", "知识点2"],\n'
+        '  "solve_method": ["方法1", "方法2"]\n'
         "}\n"
         "不要包含 ```json ``` 标记，只输出最干净的 JSON。"
     )
@@ -193,7 +202,9 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         "1.2 标签自动标注（重要）：必须为每道题额外产出 `knowledge_list`（字符串数组，列出本题涉及的**全部**细粒度知识点，如 [\"函数单调性\", \"导数应用\"]，可跨多个知识点）与 `solve_method`（单个字符串，给出本题**最贴切的核心解题方法/思想方法**，如 \"数形结合\"、\"分类讨论\"、\"换元法\"、\"待定系数法\"、\"反证法\"、\"归纳法\" 等，仅取最具代表性的一个）。\n"
         f"1.1 {CLASSIFICATION_PRIORITY_RULE}\n"
         "2. 文字与插图忠实保留：100% 完整保留题干所有汉字，绝对禁止删除“（如图）”、“如图所示”、“如右图所示”等几何指代描述！绝对保留 Markdown/LaTeX 原有的图片链接（如 `![](/static/uploads/...)` 或 `\\includegraphics{...}`），并将其 URL/文件名提取至 `referenced_images` 数组中。如输入中出现 `[公式待核对]`、`[公式结构待核对]`、`[特殊字符待核对]` 或“公式无法安全提取”，必须原样保留标记及紧随的预览图，绝不得猜测、补写或替换公式。\n"
-        "2.1 公式锁定协议：若正文出现 `<mathbank-math id=\"MBM_...\">完整公式</mathbank-math>`，标签内公式在原位置完整可见，可用于理解、分类和解题，但它是只读来源。输出题干或原版答案时，必须在同一语义位置将每个标签替换为且仅替换为一次 `[[对应的完整 id]]`，例如 `[[MBM_xxx_0001]]`；禁止遗漏、重复、改名或把同一 id 放入多个题目。若需要生成新解析，可另写普通 LaTeX 公式，但不得在新解析中重复这些锁定 id。\n"
+        "2.1 公式锁定协议（极其重要，漏掉会导致整卷导入失败）：输入中所有公式都被包裹为 `<mathbank-math id=\"MBM_...\">完整公式</mathbank-math>`，标签内的公式仅用于你理解题意，是只读来源。你在输出 `content` 和 `answer_markdown` 时，必须将每个 `<mathbank-math id=\"MBM_XXX_0001\">$...$</mathbank-math>` 原样替换为且仅替换为一次对应的 `[[MBM_XXX_0001]]`，禁止输出公式本身的 LaTeX、禁止删除该标记、禁止改名、禁止把同一 id 放进多个题目。\n"
+        "2.1.1 示例：输入题干为\"全集 <mathbank-math id=\"MBM_DOCX_0001\">$U=\\{1,2\\}$</mathbank-math> 已知...\"，则输出 `content` 必须是\"全集 [[MBM_DOCX_0001]] 已知...\"，系统会自动把 [[MBM_DOCX_0001]] 还原为原公式。你绝不能输出 $U=\\{1,2\\}$。\n"
+        "2.1.2 即使你觉得某个公式很简单，也绝不许把 `[[MBM_...]]` 展开成 LaTeX；必须保持 `[[...]]` 形式，否则公式将丢失或串题。\n"
         "3. 公式格式化与排版环境：选择题选项统一格式化为 `\\begin{choices} \\item ... \\end{choices}` 环境；填空题下划线统一使用标准的 `\\fillin` 宏；文本加粗必须使用 `\\textbf{...}`（严禁双星号 `**`）。\n"
         "4. 符号与公式规范：仅对含义明确的 Unicode 数学字符与结构（如 √、∈、α、β以及分子/分母边界清晰的分式）规范化为等价 LaTeX 语法（如 `\\sqrt{...}`, `\\frac{...}{...}`, `\\in`, `\\alpha`）。不得将普通字母 `j`、`p` 等根据语境猜成希腊字母或分式；不得根据题意自行重建原文中已损坏、缺失或标记待核对的公式。\n"
         "4.1 PDF 跨页协议：`<!-- MATHBANK_PDF_PAGE:N -->` 仅表示后续原文来自 PDF 第 N 页，用于来源追踪，不是题目边界，也不得出现在输出题干中。若一道题的题干、公式、表格、选项或解析跨越页标，必须按上下文合并为同一道完整题目，禁止按页拆成两题。\n"
