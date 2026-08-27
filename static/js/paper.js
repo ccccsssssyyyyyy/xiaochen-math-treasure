@@ -1614,7 +1614,7 @@
                         </div>
                         ${currentTab === 'selected' ? `
                             <button onclick="window.movePaperQuestion(${index}, 'up')" ${index === 0 ? 'disabled' : ''} class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30 dark:hover:bg-slate-700" title="上移"><i class="fa-solid fa-arrow-up text-xs"></i></button>
-                            <button onclick="window.movePaperQuestion(${index}, 'down')" ${index === displayList.length - 1 ? 'disabled' : ''} class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30 dark:hover:bg-slate-700" title="下移"><i class="fa-solid fa-arrow-down text-xs"></i></button>
+                            <button onclick="window.movePaperQuestion(${index}, 'down')" ${index === paperVirtual.displayList.length - 1 ? 'disabled' : ''} class="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30 dark:hover:bg-slate-700" title="下移"><i class="fa-solid fa-arrow-down text-xs"></i></button>
                         ` : ''}
                         <button onclick="window.removeFromCart(${q.id})" class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500 text-white shadow-sm hover:bg-rose-600 active:scale-95 transition-all flex items-center space-x-1" title="点击移出试卷"><i class="fa-solid fa-check text-xs"></i><span>已入卷</span></button>
                     ` : `
