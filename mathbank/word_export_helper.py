@@ -121,6 +121,7 @@ class PreparedQuestion:
     choices: list[str]
     answer: str
     images: list[Path]
+    answer_images: list[Path]
     solution_space: float
 
 
@@ -978,11 +979,17 @@ class WordExamBuilder:
             p.paragraph_format.keep_with_next = True
             run = p.add_run(f"{number}. ")
             _set_run_font(run, BODY_FONT_SIZE, bold=True)
+            usable_answer_images = [path for path in item.answer_images if path.exists()]
             if item.answer.strip():
                 self._add_content_blocks(p, item.answer)
-            else:
+            elif not usable_answer_images:
                 run = p.add_run("暂无答案与解析。")
                 _set_run_font(run, SMALL_FONT_SIZE, color=RGBColor(127, 127, 127))
+            if usable_answer_images:
+                fig_p = self.doc.add_paragraph()
+                fig_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for path in usable_answer_images:
+                    self._add_image(fig_p, path, max_width=2.35 if len(usable_answer_images) == 1 else 1.85)
 
     def save_bytes(self) -> bytes:
         properties = self.doc.core_properties
@@ -1026,25 +1033,44 @@ def _split_table_cells(row: str) -> list[str]:
     return cells
 
 
-def _resolve_image_paths(question: dict, uploads_dir: str | Path | None) -> list[Path]:
+def _resolve_image_paths(question: dict, uploads_dir: str | Path | None) -> tuple[list[Path], list[Path]]:
+    """拆分题干图与解析图，返回 (题干图, 解析图)。
+
+    判定规则：
+    - content 中引用的图片 -> 题干图（出现在学生版）
+    - answer_markdown 中引用的图片 -> 解析图（仅出现在教师版解析区）
+    - 仅存在于 image_paths、未被任一 markdown 引用的图片 -> 保守归题干，兼容旧数据
+    """
     root = Path(uploads_dir) if uploads_dir else None
-    values: list[str] = []
+
+    def _names(field: str) -> list[str]:
+        return [Path(value).name for value in IMAGE_PATTERN.findall(question.get(field, "") or "")]
+
+    content_names = _names("content")
+    answer_names = _names("answer_markdown")
     stored = question.get("image_paths", [])
-    if isinstance(stored, list):
-        values.extend(str(item) for item in stored)
-    values.extend(IMAGE_PATTERN.findall(question.get("content", "") or ""))
-    values.extend(IMAGE_PATTERN.findall(question.get("answer_markdown", "") or ""))
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for value in values:
-        basename = Path(value).name
-        if not basename or basename in seen:
-            continue
-        seen.add(basename)
-        candidate = root / basename if root else Path(value)
-        if candidate.exists():
-            paths.append(candidate)
-    return paths
+    stored_names = [Path(str(item)).name for item in stored] if isinstance(stored, list) else []
+
+    referenced = set(content_names) | set(answer_names)
+    stem_names: list[str] = list(content_names)
+    # 仅存于 image_paths、未被任一 markdown 引用的图片，保守归题干（兼容旧数据）
+    for name in stored_names:
+        if name and name not in referenced and name not in stem_names:
+            stem_names.append(name)
+
+    def _to_paths(names: list[str]) -> list[Path]:
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for name in names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            candidate = root / name if root else None
+            if candidate and candidate.exists():
+                paths.append(candidate)
+        return paths
+
+    return _to_paths(stem_names), _to_paths(answer_names)
 
 
 def _prepare_question(item: dict, uploads_dir: str | Path | None) -> PreparedQuestion:
@@ -1073,13 +1099,15 @@ def _prepare_question(item: dict, uploads_dir: str | Path | None) -> PreparedQue
         solution_space = max(0.0, float(item.get("solution_space") or question.get("solution_space") or 0))
     except (TypeError, ValueError):
         solution_space = 0.0
+    stem_images, answer_images = _resolve_image_paths(question, uploads_dir)
     return PreparedQuestion(
         question=question,
         score=int(item.get("score", 5)),
         stem=stem,
         choices=choices,
         answer=answer_clean,
-        images=_resolve_image_paths(question, uploads_dir),
+        images=stem_images,
+        answer_images=answer_images,
         solution_space=solution_space,
     )
 
