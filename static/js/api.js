@@ -1899,7 +1899,7 @@
 
         // Global Theme Color and Dark Mode Management
         window.changeTheme = function(themeName, save = true) {
-            const themes = ['theme-obsidian', 'theme-violet', 'theme-emerald', 'theme-ocean', 'theme-amber', 'theme-crimson'];
+            const themes = ['theme-coral', 'theme-indigo', 'theme-teal', 'theme-fuchsia', 'theme-navy', 'theme-sky'];
             
             // Remove all themes from document root and body
             themes.forEach(t => {
@@ -1917,19 +1917,19 @@
             const nameSpan = document.getElementById('currentThemeName');
             if (dot && nameSpan) {
                 const colorMap = {
-                    'obsidian': '#0f172a',
-                    'violet': '#8b5cf6',
-                    'ocean': '#0ea5e9',
-                    'emerald': '#10b981',
-                    'amber': '#f59e0b',
-                    'crimson': '#f43f5e'
+                    'coral': '#ea580c',
+                    'indigo': '#4f46e5',
+                    'teal': '#0d9488',
+                    'fuchsia': '#d946ef',
+                    'navy': '#475569',
+                    'sky': '#2563eb'
                 };
                 dot.style.backgroundColor = colorMap[themeName] || '#0f172a';
                 nameSpan.textContent = getThemeChineseName(themeName);
             }
             
             // Update check marks
-            const themesOnly = ['obsidian', 'violet', 'ocean', 'emerald', 'amber', 'crimson'];
+            const themesOnly = ['coral', 'indigo', 'teal', 'fuchsia', 'navy', 'sky'];
             themesOnly.forEach(t => {
                 const check = document.getElementById(`check-${t}`);
                 if (check) {
@@ -2163,12 +2163,12 @@
 
         function getThemeChineseName(themeName) {
             const names = {
-                'obsidian': '曜石黑',
-                'violet': '罗兰紫',
-                'emerald': '翡翠绿',
-                'ocean': '深海蓝',
-                'amber': '琥珀橙',
-                'crimson': '玫瑰红'
+                'coral': '珊瑚橘',
+                'indigo': '靛青',
+                'teal': '青碧',
+                'fuchsia': '洋红',
+                'navy': '藏青',
+                'sky': '天空'
             };
             return names[themeName] || themeName;
         }
@@ -2184,7 +2184,7 @@
         }
 
         function initTheme() {
-            const savedTheme = localStorage.getItem('theme-color') || 'violet';
+            const savedTheme = localStorage.getItem('theme-color') || 'coral';
             const savedDarkMode = localStorage.getItem('dark-mode') === 'true';
             
             // Apply saved theme color without triggering toast

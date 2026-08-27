@@ -58,76 +58,76 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
 }
 
 /* Theme Classes definitions */
-.theme-obsidian {
-    --brand-50-rgb: 248, 250, 252;
-    --brand-100-rgb: 241, 245, 249;
-    --brand-200-rgb: 226, 232, 240;
-    --brand-500-rgb: 30, 41, 59;
-    --brand-600-rgb: 15, 23, 42;
-    --brand-700-rgb: 2, 6, 23;
-    --brand-900-rgb: 2, 6, 23;
-    --brand-rgb: 15, 23, 42;
-    --apple-shadow-glow: 0 0 20px rgba(15, 23, 42, 0.2);
-}
-
-.theme-violet {
-    --brand-50-rgb: 245, 243, 255;
-    --brand-100-rgb: 237, 233, 254;
-    --brand-200-rgb: 221, 214, 254;
-    --brand-500-rgb: 139, 92, 246;
-    --brand-600-rgb: 124, 58, 237;
-    --brand-700-rgb: 109, 40, 217;
-    --brand-900-rgb: 76, 29, 149;
-    --brand-rgb: 124, 58, 237;
+.theme-coral {
+    --brand-50-rgb: 255, 247, 237;
+    --brand-100-rgb: 255, 237, 213;
+    --brand-200-rgb: 254, 215, 170;
+    --brand-500-rgb: 251, 146, 60;
+    --brand-600-rgb: 234, 88, 12;
+    --brand-700-rgb: 194, 65, 12;
+    --brand-900-rgb: 154, 52, 18;
+    --brand-rgb: 234, 88, 12;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 }
 
-.theme-emerald {
-    --brand-50-rgb: 236, 253, 245;
-    --brand-100-rgb: 209, 250, 229;
-    --brand-200-rgb: 167, 243, 208;
-    --brand-500-rgb: 16, 185, 129;
-    --brand-600-rgb: 5, 150, 105;
-    --brand-700-rgb: 4, 120, 87;
-    --brand-900-rgb: 6, 78, 59;
-    --brand-rgb: 5, 150, 105;
-    --apple-shadow-glow: 0 0 20px rgba(16, 185, 129, 0.15);
+.theme-indigo {
+    --brand-50-rgb: 238, 242, 255;
+    --brand-100-rgb: 224, 231, 255;
+    --brand-200-rgb: 199, 210, 254;
+    --brand-500-rgb: 129, 140, 248;
+    --brand-600-rgb: 79, 70, 229;
+    --brand-700-rgb: 67, 56, 202;
+    --brand-900-rgb: 55, 48, 163;
+    --brand-rgb: 79, 70, 229;
+    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 }
 
-.theme-ocean {
-    --brand-50-rgb: 240, 249, 255;
-    --brand-100-rgb: 224, 242, 254;
-    --brand-200-rgb: 186, 230, 253;
-    --brand-500-rgb: 14, 165, 233;
-    --brand-600-rgb: 2, 132, 199;
-    --brand-700-rgb: 3, 105, 161;
-    --brand-900-rgb: 12, 74, 110;
-    --brand-rgb: 2, 132, 199;
-    --apple-shadow-glow: 0 0 20px rgba(14, 165, 233, 0.15);
+.theme-teal {
+    --brand-50-rgb: 240, 253, 250;
+    --brand-100-rgb: 204, 251, 241;
+    --brand-200-rgb: 153, 246, 228;
+    --brand-500-rgb: 45, 212, 191;
+    --brand-600-rgb: 13, 148, 136;
+    --brand-700-rgb: 15, 118, 110;
+    --brand-900-rgb: 17, 94, 89;
+    --brand-rgb: 13, 148, 136;
+    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 }
 
-.theme-amber {
-    --brand-50-rgb: 255, 251, 235;
-    --brand-100-rgb: 254, 243, 199;
-    --brand-200-rgb: 253, 230, 138;
-    --brand-500-rgb: 245, 158, 11;
-    --brand-600-rgb: 217, 119, 6;
-    --brand-700-rgb: 180, 83, 9;
-    --brand-900-rgb: 120, 53, 15;
-    --brand-rgb: 217, 119, 6;
-    --apple-shadow-glow: 0 0 20px rgba(245, 158, 11, 0.15);
+.theme-fuchsia {
+    --brand-50-rgb: 253, 244, 255;
+    --brand-100-rgb: 250, 232, 255;
+    --brand-200-rgb: 245, 208, 254;
+    --brand-500-rgb: 232, 121, 249;
+    --brand-600-rgb: 217, 70, 239;
+    --brand-700-rgb: 176, 38, 201;
+    --brand-900-rgb: 134, 25, 143;
+    --brand-rgb: 217, 70, 239;
+    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 }
 
-.theme-crimson {
-    --brand-50-rgb: 255, 241, 242;
-    --brand-100-rgb: 255, 228, 230;
-    --brand-200-rgb: 254, 205, 211;
-    --brand-500-rgb: 244, 63, 94;
-    --brand-600-rgb: 225, 29, 72;
-    --brand-700-rgb: 190, 18, 60;
-    --brand-900-rgb: 136, 19, 55;
-    --brand-rgb: 225, 29, 72;
-    --apple-shadow-glow: 0 0 20px rgba(225, 29, 72, 0.15);
+.theme-navy {
+    --brand-50-rgb: 248, 250, 252;
+    --brand-100-rgb: 241, 245, 249;
+    --brand-200-rgb: 226, 232, 240;
+    --brand-500-rgb: 100, 116, 139;
+    --brand-600-rgb: 71, 85, 105;
+    --brand-700-rgb: 51, 65, 85;
+    --brand-900-rgb: 30, 41, 59;
+    --brand-rgb: 71, 85, 105;
+    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+}
+
+.theme-sky {
+    --brand-50-rgb: 239, 246, 255;
+    --brand-100-rgb: 219, 234, 254;
+    --brand-200-rgb: 191, 219, 254;
+    --brand-500-rgb: 96, 165, 250;
+    --brand-600-rgb: 37, 99, 235;
+    --brand-700-rgb: 29, 78, 216;
+    --brand-900-rgb: 30, 64, 175;
+    --brand-rgb: 37, 99, 235;
+    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 }
 
 /* Elegant Dark Mode Definition */
@@ -1913,4 +1913,25 @@ main {
     .skeleton {
         animation: none !important;
     }
+}
+
+/* === 玻璃精修 (Glass Refined) === */
+
+/* A. 文字对比度提升（仅浅色模式，不影响暗色） */
+:root:not(.dark) {
+    --text-secondary: #475569;   /* 原 #64748B */
+    --text-tertiary:  #64748B;   /* 原 #94A3B8 */
+}
+
+/* C. 题目卡片 hover：轻微上浮 + 品牌色描边（替代原 translateX） */
+.question-card:hover {
+    box-shadow: var(--apple-shadow-lg);
+    border-color: rgba(var(--brand-500-rgb), 0.35);
+    transform: translateY(-2px);
+}
+
+/* C2. 选中态：在原有左侧品牌条基础上加聚焦环 */
+.question-card.active {
+    box-shadow: 0 0 0 2px rgba(var(--brand-500-rgb), 0.22),
+                0 2px 8px rgba(0, 0, 0, 0.04);
 }
