@@ -128,6 +128,7 @@
             document.getElementById('editQType').value = 'single_choice';
             document.getElementById('editDifficulty').value = 'easy_error';
             document.getElementById('editCompulsory').value = '';
+            if (typeof setRelatedChapters === 'function') setRelatedChapters([]);
             document.getElementById('editCompulsory').onchange();
             
             document.getElementById('editQType').dispatchEvent(new Event('change'));
@@ -216,6 +217,7 @@
                 document.getElementById('editQType').value = 'single_choice';
                 document.getElementById('editDifficulty').value = 'easy_error';
                 document.getElementById('editCompulsory').value = '';
+            if (typeof setRelatedChapters === 'function') setRelatedChapters([]);
                 document.getElementById('editCompulsory').onchange();
                 
                 document.getElementById('editQType').dispatchEvent(new Event('change'));
@@ -296,6 +298,7 @@
             document.getElementById('editQType').value = 'single_choice';
             document.getElementById('editDifficulty').value = 'easy_error';
             document.getElementById('editCompulsory').value = '';
+            if (typeof setRelatedChapters === 'function') setRelatedChapters([]);
             document.getElementById('editCompulsory').onchange();
             
             document.getElementById('editQType').dispatchEvent(new Event('change'));
@@ -655,7 +658,12 @@
                     chapSelect.value = fullItem.category_chapter || '';
                     chapSelect.onchange();
                     knowSelect.value = fullItem.category_knowledge || '';
-                    
+
+                    // 关联章节（融合题多章节）回填
+                    if (typeof setRelatedChapters === 'function') {
+                        setRelatedChapters(fullItem.related_curriculums || []);
+                    }
+
                     // Dispatch input previews or update synchronously
                     if (typeof window.updateContentPreview === 'function') {
                         window.updateContentPreview();
@@ -713,6 +721,88 @@
             });
             return true;
         };
+
+        // ---------- 关联章节 (related_curriculums) 支持 ----------
+        // 全局关联章节列表，格式: [{compulsory, chapter, knowledge}]
+        window.relatedChapters = window.relatedChapters || [];
+
+        function renderRelatedChaptersChips() {
+            const container = document.getElementById('relatedChaptersChips');
+            if (!container) return;
+            container.innerHTML = '';
+            (window.relatedChapters || []).forEach((item, idx) => {
+                const chip = document.createElement('span');
+                chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 text-[11px] font-medium border border-brand-200';
+                const label = [item.compulsory, item.chapter, (item.knowledge && item.knowledge !== item.chapter) ? item.knowledge : '']
+                    .filter(Boolean).join(' / ');
+                const text = document.createElement('span');
+                text.textContent = label;
+                chip.appendChild(text);
+                const x = document.createElement('button');
+                x.type = 'button';
+                x.className = 'text-brand-400 hover:text-brand-700';
+                x.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+                x.title = '移除';
+                x.onclick = () => { window.relatedChapters.splice(idx, 1); renderRelatedChaptersChips(); };
+                chip.appendChild(x);
+                container.appendChild(chip);
+            });
+        }
+        window.renderRelatedChaptersChips = renderRelatedChaptersChips;
+
+        function setRelatedChapters(arr) {
+            window.relatedChapters = Array.isArray(arr)
+                ? arr.map(x => ({ compulsory: x.compulsory || '', chapter: x.chapter || '', knowledge: x.knowledge || '' }))
+                : [];
+            renderRelatedChaptersChips();
+        }
+        window.setRelatedChapters = setRelatedChapters;
+
+        function getRelatedChapters() { return window.relatedChapters || []; }
+        window.getRelatedChapters = getRelatedChapters;
+
+        function addRelatedChapterFromSelects() {
+            const comp = document.getElementById('editRelCompulsory');
+            const chap = document.getElementById('editRelChapter');
+            const know = document.getElementById('editRelKnowledge');
+            if (!chap || !chap.value) { showToast('请先在关联章节选择学段与章节', 'info'); return; }
+            const item = {
+                compulsory: comp ? comp.value : '',
+                chapter: chap.value,
+                knowledge: (know && know.value) ? know.value : chap.value
+            };
+            const exists = (window.relatedChapters || []).some(r =>
+                r.compulsory === item.compulsory && r.chapter === item.chapter && r.knowledge === item.knowledge);
+            if (exists) { showToast('该关联章节已添加', 'info'); return; }
+            window.relatedChapters.push(item);
+            renderRelatedChaptersChips();
+            if (chap) { chap.value = ''; if (typeof chap.onchange === 'function') chap.onchange(); }
+            if (know) { know.value = ''; }
+            showToast('已添加关联章节', 'success');
+        }
+        window.addRelatedChapterFromSelects = addRelatedChapterFromSelects;
+
+        function setupPresetTopicTags() {
+            const box = document.getElementById('presetTopicTags');
+            if (!box) return;
+            // 幂等：已生成过快捷标签则跳过
+            if (box.querySelector('button')) return;
+            const presets = ['数形结合', '转化与化归', '函数与方程', '分类讨论', '特殊与一般', '正难则反', '构造法', '极限思想', '向量法', '坐标法'];
+            presets.forEach(p => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'px-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px]';
+                b.textContent = p;
+                b.onclick = () => {
+                    const t = document.getElementById('editTags');
+                    if (!t) return;
+                    const cur = (t.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+                    if (!cur.includes(p)) { cur.push(p); t.value = cur.join(', '); }
+                };
+                box.appendChild(b);
+            });
+        }
+        window.setupPresetTopicTags = setupPresetTopicTags;
 
         // Save/Update Question in SQLite (returns Promise)
         function saveQuestion(skipCheck = false) {
@@ -795,6 +885,7 @@
                 formData.append('tags', tags);
                 formData.append('knowledge_list', knowledge_list);
                 formData.append('solve_method', solve_method);
+                formData.append('related_curriculums', JSON.stringify(getRelatedChapters()));
                 const combinedImages = Array.from(new Set([
                     ...uploadedImages,
                     ...(typeof uploadedAnswerImages !== 'undefined' ? uploadedAnswerImages : [])
@@ -3847,8 +3938,15 @@
             }
 
             showToast('AI 已自动识别分类信息，如有误请手动修改', 'info');
+
+            // 关联章节（融合题）：用 AI 识别的额外章节覆盖设置
+            if (Array.isArray(data.related_chapters)) {
+                if (typeof setRelatedChapters === 'function') {
+                    setRelatedChapters(data.related_chapters);
+                }
+            }
+            window.applyClassifyResultToEditor = applyClassifyResultToEditor;
         }
-        window.applyClassifyResultToEditor = applyClassifyResultToEditor;
 
         function renderParsedCardPreview(card, contentText, answerText) {
             const contentPrev = card.querySelector('.card-content-preview');
@@ -4028,6 +4126,7 @@
                         fd.append('category_knowledge', category_knowledge);
                         fd.append('knowledge_list', knowledge_list);
                         fd.append('solve_method', solve_method);
+                        fd.append('related_curriculums', JSON.stringify(getRelatedChapters()));
                         fd.append('difficulty', difficulty);
                         fd.append('source', source);
                         fd.append('answer_markdown', answer_markdown);

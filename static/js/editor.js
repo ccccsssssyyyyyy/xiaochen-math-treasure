@@ -198,7 +198,8 @@ let bankQuestionsRetryTimer = null;
                 category_chapter: document.getElementById('editChapter').value,
                 category_knowledge: document.getElementById('editKnowledge').value,
                 image_paths: JSON.stringify(uploadedImages),
-                tags: document.getElementById('editTags') ? document.getElementById('editTags').value : ''
+                tags: document.getElementById('editTags') ? document.getElementById('editTags').value : '',
+                related_curriculums: window.relatedChapters ? JSON.stringify(window.relatedChapters) : '[]'
             };
             originalQuestionState = {
                 id: id,
@@ -213,7 +214,8 @@ let bankQuestionsRetryTimer = null;
                 category_chapter: snapshot.category_chapter,
                 category_knowledge: snapshot.category_knowledge,
                 image_paths: snapshot.image_paths,
-                tags: snapshot.tags
+                tags: snapshot.tags,
+                related_curriculums: snapshot.related_curriculums
             };
         }
         window.backupEditorState = backupEditorState;
@@ -231,6 +233,7 @@ let bankQuestionsRetryTimer = null;
             const currentKnow = document.getElementById('editKnowledge').value;
             const currentImages = JSON.stringify(uploadedImages);
             const currentTags = document.getElementById('editTags') ? document.getElementById('editTags').value : '';
+            const currentRelated = window.relatedChapters ? JSON.stringify(window.relatedChapters) : '[]';
 
             return currentContent === snapshot.content &&
                    currentAnswer === snapshot.answer_markdown &&
@@ -242,7 +245,8 @@ let bankQuestionsRetryTimer = null;
                    currentChap === snapshot.category_chapter &&
                    currentKnow === snapshot.category_knowledge &&
                    currentImages === snapshot.image_paths &&
-                   currentTags === snapshot.tags;
+                   currentTags === snapshot.tags &&
+                   currentRelated === snapshot.related_curriculums;
         }
         window.editorMatchesBackupSnapshot = editorMatchesBackupSnapshot;
 
@@ -666,6 +670,7 @@ let bankQuestionsRetryTimer = null;
                     <div class="text-xs text-slate-700 leading-relaxed font-medium line-clamp-2 card-formula-render">${cleanContent || '[未填题干]'}</div>
                     <div class="flex justify-between items-center text-[9px] text-slate-400 border-t pt-1.5">
                         <span class="truncate max-w-[120px] font-semibold text-emerald-600"><i class="fa-solid fa-box mr-0.5"></i>${window.MathBankSafe.escapeText(item.category_knowledge || item.category_chapter || '未分类')}</span>
+                        ${Array.isArray(item.related_curriculums) && item.related_curriculums.length ? `<span class="text-[9px] text-amber-500 font-semibold" title="关联章节">+${item.related_curriculums.length}关联</span>` : ''}
                         <span class="font-mono text-slate-400">${window.MathBankSafe.escapeText(item.source ? item.source.substring(0, 12) : '草稿暂存')}</span>
                     </div>
                 `;
@@ -1035,6 +1040,64 @@ let bankQuestionsRetryTimer = null;
                     }
                 }
             }
+
+            // 关联章节下拉与主分类级联保持同步
+            if (typeof populateRelatedDropdowns === 'function') populateRelatedDropdowns();
+            // 首次加载时生成常用主题快捷标签（幂等）
+            if (typeof window.setupPresetTopicTags === 'function') window.setupPresetTopicTags();
+        }
+
+        // 关联章节(融合题多章节)级联下拉：学段 → 章节 → 小节
+        function populateRelatedDropdowns() {
+            const compSelect = document.getElementById('editRelCompulsory');
+            const chapSelect = document.getElementById('editRelChapter');
+            const knowSelect = document.getElementById('editRelKnowledge');
+            const addBtn = document.getElementById('addRelatedChapterBtn');
+            if (!compSelect || !chapSelect || !knowSelect) return;
+            if (!window.categoryTree || typeof window.categoryTree !== 'object') return;
+
+            compSelect.innerHTML = '<option value="">-- 选择学段 --</option>';
+            Object.keys(window.categoryTree).forEach(c => {
+                compSelect.innerHTML += `<option value="${window.MathBankSafe.escapeAttribute(c)}">${window.MathBankSafe.escapeText(c)}</option>`;
+            });
+
+            compSelect.onchange = () => {
+                const comp = compSelect.value;
+                chapSelect.innerHTML = '<option value="">-- 选择章节 --</option>';
+                knowSelect.innerHTML = '<option value="">-- 先选择章节 --</option>';
+                knowSelect.disabled = true;
+                if (addBtn) addBtn.disabled = true;
+                if (comp && window.categoryTree[comp]) {
+                    chapSelect.disabled = false;
+                    Object.keys(window.categoryTree[comp]).forEach(ch => {
+                        chapSelect.innerHTML += `<option value="${window.MathBankSafe.escapeAttribute(ch)}">${window.MathBankSafe.escapeText(ch)}</option>`;
+                    });
+                } else {
+                    chapSelect.disabled = true;
+                }
+            };
+
+            chapSelect.onchange = () => {
+                const comp = compSelect.value;
+                const chap = chapSelect.value;
+                knowSelect.innerHTML = '<option value="">-- 选择小节 (可不选) --</option>';
+                if (comp && chap && window.categoryTree[comp][chap]) {
+                    knowSelect.disabled = false;
+                    window.categoryTree[comp][chap].forEach(k => {
+                        knowSelect.innerHTML += `<option value="${window.MathBankSafe.escapeAttribute(k)}">${window.MathBankSafe.escapeText(k)}</option>`;
+                    });
+                } else {
+                    knowSelect.disabled = true;
+                }
+                if (addBtn) addBtn.disabled = !chap;
+            };
+
+            // 重置关联选择态
+            chapSelect.value = '';
+            knowSelect.value = '';
+            chapSelect.disabled = true;
+            knowSelect.disabled = true;
+            if (addBtn) addBtn.disabled = true;
         }
 
         // Populate Categories in Filters
@@ -1387,6 +1450,7 @@ let bankQuestionsRetryTimer = null;
                             </div>
                             <div class="flex justify-between items-center text-[9px] text-slate-400 border-t pt-1.5">
                                 <span class="truncate max-w-[120px] font-semibold"><i class="fa-solid fa-folder-open mr-0.5"></i>${window.MathBankSafe.escapeText(item.category_knowledge || item.category_chapter || '未分类')}</span>
+                                ${Array.isArray(item.related_curriculums) && item.related_curriculums.length ? `<span class="text-[9px] text-amber-500 font-semibold" title="关联章节">+${item.related_curriculums.length}关联</span>` : ''}
                                 <span class="font-mono text-slate-400">${window.MathBankSafe.escapeText(item.source ? item.source.substring(0, 12) : '本地录入')}</span>
                             </div>
                         `;

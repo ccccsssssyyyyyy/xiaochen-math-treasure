@@ -464,6 +464,27 @@
                         </div>
                     </div>
 
+                    <!-- Row 2.6: 关联章节（融合题多章节归属） -->
+                    <div class="mt-3 p-3 rounded-xl border border-dashed border-slate-300 bg-slate-50/60">
+                        <label class="block text-[11px] font-medium text-slate-600 mb-1.5 flex items-center">
+                            <i class="fa-solid fa-layer-group text-slate-400 mr-1"></i>
+                            <span>关联章节（融合题适用，可多选）</span>
+                            <span class="ml-1 text-[10px] text-slate-400 font-normal">除主分类外，题目还涉及的章节</span>
+                        </label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <select id="editRelCompulsory" class="glass-select w-full px-2 text-xs rounded-lg"></select>
+                            <select id="editRelChapter" class="glass-select w-full px-2 text-xs rounded-lg" disabled></select>
+                            <select id="editRelKnowledge" class="glass-select w-full px-2 text-xs rounded-lg" disabled></select>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" id="addRelatedChapterBtn" onclick="addRelatedChapterFromSelects()" class="px-2.5 py-1 rounded-lg bg-brand-600 text-white text-xs font-medium hover:bg-brand-700 disabled:opacity-40" disabled>
+                                <i class="fa-solid fa-plus mr-1"></i>添加关联章节
+                            </button>
+                            <span class="text-[10px] text-slate-400">添加后以标签展示，筛选该章节时也会命中本题</span>
+                        </div>
+                        <div id="relatedChaptersChips" class="flex flex-wrap gap-1.5 mt-2"></div>
+                    </div>
+
                     <!-- Row 3: Custom Tags -->
                     <div class="mt-3">
                         <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
@@ -472,6 +493,10 @@
                         </label>
                         <input type="text" id="editTags" placeholder="如：高一, 期中, 真题 (使用逗号分隔)"
                                class="glass-input w-full px-2.5 text-xs rounded-xl">
+                        <!-- Row 3.5: 常用主题/思想方法 快捷标签 -->
+                        <div class="mt-2 flex flex-wrap gap-1.5" id="presetTopicTags">
+                            <span class="text-[10px] text-slate-400 mr-1 self-center">常用主题:</span>
+                        </div>
                     </div>
                 </div>
 
