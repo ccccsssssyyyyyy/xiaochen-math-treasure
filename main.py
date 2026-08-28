@@ -55,6 +55,10 @@ from mathbank.latex_diagnostics import (
     merge_ai_latex_diagnostic,
 )
 from mathbank.ai_json import parse_ai_json
+from mathbank.paper_chunking import (
+    dedupe_questions,
+    split_markdown_into_question_chunks,
+)
 from mathbank.ai_http import (
     post_chat_completion,
 )
@@ -92,6 +96,7 @@ from mathbank.question_types import (
     detect_structured_question_form,
     normalize_ai_question_form,
 )
+from mathbank.latex_normalize import normalize_choice_options_to_latex
 import shutil
 from mathbank.pdf_inspector_helper import (
     is_pdf_inspector_available,
@@ -931,6 +936,8 @@ def ocr_formula(
             latex_content = latex_content.replace("\\,", "").replace("\\!", "")
             # 自动清洗规范化下划线/连续划线/任何 \underline 变体为标准的 \fillin 宏
             latex_content = normalize_fillin_macro(latex_content)
+            # 选择题选项统一为 choices 网格环境（单题 OCR 亦适用，避免内联选项进入编辑器）
+            latex_content = normalize_choice_options_to_latex(latex_content)
 
         # ----------------- 双阶段多模态识图与高级 TikZ 绘图模型联动 -----------------
         tikz_code_from_high_model = None
@@ -2301,6 +2308,19 @@ def parse_related_curriculums(raw):
     seen = set()
     out = []
     for item in data:
+        if isinstance(item, str):
+            # AI 拆卷可能产出 "学段 / 章节 / 小节" 字符串，按 "/" 拆分归一化。
+            # 仅当含分隔符 "/" 才视为有效关联章节描述，避免把无意义的纯文本误当成章节。
+            if '/' not in item:
+                continue
+            parts = [p.strip() for p in item.split("/") if p.strip()]
+            if not parts:
+                continue
+            item = {
+                "compulsory": parts[0] if len(parts) > 1 else "",
+                "chapter": parts[1] if len(parts) > 1 else parts[0],
+                "knowledge": parts[2] if len(parts) > 2 else (parts[1] if len(parts) > 1 else parts[0]),
+            }
         if not isinstance(item, dict):
             continue
         chapter = (item.get("chapter") or "").strip()
@@ -2347,6 +2367,8 @@ def create_question(
     try:
         # 规范化填空题下划线为 \fillin 宏
         content = normalize_fillin_macro(content)
+        # 选择题选项统一为 choices 网格环境（双保险：AI 即便输出内联 A./B./C./D. 也归一化）
+        content = normalize_choice_options_to_latex(content)
 
         # Validate json array format
         parsed_img_paths = json.loads(image_paths) if image_paths else []
@@ -2506,6 +2528,8 @@ def update_question(
     try:
         # 规范化填空题下划线为 \fillin 宏
         content = normalize_fillin_macro(content)
+        # 选择题选项统一为 choices 网格环境（双保险：AI 即便输出内联 A./B./C./D. 也归一化）
+        content = normalize_choice_options_to_latex(content)
 
         parsed_img_paths = json.loads(image_paths) if image_paths else []
         
@@ -3493,6 +3517,131 @@ def upload_batch_images(files: List[UploadFile] = File(...)):
         )
 
 
+def _build_parse_payload(provider, model_name, system_instructions, user_content, max_output_tokens):
+    """按给定 provider/model 构造拆题请求体（含 DeepSeek thinking / 推理强度 / 百炼策略）。"""
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_instructions},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.2,
+        "max_tokens": max_output_tokens,
+    }
+    is_deepseek = (
+        "deepseek" in model_name.lower() or "deepseek" in (provider.api_base or "").lower()
+    ) and "deepseek-chat" not in model_name.lower() and "deepseek-reasoner" not in model_name.lower()
+    if is_deepseek and provider.reasoning_effort in {None, "default"}:
+        data["thinking"] = {"type": "disabled"}
+    data = inject_reasoning_effort(data, provider.reasoning_effort)
+    data = apply_bailian_thinking_policy(
+        data,
+        provider_code=provider.provider_code,
+        model_name=model_name,
+        task="parse",
+    )
+    return data
+
+
+def _extract_questions_list(parsed_data):
+    """从 AI 返回的 JSON 中提取题目列表（兼容 {"questions":[...]} / {"data":[...]} / 裸数组 / 单对象）。"""
+    if isinstance(parsed_data, dict):
+        if "questions" in parsed_data and isinstance(parsed_data["questions"], list):
+            return parsed_data["questions"]
+        elif "data" in parsed_data and isinstance(parsed_data["data"], list):
+            return parsed_data["data"]
+        else:
+            parsed_questions = None
+            for key, val in parsed_data.items():
+                if isinstance(val, list):
+                    parsed_questions = val
+                    break
+            if parsed_questions is None:
+                parsed_questions = [parsed_data]
+            return parsed_questions
+    elif isinstance(parsed_data, list):
+        return parsed_data
+    else:
+        raise Exception("AI 返回的 JSON 格式不正确，期望是一个数组或包含 questions 列表的对象。")
+
+
+def _parse_single_chunk(user_content, decision, system_instructions, max_output_tokens, timeout, chunk_markdown=None):
+    """解析单个文本块；含免费模型超时/连接失败自动回退付费（回退会改写 decision 供后续块复用）。"""
+    provider = decision["provider"]
+    api_key = provider.api_key
+    api_base = provider.api_base
+    model_name = provider.model_name
+    provider_name = provider.provider_label
+    if not api_key:
+        raise ValueError(f"未配置对应的 API Key ({provider.credential_label})，无法智能拆解试卷！请在工作台右上角设置面板进行配置。")
+
+    payload = _build_parse_payload(provider, model_name, system_instructions, user_content, max_output_tokens)
+    try:
+        response = post_chat_completion(provider, payload, timeout=timeout, provider_name=provider_name)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+        paid_provider = decision.get("paid_provider")
+        if decision.get("used_free") and paid_provider is not None:
+            print(
+                f"[Parse Router] 免费模型 {provider_name} 请求失败"
+                f"（{type(net_err).__name__}），自动回退到付费模型重试..."
+            )
+            provider = paid_provider
+            decision["provider"] = paid_provider
+            api_key = provider.api_key
+            api_base = provider.api_base
+            model_name = provider.model_name
+            provider_name = provider.provider_label
+            payload = _build_parse_payload(provider, model_name, system_instructions, user_content, max_output_tokens)
+            response = post_chat_completion(provider, payload, timeout=timeout, provider_name=provider_name)
+            decision["used_free"] = False
+            decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
+        else:
+            raise
+
+    res_json = response.json()
+    raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
+    parsed_data = parse_ai_json(raw_ai_text, raw_markdown=chunk_markdown if chunk_markdown is not None else user_content)
+    return _extract_questions_list(parsed_data)
+
+
+def _parse_chunks_to_questions(document_text, decision, system_instructions, generate_answers_bool, separated_mode=False):
+    """将（可能超长的）试卷文本按题号边界分块，逐块调用 LLM 解析，合并去重。
+
+    彻底解决「超长文档 → AI 输出超过 max_tokens 被截断 → JSON 解析失败 → 拆解失败」。
+    单块失败不会拖垮整卷，会跳过并继续；所有块都失败才抛错。
+    """
+    max_output_tokens = 65536
+    PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟
+
+    chunks = split_markdown_into_question_chunks(document_text)
+    total = len(chunks)
+    if total <= 1:
+        return _parse_single_chunk(
+            chunks[0] if chunks else document_text,
+            decision, system_instructions, max_output_tokens, PARSE_TIMEOUT,
+        )
+
+    print(f"[Parse Chunking] 文档较长，已切分为 {total} 段逐段解析。")
+    all_questions = []
+    for idx, chunk in enumerate(chunks):
+        user_content = (
+            f"[这是试卷的第 {idx + 1}/{total} 段，请只解析本段内的题目，"
+            f"忽略其它段落；返回格式仍为 {{\"questions\": [...]}}。]\n\n{chunk}"
+        )
+        try:
+            qs = _parse_single_chunk(user_content, decision, system_instructions, max_output_tokens, PARSE_TIMEOUT, chunk_markdown=chunk)
+            all_questions.extend(qs)
+            print(f"[Parse Chunking] 第 {idx + 1}/{total} 段解析完成，本段 {len(qs)} 题。")
+        except Exception as exc:
+            print(f"[Parse Chunking] 第 {idx + 1}/{total} 段解析失败，跳过该段：{type(exc).__name__}: {exc}")
+            continue
+
+    if not all_questions:
+        raise Exception("所有分块均解析失败，无法拆解试卷。")
+    return dedupe_questions(all_questions)
+
+
 def parse_paper_text_internal(
     latex_content: str,
     generate_answers_bool: bool,
@@ -3514,81 +3663,12 @@ def parse_paper_text_internal(
     )
 
     max_output_tokens = 65536
-    PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟
+    PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟（保留以备调用方参考）
 
-    def build_parse_payload(target_provider, target_model):
-        """按给定 provider/model 构造拆题请求体（含 DeepSeek thinking / 推理强度 / 百炼策略）。"""
-        data = {
-            "model": target_model,
-            "messages": [
-                {"role": "system", "content": system_instructions},
-                {"role": "user", "content": latex_content}
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0.2,
-            "max_tokens": max_output_tokens
-        }
-        is_deepseek = (
-            "deepseek" in target_model.lower() or "deepseek" in (target_provider.api_base or "").lower()
-        ) and "deepseek-chat" not in target_model.lower() and "deepseek-reasoner" not in target_model.lower()
-        if is_deepseek and target_provider.reasoning_effort in {None, "default"}:
-            data["thinking"] = {"type": "disabled"}
-        data = inject_reasoning_effort(data, target_provider.reasoning_effort)
-        data = apply_bailian_thinking_policy(
-            data,
-            provider_code=target_provider.provider_code,
-            model_name=target_model,
-            task="parse",
-        )
-        return data
+    parsed_questions = _parse_chunks_to_questions(
+        latex_content, decision, system_instructions, generate_answers_bool, separated_mode
+    )
 
-    data = build_parse_payload(provider, model_name)
-
-    try:
-        response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
-        # 免费模型网络超时/连接失败：自动用付费模型重试一次，保证一定能出结果。
-        paid_provider = decision.get("paid_provider")
-        if decision.get("used_free") and paid_provider is not None:
-            print(
-                f"[Parse Router] 免费模型 {provider_name} 请求失败"
-                f"（{type(net_err).__name__}），自动回退到付费模型重试..."
-            )
-            provider = paid_provider
-            api_key = provider.api_key
-            api_base = provider.api_base
-            model_name = provider.model_name
-            provider_name = provider.provider_label
-            data = build_parse_payload(provider, model_name)
-            response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
-            decision["used_free"] = False
-            decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
-        else:
-            raise
-
-    res_json = response.json()
-    raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
-    
-    parsed_data = parse_ai_json(raw_ai_text, raw_markdown=latex_content)
-    
-    if isinstance(parsed_data, dict):
-        if "questions" in parsed_data and isinstance(parsed_data["questions"], list):
-            parsed_questions = parsed_data["questions"]
-        elif "data" in parsed_data and isinstance(parsed_data["data"], list):
-            parsed_questions = parsed_data["data"]
-        else:
-            parsed_questions = None
-            for key, val in parsed_data.items():
-                if isinstance(val, list):
-                    parsed_questions = val
-                    break
-                if parsed_questions is None:
-                    parsed_questions = [parsed_data]
-    elif isinstance(parsed_data, list):
-        parsed_questions = parsed_data
-    else:
-        raise Exception("AI 返回的 JSON 格式不正确，期望是一个数组或包含 questions 列表的对象。")
-        
     # 强制进行静默净化：若未勾选自动生成答案，则对于没有带有 [EXTRACTED_ORIGINAL] 的解析和解答，将其强行抹平为空。
     for q in parsed_questions:
         ans = q.get("answer_markdown", "")
@@ -3650,79 +3730,12 @@ def ai_parse_paper(
 
         system_instructions = build_import_parse_system_prompt(get_current_curriculum())
 
-        max_output_tokens = 65536
-        PARSE_TIMEOUT = 300
-
-        def build_parse_payload(target_provider, target_model):
-            data = {
-                "model": target_model,
-                "messages": [
-                    {"role": "system", "content": system_instructions},
-                    {"role": "user", "content": model_source}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.2,
-                "max_tokens": max_output_tokens
-            }
-            is_deepseek = (
-                "deepseek" in target_model.lower() or "deepseek" in (target_provider.api_base or "").lower()
-            ) and "deepseek-chat" not in target_model.lower() and "deepseek-reasoner" not in target_model.lower()
-            if is_deepseek and target_provider.reasoning_effort in {None, "default"}:
-                data["thinking"] = {"type": "disabled"}
-            data = inject_reasoning_effort(data, target_provider.reasoning_effort)
-            data = apply_bailian_thinking_policy(
-                data,
-                provider_code=target_provider.provider_code,
-                model_name=target_model,
-                task="parse",
-            )
-            return data
-
-        data = build_parse_payload(provider, model_name)
-
-        try:
-            response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
-            paid_provider = decision.get("paid_provider")
-            if decision.get("used_free") and paid_provider is not None:
-                print(
-                    f"[Parse Router] 免费模型 {provider_name} 请求失败"
-                    f"（{type(net_err).__name__}），自动回退到付费模型重试..."
-                )
-                provider = paid_provider
-                api_key = provider.api_key
-                api_base = provider.api_base
-                model_name = provider.model_name
-                provider_name = provider.provider_label
-                data = build_parse_payload(provider, model_name)
-                response = post_chat_completion(provider, data, timeout=PARSE_TIMEOUT, provider_name=provider_name)
-                decision["used_free"] = False
-                decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
-            else:
-                raise
-
-        res_json = response.json()
-        raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
-        
-        parsed_data = parse_ai_json(raw_ai_text, raw_markdown=model_source)
-        
-        if isinstance(parsed_data, dict):
-            if "questions" in parsed_data and isinstance(parsed_data["questions"], list):
-                parsed_questions = parsed_data["questions"]
-            elif "data" in parsed_data and isinstance(parsed_data["data"], list):
-                parsed_questions = parsed_data["data"]
-            else:
-                parsed_questions = None
-                for key, val in parsed_data.items():
-                    if isinstance(val, list):
-                        parsed_questions = val
-                        break
-                if parsed_questions is None:
-                    parsed_questions = [parsed_data]
-        elif isinstance(parsed_data, list):
-            parsed_questions = parsed_data
-        else:
-            raise Exception("AI 返回的 JSON 格式不正确，期望是一个数组或包含 questions 列表的对象。")
+        parsed_questions = _parse_chunks_to_questions(
+            model_source, decision, system_instructions, generate_answers_bool, False
+        )
+        # 回退后更新实际使用的模型名（供 eval_decision 准确上报）
+        model_name = decision["provider"].model_name
+        provider_name = decision["provider"].provider_label
 
         if not parsed_questions or not all(isinstance(question, dict) for question in parsed_questions):
             raise ValueError("AI 未返回有效的题目对象列表。")
@@ -3782,7 +3795,9 @@ def ai_parse_paper(
             # 智能提取出处双重保险：AI 提取优先，若 AI 未提取则尝试正则从 content 中提取
             extracted_source = q.get("source")
             content_str = q.get("content", "")
-            
+            # 选择题选项统一为 choices 网格环境（双保险：即便 AI 输出内联 A./B. 也归一化）
+            content_str = normalize_choice_options_to_latex(content_str)
+
             # 正则匹配题干开头形如 "10. (2019·全国·高考真题)已知..." 的出处
             # group(1): 题号前缀, group(2): 左括号, group(3): 出处内容, group(4): 右括号
             prefix_match = re.match(r'^(\s*(?:\d+[\.、\s]*)?)([\(（])([^\(（\)）\s]{4,})([\)）])', content_str)
@@ -4676,6 +4691,7 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
         if q.get("content"):
             q["content"] = normalize_fillin_macro(q.get("content", ""))
             q["content"] = _strip_leading_question_number(q["content"])
+            q["content"] = normalize_choice_options_to_latex(q["content"])
 
     # 1. 搜集该 PDF 任务在 tmp 文件夹中生成的所有物理裁剪图片，按生成时间（mtime）进行排序
     task_crop_urls = []

@@ -822,60 +822,179 @@
             });
         }
 
+        // Split OCR text by the earliest answer marker.
+        //  - First-pass: search literal markers (【答案】/[答案]/<答案> etc.) anywhere in the text.
+        //  - Second-pass (colon variants): only count "答案：" / "解析：" etc. when they appear in the
+        //    back 2/3 of the text, so a stray "答案是 A." inside the question stem does not trigger a split.
+        //  - If nothing matches, return the whole text as the question (backwards compatible).
+        function splitOcrTextByAnswerMarker(text) {
+            if (!text || !text.trim()) {
+                return { question: text || '', answer: '' };
+            }
+
+            const anchorReList = [
+                /【\s*答\s*案\s*】/g,
+                /【\s*解\s*析\s*】/g,
+                /【\s*分\s*析\s*】/g,
+                /【\s*详\s*解\s*】/g,
+                /【\s*解\s*答\s*】/g,
+                /【\s*点\s*评\s*】/g,
+                /【\s*点\s*睛\s*】/g,
+                /\[\s*答\s*案\s*\]/g,
+                /\[\s*解\s*析\s*\]/g,
+                /\[\s*分\s*析\s*\]/g,
+                /\[\s*详\s*解\s*\]/g,
+                /\[\s*解\s*答\s*\]/g,
+            ];
+
+            const colonReList = [
+                /(^|\n)\s*答\s*案\s*[：:]/g,
+                /(^|\n)\s*解\s*析\s*[：:]/g,
+                /(^|\n)\s*分\s*析\s*[：:]/g,
+                /(^|\n)\s*详\s*解\s*[：:]/g,
+                /(^|\n)\s*解\s*答\s*[：:]/g,
+                /(^|\n)\s*点\s*评\s*[：:]/g,
+                /(^|\n)\s*点\s*睛\s*[：:]/g,
+            ];
+
+            const len = text.length;
+            const colonThreshold = Math.floor(len / 3); // 仅在文本中后段（>=2/3）出现的弱锚点才算
+            let bestIdx = -1;
+
+            for (const re of anchorReList) {
+                re.lastIndex = 0;
+                let m;
+                while ((m = re.exec(text)) !== null) {
+                    if (bestIdx === -1 || m.index < bestIdx) {
+                        bestIdx = m.index;
+                    }
+                }
+            }
+
+            if (bestIdx === -1 || bestIdx < colonThreshold) {
+                for (const re of colonReList) {
+                    re.lastIndex = 0;
+                    let m;
+                    while ((m = re.exec(text)) !== null) {
+                        const after = m.index + m[1].length; // 跳过行首/换行捕获组
+                        if (after < colonThreshold) continue;
+                        if (bestIdx === -1 || after < bestIdx) {
+                            bestIdx = after;
+                        }
+                    }
+                }
+            }
+
+            if (bestIdx === -1) {
+                // 调试辅助：当 OCR 文本中找不到任何锚点时，把清洗后的文本前 200 字打到 console，
+                // 便于判断到底是「OCR 没识别到答案/解析」还是「锚点没匹配」。生产环境保留 console.warn，
+                // 用户在浏览器 F12 Console 看到能直接告诉我们。
+                console.warn('[OCR split] 未识别到答案/解析标记。OCR 文本前 200 字:', text.slice(0, 200));
+                return { question: text, answer: '' };
+            }
+
+            return {
+                question: text.slice(0, bestIdx).replace(/\s+$/, ''),
+                answer: text.slice(bestIdx).replace(/^\s+/, '')
+            };
+        }
+            
         // Load content OCR result into the persistent editor textarea
         function loadToContentEditor(source, isAppend = false) {
             const textarea = document.getElementById('editContent');
             let contentToImport = '';
+            let answerPart = '';
+            let didSplit = false;
+            let questionWritten = false;
             
-            if (source === 'ocr') {
-                contentToImport = document.getElementById('contentOcrResultText').textContent;
-                
-                // 1. Auto-detect if it's a choice question with options A, B, C, D
+                        
+                if (source === 'ocr') {
+                const rawOcrText = document.getElementById('contentOcrResultText').textContent;
+                console.log('[OCR split] loadToContentEditor called with source=ocr, rawText length=' + rawOcrText.length + ', preview: ' + JSON.stringify(rawOcrText.slice(0, 60)));
+                const _split = splitOcrTextByAnswerMarker(rawOcrText);
+                contentToImport = _split.question;
+                answerPart = _split.answer;
+                didSplit = answerPart.length > 0;
+                console.log('[OCR split] result: didSplit=' + didSplit + ', question.length=' + contentToImport.length + ', answer.length=' + answerPart.length);
+
+                // 1. Auto-detect if it's a choice question with options A, B, C, D (question part only)
                 const hasA = /[\s,，、]*\bA(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
                 const hasB = /[\s,，、]*\bB(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
                 const hasC = /[\s,，、]*\bC(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
                 const hasD = /[\s,，、]*\bD(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
-                
+
                 if (hasA && hasB && hasC && hasD) {
                     const editQType = document.getElementById('editQType');
                     if (editQType) {
                         editQType.value = 'single_choice';
-                        // Trigger change listener to update paper badges immediately
                         editQType.dispatchEvent(new Event('change'));
                     }
                 }
-                
+
                 // 2. Automatically format the OCR content to break choice options onto separate lines beautifully
                 contentToImport = formatQuestionContent(contentToImport);
             }
             
-            if (!contentToImport.trim()) {
+            if (!contentToImport.trim() && !didSplit) {
                 showToast('导入内容为空！', 'error');
                 return;
             }
             
-            if (isAppend) {
-                if (textarea.value.trim()) {
-                    textarea.value += '\n' + contentToImport;
-                } else {
-                    textarea.value = contentToImport;
-                }
-            } else {
-                if (textarea.value.trim()) {
-                    const replace = confirm('题干编辑框中已有内容，点击"确定"将覆盖替换，点击"取消"将追加在后面。');
-                    if (replace) {
-                        textarea.value = contentToImport;
-                    } else {
+            if (contentToImport.trim()) {
+                if (isAppend) {
+                    if (textarea.value.trim()) {
                         textarea.value += '\n' + contentToImport;
+                    } else {
+                        textarea.value = contentToImport;
                     }
                 } else {
-                    textarea.value = contentToImport;
+                    if (textarea.value.trim()) {
+                        const replace = confirm('题干编辑框中已有内容，点击"确定"将覆盖替换，点击"取消"将追加在后面。');
+                        if (replace) {
+                            textarea.value = contentToImport;
+                        } else {
+                            textarea.value += '\n' + contentToImport;
+                        }
+                    } else {
+                        textarea.value = contentToImport;
+                    }
+                }
+                // Refresh previews
+                textarea.dispatchEvent(new Event('input'));
+                questionWritten = true;
+            }
+            
+            // 3. 智能拆分：把答案/解析写入答案栏（仅当 OCR 含答案标记时）
+            if (didSplit) {
+                const answerTextarea = document.getElementById('editAnswerMarkdown');
+                console.log('[OCR split] writing answer: textarea-found=' + !!answerTextarea + ', existingLength=' + (answerTextarea ? answerTextarea.value.length : 'N/A') + ', answerPartLength=' + answerPart.length);
+                if (answerTextarea) {
+                    if (answerTextarea.value.trim()) {
+                        const replaceAns = confirm('答案编辑框中已有内容，点击"确定"将覆盖替换，点击"取消"将追加在后面。');
+                        if (replaceAns) {
+                            answerTextarea.value = answerPart;
+                        } else {
+                            answerTextarea.value += '\n\n' + answerPart;
+                        }
+                    } else {
+                        answerTextarea.value = answerPart;
+                    }
+                    answerTextarea.dispatchEvent(new Event('input'));
+                    // 闪烁高亮：让答案栏被填入这件事肉眼可见
+                    answerTextarea.classList.add('ring-2', 'ring-emerald-400', 'ring-offset-2');
+                    setTimeout(() => answerTextarea.classList.remove('ring-2', 'ring-emerald-400', 'ring-offset-2'), 1200);
+                    console.log('[OCR split] answer write complete, editAnswerMarkdown.value.length=' + answerTextarea.value.length);
+                } else {
+                    console.warn('[OCR split] CRITICAL: editAnswerMarkdown element NOT FOUND');
                 }
             }
             
-            // Refresh previews
-            textarea.dispatchEvent(new Event('input'));
-            showToast('已载入至题干编辑框！');
+            // 4. Toast
+            if (didSplit) {
+                showToast(questionWritten ? `已自动拆分：题干 ${contentToImport.length} 字 + 答案 ${answerPart.length} 字` : `已自动拆分：答案 ${answerPart.length} 字（题干为空）`);
+            } else {
+                showToast('已载入至题干编辑框！');
+            }
         }
 
         // Clear OCR image preview and OCR result box

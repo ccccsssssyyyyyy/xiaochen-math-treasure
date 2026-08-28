@@ -49,4 +49,14 @@ s = '[{"chapter":"导数"},{"compulsory":"选修","chapter":"圆锥曲线"}]'
 out = json.loads(parse_related_curriculums(s))
 check("json string parsed", len(out) == 2 and out[0]["chapter"] == "导数" and out[0]["knowledge"] == "")
 
+# 7. AI 拆卷 "学段 / 章节 / 小节" 字符串格式归一化
+out = json.loads(parse_related_curriculums(["必修一 / 集合与函数概念 / 函数的基本性质", "必修一/三角函数"]))
+check("string two-seg parsed", any(x["compulsory"] == "必修一" and x["chapter"] == "集合与函数概念" for x in out))
+check("string one-seg slash parsed", any(x["compulsory"] == "必修一" and x["chapter"] == "三角函数" for x in out))
+check("string three-seg knowledge", out[0]["knowledge"] == "函数的基本性质")
+
+# 8. 无 "/" 的纯文本被忽略 (保持非 dict 忽略语义，避免误判)
+out = json.loads(parse_related_curriculums(["bad", {"chapter": "集合"}]))
+check("string without slash ignored", len(out) == 1 and out[0]["chapter"] == "集合")
+
 print("\nALL PASS: parse_related_curriculums")

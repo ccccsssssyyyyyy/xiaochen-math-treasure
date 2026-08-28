@@ -3310,6 +3310,36 @@
         function renderSingleParsedCard(index) {
             const q = parsedQuestionsData[index];
             if (!q) return;
+
+            // 归一化 AI 拆卷字段到 per-card 状态（避免依赖全局变量，杜绝跨卡串味）
+            // 关联章节：AI 产出 "学段 / 章节 / 小节" 字符串数组 -> 对象数组
+            if (!Array.isArray(q.relatedChapters)) {
+                const raw = q.related_chapters;
+                if (Array.isArray(raw)) {
+                    q.relatedChapters = raw.map(s => {
+                        if (s && typeof s === 'object') {
+                            return { compulsory: String(s.compulsory || ''), chapter: String(s.chapter || ''), knowledge: String(s.knowledge || '') };
+                        }
+                        const parts = String(s).split('/').map(p => p.trim()).filter(Boolean);
+                        if (!parts.length) return null;
+                        return {
+                            compulsory: parts.length > 1 ? parts[0] : '',
+                            chapter: parts.length > 1 ? parts[1] : parts[0],
+                            knowledge: parts.length > 2 ? parts[2] : (parts.length > 1 ? parts[1] : parts[0])
+                        };
+                    }).filter(x => x && x.chapter);
+                } else {
+                    q.relatedChapters = [];
+                }
+            }
+            // 主题标签：AI 产出字符串数组 -> 字符串数组
+            if (!Array.isArray(q.tags)) {
+                const raw = q.tags;
+                if (Array.isArray(raw)) q.tags = raw.map(String);
+                else if (typeof raw === 'string' && raw.trim()) q.tags = raw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+                else q.tags = [];
+            }
+
             const container = document.getElementById('parsedCardsContainer');
             const tocEl = document.getElementById('parsedTOC');
             // 渲染目录项（多文件：「（文件中文序号）题型缩写+文件内连续序号」如 （二）选1；单文件保持 选1）
@@ -3398,6 +3428,26 @@
                         </select>
                     </div>
 
+                    <!-- 关联章节 (融合题多章节归属，可选) -->
+                    <div class="space-y-1 mt-2">
+                        <label class="text-[9px] font-bold text-slate-500 tracking-wider">关联章节 (融合题多章节，可选)</label>
+                        <div class="grid grid-cols-3 gap-2">
+                            <select class="card-rel-compulsory glass-select px-2 py-1.5 rounded-lg text-[10px] font-semibold">
+                                <option value="">所有学段</option>
+                            </select>
+                            <select class="card-rel-chapter glass-select px-2 py-1.5 rounded-lg text-[10px] font-semibold">
+                                <option value="">所有章节</option>
+                            </select>
+                            <div class="flex gap-1">
+                                <select class="card-rel-knowledge glass-select px-2 py-1.5 rounded-lg text-[10px] font-semibold flex-1">
+                                    <option value="">所有小节</option>
+                                </select>
+                                <button type="button" class="card-rel-add-btn glass-btn px-2 py-1.5 rounded-lg text-[10px] font-bold text-brand-600" title="添加关联章节"><i class="fa-solid fa-plus"></i></button>
+                            </div>
+                        </div>
+                        <div class="card-rel-chips flex flex-wrap gap-1 mt-1"></div>
+                    </div>
+
                     <!-- 知识点 / 解题方法 多标签 (AI 自动打标 + 手动修正) -->
                     <div class="space-y-1 mt-2">
                         <label class="text-[9px] font-bold text-slate-500 tracking-wider">知识点 (多标签)</label>
@@ -3412,6 +3462,16 @@
                             <span class="card-solvemethod-tags-chips flex flex-wrap gap-1"></span>
                             <input type="text" class="card-tag-add-input flex-1 min-w-[60px] bg-transparent text-[10px] outline-none" placeholder="输入后回车添加 (如: 数形结合)">
                         </div>
+                    </div>
+
+                    <!-- 主题标签 (可选，AI 自动打标 + 手动修正) -->
+                    <div class="space-y-1 mt-2">
+                        <label class="text-[9px] font-bold text-slate-500 tracking-wider">主题标签 (可选)</label>
+                        <div class="card-topic-tags-input flex flex-wrap gap-1 items-center border border-slate-200 rounded-lg px-2 py-1.5 bg-white/50" data-field="tags">
+                            <span class="card-topic-tags-chips flex flex-wrap gap-1"></span>
+                            <input type="text" class="card-tag-add-input flex-1 min-w-[60px] bg-transparent text-[10px] outline-none" placeholder="输入后回车添加 (如: 数形结合)">
+                        </div>
+                        <div class="card-preset-tags flex flex-wrap gap-1 mt-1"></div>
                     </div>
 
                     <!-- Body Content Split -->
@@ -3473,6 +3533,10 @@
                 // 初始化知识点 / 解题方法 多标签输入
                 setupCardTagInput(card, 'knowledge_list', q.knowledge_list || '');
                 setupCardTagInput(card, 'solve_method', q.solve_method || '');
+                // 初始化关联章节 (融合题多章节) 与主题标签
+                setupCardRelatedChapters(card, q);
+                setupCardTagInput(card, 'tags', Array.isArray(q.tags) ? q.tags.join(',') : '');
+                setupCardPresetTags(card);
 
                 // 分离式拆解缺口提示：若该题解析缺失（source 含 [缺解析] 标记），高亮警告
                 if (q.source && String(q.source).includes('[缺解析]')) {
@@ -3744,9 +3808,10 @@
 
         // 初始化拆解卡片的多标签输入 (知识点 / 解题方法)
         function setupCardTagInput(card, field, initialValue) {
-            const container = card.querySelector(`.card-${field === 'knowledge_list' ? 'knowledge' : 'solvemethod'}-tags-input`);
+            const prefix = field === 'knowledge_list' ? 'knowledge' : (field === 'solve_method' ? 'solvemethod' : 'topic');
+            const container = card.querySelector(`.card-${prefix}-tags-input`);
             if (!container) return;
-            const chipsSpan = container.querySelector(`.card-${field === 'knowledge_list' ? 'knowledge' : 'solvemethod'}-tags-chips`);
+            const chipsSpan = container.querySelector(`.card-${prefix}-tags-chips`);
             const input = container.querySelector('.card-tag-add-input');
 
             const currentTags = [];
@@ -3792,6 +3857,100 @@
 
             // 暴露取值方法供保存时调用
             container._getTags = () => currentTags.join(',');
+            container._addTag = addTag; // 供预设快捷标签按钮调用
+        }
+
+        // 初始化拆解卡片的关联章节 (融合题多章节) 三级联动 + chips
+        // 状态独立存于 q.relatedChapters (对象数组)，不依赖全局变量，杜绝跨卡串味
+        function setupCardRelatedChapters(card, q) {
+            const comp = card.querySelector('.card-rel-compulsory');
+            const chap = card.querySelector('.card-rel-chapter');
+            const know = card.querySelector('.card-rel-knowledge');
+            const addBtn = card.querySelector('.card-rel-add-btn');
+            const chips = card.querySelector('.card-rel-chips');
+            if (!comp || !chap || !chips) return;
+            if (!Array.isArray(q.relatedChapters)) q.relatedChapters = [];
+
+            const fillComp = () => {
+                comp.innerHTML = '<option value="">-- 选择学段 --</option>';
+                Object.keys(categoryTree).forEach(c => {
+                    const o = document.createElement('option'); o.value = c; o.textContent = c; comp.appendChild(o);
+                });
+            };
+            const fillChap = () => {
+                chap.innerHTML = '<option value="">-- 选择章节 --</option>';
+                know.innerHTML = '<option value="">-- 先选择章节 --</option>';
+                know.disabled = true;
+                if (addBtn) addBtn.disabled = true;
+                if (comp.value && categoryTree[comp.value]) {
+                    chap.disabled = false;
+                    Object.keys(categoryTree[comp.value]).forEach(ch => {
+                        const o = document.createElement('option'); o.value = ch; o.textContent = ch; chap.appendChild(o);
+                    });
+                } else {
+                    chap.disabled = true;
+                }
+            };
+            const fillKnow = () => {
+                know.innerHTML = '<option value="">-- 选择小节 (可不选) --</option>';
+                if (comp.value && chap.value && categoryTree[comp.value][chap.value]) {
+                    know.disabled = false;
+                    categoryTree[comp.value][chap.value].forEach(k => {
+                        const o = document.createElement('option'); o.value = k; o.textContent = k; know.appendChild(o);
+                    });
+                } else {
+                    know.disabled = true;
+                }
+                if (addBtn) addBtn.disabled = !chap.value;
+            };
+
+            comp.addEventListener('change', () => { fillChap(); fillKnow(); });
+            chap.addEventListener('change', () => { fillKnow(); });
+
+            const renderChips = () => {
+                chips.innerHTML = '';
+                q.relatedChapters.forEach((item, idx) => {
+                    const chip = document.createElement('span');
+                    chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[10px] font-medium border border-amber-200';
+                    const label = [item.compulsory, item.chapter, (item.knowledge && item.knowledge !== item.chapter) ? item.knowledge : ''].filter(Boolean).join(' / ');
+                    const text = document.createElement('span'); text.textContent = label; chip.appendChild(text);
+                    const x = document.createElement('button'); x.type = 'button';
+                    x.className = 'text-amber-400 hover:text-amber-700'; x.innerHTML = '<i class="fa-solid fa-xmark"></i>'; x.title = '移除';
+                    x.onclick = () => { q.relatedChapters.splice(idx, 1); renderChips(); };
+                    chip.appendChild(x); chips.appendChild(chip);
+                });
+            };
+
+            if (addBtn) {
+                addBtn.onclick = () => {
+                    if (!chap.value) { showToast('请先在关联章节选择学段与章节', 'info'); return; }
+                    const item = { compulsory: comp.value, chapter: chap.value, knowledge: (know.value) ? know.value : chap.value };
+                    const exists = q.relatedChapters.some(r => r.compulsory === item.compulsory && r.chapter === item.chapter && r.knowledge === item.knowledge);
+                    if (exists) { showToast('该关联章节已添加', 'info'); return; }
+                    q.relatedChapters.push(item); renderChips();
+                    chap.value = ''; fillKnow(); if (know) know.value = '';
+                    showToast('已添加关联章节', 'success');
+                };
+            }
+
+            fillComp(); fillChap(); fillKnow(); renderChips();
+        }
+
+        // 初始化拆解卡片的预设主题标签快捷按钮 (per-card，绑定到本卡 tags 输入)
+        function setupCardPresetTags(card) {
+            const box = card.querySelector('.card-preset-tags');
+            const container = card.querySelector('.card-topic-tags-input');
+            if (!box || !container) return;
+            if (box.querySelector('button')) return; // 幂等
+            const presets = ['数形结合', '转化与化归', '函数与方程', '分类讨论', '特殊与一般', '正难则反', '构造法', '极限思想', '向量法', '坐标法'];
+            presets.forEach(p => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'px-2 py-0.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px]';
+                b.textContent = p;
+                b.onclick = () => { if (typeof container._addTag === 'function') container._addTag(p); };
+                box.appendChild(b);
+            });
         }
 
         // 编辑弹窗的多标签输入初始化 (知识点 / 解题方法)
@@ -4052,6 +4211,10 @@
             const solveMethodEl = card.querySelector('.card-solvemethod-tags-input');
             const knowledge_list = knowledgeListEl && knowledgeListEl._getTags ? knowledgeListEl._getTags() : '';
             const solve_method = solveMethodEl && solveMethodEl._getTags ? solveMethodEl._getTags() : '';
+            // 关联章节 (per-card 状态，融合题多章节) 与主题标签
+            const tagsEl = card.querySelector('[data-field="tags"]');
+            const tags = tagsEl && typeof tagsEl._getTags === 'function' ? tagsEl._getTags() : '';
+            const relatedChapters = Array.isArray(q.relatedChapters) ? q.relatedChapters : [];
 
             if (!content) {
                 showToast(`第 ${index + 1} 题的题干内容不能为空！`, 'warning');
@@ -4091,6 +4254,8 @@
             formData.append('category_knowledge', category_knowledge);
             formData.append('knowledge_list', knowledge_list);
             formData.append('solve_method', solve_method);
+            formData.append('related_curriculums', JSON.stringify(relatedChapters));
+            formData.append('tags', tags);
             formData.append('difficulty', difficulty);
             formData.append('source', source);
             formData.append('answer_markdown', answer_markdown);
@@ -4124,10 +4289,11 @@
                         fd.append('category_compulsory', category_compulsory);
                         fd.append('category_chapter', category_chapter);
                         fd.append('category_knowledge', category_knowledge);
-                        fd.append('knowledge_list', knowledge_list);
-                        fd.append('solve_method', solve_method);
-                        fd.append('related_curriculums', JSON.stringify(getRelatedChapters()));
-                        fd.append('difficulty', difficulty);
+                    fd.append('knowledge_list', knowledge_list);
+                    fd.append('solve_method', solve_method);
+                    fd.append('related_curriculums', JSON.stringify(relatedChapters));
+                    fd.append('tags', tags);
+                    fd.append('difficulty', difficulty);
                         fd.append('source', source);
                         fd.append('answer_markdown', answer_markdown);
                         fd.append('image_paths', JSON.stringify(Array.from(new Set(safeImagePaths))));

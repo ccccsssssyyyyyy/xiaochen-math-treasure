@@ -201,6 +201,111 @@ def realign_missing_images_to_questions(questions: list, raw_markdown: str) -> l
     return questions
 
 
+def _collect_complete_objects(text: str, arr_start: int) -> List[Any]:
+    """从 '[' 位置开始，收集其中所有完整的 {...} 对象（忽略字符串内的括号）。"""
+    depth = 0
+    in_str = False
+    esc = False
+    obj_start = None
+    objects: List[Any] = []
+    i = arr_start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if ch == "\\":
+            esc = True
+            i += 1
+            continue
+        if ch == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str:
+            i += 1
+            continue
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and obj_start is not None:
+                    obj_text = text[obj_start:i + 1]
+                    try:
+                        objects.append(json.loads(obj_text))
+                    except Exception:
+                        pass
+                    obj_start = None
+        elif ch == "]" and depth == 0:
+            break
+        i += 1
+    return objects
+
+
+def _repair_truncated_json_text(text: str) -> Any:
+    """尽力从被截断（超过 max_tokens）的 AI JSON 中回收完整结构。
+
+    返回 dict/list 或 None（无法修复时）。
+    """
+    if not text or not text.strip():
+        return None
+    # 1) 前缀完整解析：截断点恰好在前一个完整值之后时有效
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text)
+        return obj
+    except Exception:
+        pass
+    # 2) 定位 "questions":[ 数组，回收其中完整对象
+    m = re.search(r'"questions"\s*:\s*\[', text)
+    if m:
+        objs = _collect_complete_objects(text, m.end() - 1)
+        if objs:
+            return {"questions": objs}
+    # 3) 退化：首个 [ 为对象数组
+    first_arr = text.find("[")
+    if first_arr != -1:
+        objs = _collect_complete_objects(text, first_arr)
+        if objs:
+            return objs
+    # 4) 退化：首个 { 为被截断的对象，找最后一个可闭合位置
+    first_obj = text.find("{")
+    if first_obj != -1:
+        partial = text[first_obj:]
+        depth = 0
+        in_str = False
+        esc = False
+        end = None
+        for i, ch in enumerate(partial):
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+        if end is not None:
+            try:
+                return json.loads(partial[:end + 1])
+            except Exception:
+                pass
+    return None
+
+
 def parse_ai_json(raw_text: str, raw_markdown: Optional[str] = None) -> Any:
     """Parse AI JSON with narrowly scoped repairs for common model output."""
 
@@ -230,6 +335,14 @@ def parse_ai_json(raw_text: str, raw_markdown: Optional[str] = None) -> Any:
                 break
             except json.JSONDecodeError as exc:
                 last_error = exc
+
+    if parsed_data is missing:
+        # 截断兜底：AI 输出超过 max_tokens 被截断时，尽力回收已完整的结构
+        for candidate in candidates:
+            repaired_obj = _repair_truncated_json_text(candidate)
+            if repaired_obj is not None:
+                parsed_data = repaired_obj
+                break
 
     if parsed_data is missing:
         raise last_error if last_error else ValueError("无法解析返回的 JSON 内容。")
