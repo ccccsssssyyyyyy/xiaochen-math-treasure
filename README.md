@@ -1,22 +1,64 @@
-# MathBank - 本地化数学题库与组卷排版工作台
+# 小陈的数学宝藏
 
 [中文](README.md) | [English](README_EN.md)
 
-> **项目标签**：数学题库 | 高中数学 | 备课教研 | A4 仿真排版 | 智能组卷 | 高考级导出 | OCR 识图 | DeepSeek AI | 教育技术
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-**MathBank** 是一个专为中学数学教师打造的、完全运行在您自己电脑上的轻量级半自动化数学题库与组卷排版工作台。
+> **项目标签**：数学题库 | 高中数学 | 备课教研 | A4 仿真排版 | 智能组卷 | 高考级导出 | OCR 识图 | DeepSeek AI | 教育技术
+>
+> ⚠️ **派生声明**：本项目是基于 [`JudgePeach/math-question-bank`](https://github.com/JudgePeach/math-question-bank) 的**修改派生版**，采用与原项目相同的 **GNU AGPLv3** 协议。详见下方「[项目渊源与致谢](#项目渊源与致谢)」。
+
+**小陈的数学宝藏** 是一个专为中学数学教师打造的、完全运行在您自己电脑上的轻量级半自动化数学题库与组卷备课工作台。它在原项目（MathBank）核心架构之上，面向"个人备课"场景做了二次开发：明确的**题库工作台 / 组卷工作台**双入口、受控词表防标签混乱、难度枚举统一、拆卷进度可视化等。
 
 无需复杂的前端编译即可运行：Windows 便携包内置 Python，解压后即可启动；macOS 便携包不内置 Python，运行前请确认本机已安装 Python 3.10 或更高版本，启动器会自动检测并创建或修复项目隔离的 `venv`。支持数学公式与几何图形秒级预览，深度集成一键组卷、A4 仿真画布排版、高考级 PDF 试卷导出、DeepSeek AI 解题以及一键 OCR 题目识别。
 
-![MathBank 题库研讨工作台](docs/images/screenshot1.png)
+![小陈的数学宝藏 - 题库工作台](docs/images/screenshot1.png)
 
-![MathBank 组卷排版工作台](docs/images/screenshot2.png)
+![小陈的数学宝藏 - 组卷排版工作台](docs/images/screenshot2.png)
 
 ---
 
-## ✨ 核心亮点
+## 📖 项目渊源与致谢（Provenance & Attribution）
 
-只需了解一些基础的 LaTeX 数学公式语法，MathBank 就能帮一线数学老师高效解决组卷与备课难题：
+本项目是开源项目 **[`JudgePeach/math-question-bank`](https://github.com/JudgePeach/math-question-bank)**（原项目名 MathBank）的**派生修改版**：
+
+- **原作者**：[JudgePeach](https://github.com/JudgePeach)，感谢其开源贡献，本项目的全部底层能力（FastAPI 服务、PDF/Word/LaTeX 智能拆卷、A4 仿真排版、AI Agent 工作流等）均源自该仓库。
+- **原项目协议**：[GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html)。
+- **本派生项目协议**：**同样采用 GNU AGPLv3**，并保留原版权声明与许可证文件。根据 AGPLv3 要求，任何分发（含通过网络提供服务）都必须向用户提供完整的对应源代码——本仓库即满足该要求。
+- **与原项目的关系**：本仓库在保留原项目核心架构与许可证的前提下，进行了面向"个人备课"的二次开发（详见下方「[相比原项目的变动](#相比原项目的变动)」）。原项目的后续更新可通过 `upstream` 远程跟踪。
+
+> 原项目地址：https://github.com/JudgePeach/math-question-bank
+
+---
+
+## ✨ 相比原项目的变动
+
+下列能力为**本派生版新增或修改**（其余功能继承自原项目，详见下文各章节）：
+
+- 🏷️ **品牌与定位重命名**：由 MathBank 更名为「小陈的数学宝藏」，明确为个人备课工具，界面区分**题库工作台 / 组卷工作台**双入口。
+- 🧩 **受控词表防标签混乱（核心新增）**：新增 `mathbank/resources/tag_vocabulary.json` 受控词表（知识点 422 规范名 + 64 别名，解题方法 70 + 7 别名），并新增 `normalize_tag_list(raw, field)` 在**所有写入路径**（单题录入 / 编辑 / AI 分类 / PDF 批量导入）落库即归一——AI 或手动产生的旧写法（如 `函数的单调性`）自动折叠为规范名（`函数单调性`），从源头杜绝标签碎片化。
+- 🎚️ **难度枚举统一（核心修复）**：原项目难度词表在提示词、校验、数据库默认、前端计数四处互不相容（且存在幽灵值 `medium`）。本版抽出 `DIFFICULTY_VALUES` 作为全链路唯一事实来源（四档：易错 `easy_error` / 常规 `normal` / 挑战 `challenge` / 强基 `qiangji`），并新增 `normalize_difficulty()`，AI 链路不再把常规题误判为易错。
+- 📊 **拆卷步骤进度条 + 错误定位（新增）**：AI 拆卷过程提供进度可视化，可见进行到哪一步；出错时高亮失败步骤，便于定位问题卷。
+- 🧠 **文档分块拆题 + 单题 OCR 自动分流（新增）**：改进原拆卷管道，对长文档分块处理，并对单题自动选择 OCR 通道。
+- 🔣 **选择题选项归一化（新增）**：统一选择题选项的格式与编号，避免解析错位。
+- 🔗 **关联章节多章节归属（新增）**：支持一道题归属多个章节（录入 / 导入 / AI 分类 UI 均已支持）。
+- 🔒 **公式锁协议（MBM）（保留并强化）**：批量导入 / 导出时锁定公式原位，不丢公式、不串题。
+- 🧹 **真题来源清洗**：剥离原题号与出处信息（如 `2024·全国·高考真题`）填入 `source` 字段，便于溯源。
+
+### 已知 TODO / 路线图（诚实标注）
+
+以下为**尚未实现**或**待完善**的部分，欢迎贡献：
+
+- 📝 **讲义（handout）功能**：从"题库 / 组卷"走向"备课"最关键的一块，目前**规划中、未实现**。
+- 📚 **课程命名规范化**：章节名已对齐 2019 新课标人教 A 版，但册次仍沿用旧大纲称谓（如 `选修一/二/三`），应规范为官方「选择性必修第一 / 二 / 三册」。
+- 🏷️ **`category_knowledge` 误用清理**：现存 16 题将该单值字段误填为章节名，待清洗或并入知识点。
+- 💡 **受控词表前端联想（第 3 层）与周期复检工具**：当前归一在后端生效，前端标签输入框仍为自由文本；计划后续增加"只选已有"的联想下拉与 `tools/tag_audit.py` 周期复检，让词表越养越准。
+
+---
+
+## 🎯 核心亮点
+
+只需了解一些基础的 LaTeX 数学公式语法，小陈的数学宝藏就能帮一线数学老师高效解决组卷与备课难题：
 
 - 🎨 **1:1 A4 仿真组卷排版**：提供像 Word 一样直观的仿真试卷画布，密封线、大标题、注意事项框一应俱全。支持拖拽排序、题目留白高度调整，以及一键切换 A3 答题卡与高考 19 题预设。
 - ⚡ **秒级公式渲染与高考级导出**：内置专业数学公式排版引擎，网页上修改秒级实时预览。支持一键导出高考标准的高清 PDF 试卷与完整的排版源码包。
@@ -80,10 +122,7 @@ flowchart LR
 
 ### 📦 方式一：下载便携包（非技术/小白用户首选）
 
-如果您不熟悉命令行或 Python 环境，可以直接前往 [**Releases 页面**](https://github.com/JudgePeach/math-question-bank/releases) 下载官方构建包。发布页同时提供 `.zip.sha256` 校验文件，建议核对后再解压：
-
-* **Windows 用户**：下载 `MathBank-Windows-x64.zip`（内含完整 Python 3.10 运行时，无需另行安装 Python），解压后双击运行 **`启动题库系统.bat`**
-* **macOS 用户**：下载 `MathBank-macOS.zip`。**macOS 包不内置 Python，运行前请确认本机已安装 Python 3.10 或更高版本**。启动器会自动检测可用 Python，并自动创建或修复项目隔离的 `venv`；如未检测到合格版本，将提示安装并停止启动。首次创建或修复环境时需要联网，然后双击 **`启动题库系统.command`**
+如果您不熟悉命令行或 Python 环境，可以使用项目内置的发布构建工具 `python3 -m scripts.build_release` 生成对应系统的便携包（构建器会校验固定 SHA-256 的运行时、Release 白名单与源码 smoke）。Windows 包内含完整 Python 3.10 运行时；macOS 包不内置 Python，运行前请确认本机已安装 Python 3.10+。
 
 两个启动器只会停止由当前项目记录且身份校验通过的旧服务；若端口 8000 被其他程序占用，会安全退出。服务健康检查失败时不会打开浏览器。
 
@@ -91,10 +130,16 @@ flowchart LR
 
 ### 💻 方式二：源码运行
 
-1. **克隆项目**：
+1. **获取项目**（推荐先 Fork 原项目到自己的账号，再克隆自己的 Fork）：
    ```bash
-   git clone https://github.com/JudgePeach/math-question-bank.git
+   # 方式 A：克隆你自己的 Fork
+   git clone <你的仓库地址>
    cd math-question-bank
+   # 可选：跟踪上游原项目，方便后续同步更新
+   git remote add upstream https://github.com/JudgePeach/math-question-bank.git
+
+   # 方式 B：直接克隆原项目后再自行修改
+   # git clone https://github.com/JudgePeach/math-question-bank.git
    ```
 
 2. **安装依赖**（要求 Python 3.10+）：
@@ -133,41 +178,42 @@ flowchart LR
 
 > [!WARNING]
 > **关于第三方 API 中转站的风险与担保声明**
-> 
+>
 > 下面提供的两个中转站链接**仅因为开发者个人日常在用，不对其服务稳定性、模型真实度（是否存在掺水/以次充好）或数据隐私安全性提供任何形式的担保**。第三方中转站可能存在数据泄露、隐私风险或模型替换行为，请用户务必谨慎评估与使用：
 > * **推荐多模态中转站 A (适合 GPT 模型)**：通过专属 [RightCodes 注册链接](https://www.rightapi.ai/register?aff=f7656b31) 获取 API Key，提供价格实惠且性能优越的 `gpt-5.6-luna` 系列。
 > * **推荐多模态中转站 B (适合 Claude / 阿里系模型)**：通过专属 [PackyAPI 注册链接](https://www.packyapi.com/register?aff=5yyF) 获取 API Key，适合 Claude及阿里百炼模型。
 
 > [!IMPORTANT]
 > **关于 TikZ 自动几何重绘与本地 LaTeX 编译环境依赖**
-> 
+>
 > 系统的 AI 智能几何插图 TikZ 重绘和 PDF 试卷编译渲染功能，高度依赖您**本地已安装的 LaTeX 编译排版环境**（如 macOS 下的 **MacTeX**，Windows 下的 **TeX Live** 或 **MiKTeX**）。
 > 请确保安装后，您本地的命令行中能正常调用 `pdflatex` 与 `xelatex` 命令（即已正确将 LaTeX 工具链加入系统的环境变量 `PATH`）。如果本地未安装，AI 生成的 TikZ 源码和试卷 LaTeX 源码依旧能够完好保存与导出，但后台编译 PDF 将受到限制。
+
+---
 
 ## 🔄 版本升级与数据备份
 
 ### 升级方式
 
-- **✨ 界面一键检查更新与便携包直链**：系统内置自动版本检测机制。进入网页右上角【设置】$\rightarrow$【版本更新】，即可一键实时比对 GitHub 官方 Release，查阅最新版本特性并一键下载对应系统的便携包；亦支持一键忽略不常更新的版本。
+- **✨ 界面一键检查更新与便携包直链**：系统内置自动版本检测机制。进入网页右上角【设置】$\rightarrow$【版本更新】，即可一键实时比对 GitHub Release，查阅最新版本特性并一键下载对应系统的便携包；亦支持一键忽略不常更新的版本。
 - **方式 A：Git 升级（源码用户推荐）**
   ```bash
   git pull
   ```
   *说明：数据库 (`*.db`)、API 密钥 (`.env`)、维度配置 (`data_backup/`) 及插图 (`static/uploads/`) 均已被 Git 忽略，执行 `git pull` 绝不会影响本地数据。*
-
 - **方式 B：便携包覆盖更新**
-  1. 先创建一份可验证完整备份（见下方“完整备份与恢复”）。
+  1. 先创建一份可验证完整备份（见下方"完整备份与恢复"）。
   2. 在网页右上角点击电源按钮安全关闭题库，等待页面提示服务已停止；不要在后台运行时覆盖。
   3. 把新版 ZIP **解压到一个临时新目录**，不要直接解压进原目录。
-  4. **Windows**：打开新版文件夹，全选其中的“内容”并复制到原项目目录，选择替换所有同名文件。
-  5. **macOS Finder**：先按 `Command + Shift + .` 显示 `.env.example` 等隐藏文件，再复制新版文件夹里的全部“内容”到原目录并合并同名目录；**不要选择“替换整个文件夹”**，否则 Finder 可能先删除原目录中的本地数据。
-  6. 双击新版启动器。启动器会在导入项目依赖前校验 Release 文件，并仅清理“上一版发布包管理且新版已删除”的旧文件；校验失败时会拒绝启动，请重新完整合并覆盖。
+  4. **Windows**：打开新版文件夹，全选其中的"内容"并复制到原项目目录，选择替换所有同名文件。
+  5. **macOS Finder**：先按 `Command + Shift + .` 显示 `.env.example` 等隐藏文件，再复制新版文件夹里的全部"内容"到原目录并合并同名目录；**不要选择"替换整个文件夹"**，否则 Finder 可能先删除原目录中的本地数据。
+  6. 双击新版启动器。启动器会在导入项目依赖前校验 Release 文件，并仅清理"上一版发布包管理且新版已删除"的旧文件；校验失败时会拒绝启动，请重新完整合并覆盖。
 
   覆盖升级会保留根目录数据库及 WAL/SHM、`.env`、`data_backup/`、`static/uploads/`、`.system_generated/` 和 `venv/`。请勿删除原项目目录再换成新目录。Windows 便携包内置完整 Python 运行时，无需另行安装 Python；macOS 包不内置 Python，运行前请确认本机已安装 Python 3.10 或更高版本。macOS 启动器会自动创建或修复 `venv`，仅在首次建立环境或 `requirements.txt` 变化/依赖缺失时需要联网安装。
 
 > [!IMPORTANT]
 > **数据备份建议**
-> 
+>
 > 完整备份是覆盖升级的首选保险。如需额外手动备份，请备份以下重要文件/目录：
 > - `*.db` (本地题目数据库)
 > - `.env` (API 密钥配置)
@@ -179,7 +225,7 @@ flowchart LR
 ## 🛠️ 命令行检索与实用脚本
 
 ### 1. 本地终端极速检索 (`scripts/search_questions.py`)
-在终端中快速检索题库（如搜索“导数”）：
+在终端中快速检索题库（如搜索"导数"）：
 ```bash
 python3 -m scripts.search_questions -q "导数"
 ```
@@ -231,18 +277,20 @@ python3 -m scripts.restore data_backup/snapshots/mathbank-backup-时间戳.zip -
 │   ├── paper_helper.py         # LaTeX/PDF 编译、排版与 LRU 缓存
 │   ├── sync_helper.py          # JSON 同步导出与 AI 题库清洗
 │   ├── paths.py                # 与工作目录无关的项目路径单一来源
-│   ├── curriculums.py          # 四套教材预设加载与默认元数据
+│   ├── curriculums.py          # 四套教材预设加载、默认元数据、难度唯一事实来源、受控词表
 │   ├── prompts.py              # OCR/解题/拆卷/TikZ/组卷提示构建器
 │   ├── ai_providers.py         # AI Provider 与模型参数解析
 │   ├── ai_http.py              # AI HTTP 请求与鉴权
 │   ├── ai_json.py              # AI 结构化 JSON 容错解析
 │   ├── latex_diagnostics.py    # XeLaTeX 错误定位、本地解释与 AI 诊断合并
-│   ├── content_locks.py        # Word 公式原位可见锁定、原文恢复与完整性校验
+│   ├── content_locks.py        # Word 公式原位可见锁定（MBM 公式锁）、原文恢复与完整性校验
 │   ├── omml_helper.py          # Office OMML 结构化公式转换器
 │   ├── mtef_helper.py          # MathType OLE/MTEF v5 结构解析与失败诊断
 │   ├── docx_helper.py          # Word 文字/表格/图片安全提取与诊断报告
 │   ├── pdf_inspector_helper.py # PDF Inspector 原生矢量直提与双轨探测
-│   └── resources/curriculums/  # A/B/S/H 四套共享 JSON 大纲
+│   └── resources/
+│       ├── curriculums/        # A/B/S/H 四套共享 JSON 大纲
+│       └── tag_vocabulary.json # 【本派生新增】知识点/解题方法受控词表
 ├── scripts/                    # 运维、迁移、检索与 Release 工具
 │   ├── search_questions.py
 │   ├── backup.py
@@ -261,9 +309,10 @@ python3 -m scripts.restore data_backup/snapshots/mathbank-backup-时间戳.zip -
 │       ├── import.js           # 试题拆解与草稿/题库列表
 │       └── paper.js            # 组卷排版工作台 & Live Preview 渲染引擎
 ├── templates/                  # LaTeX 试卷模板与 exam-zh 宏包库
-├── tests/                      # Pytest 自动化测试与 artifacts
+├── tests/                      # Pytest 自动化测试与 artifacts（继承自上游，含本派生的回归用例）
+├── tools/                      # 【本派生新增】轻量验证脚本（如 difficulty_vocab_test.py / tag_vocab_test.py）
 ├── main.py                     # FastAPI 服务主入口与路由逻辑
-├── math_question_bank.db       # 本地 SQLite 主数据库（根目录兼容保留）
+├── math_question_bank.db       # 本地 SQLite 主数据库（根目录兼容保留，已被 .gitignore 忽略）
 ├── 启动题库系统.bat            # Windows 一键启动脚本
 ├── 启动题库系统.command        # macOS 一键启动脚本
 ├── README.md                   # 中文说明文档
@@ -273,8 +322,18 @@ python3 -m scripts.restore data_backup/snapshots/mathbank-backup-时间戳.zip -
 └── .env.example                # 环境变量配置模板
 ```
 
+> [!NOTE]
+> **发布前建议**：上游 `tests/` 测试套件已随派生版保留。本派生的核心改动（难度枚举、受控词表归一）附带 `tools/` 下的回归脚本；首次发布前建议本地完整跑一遍 `pytest tests/` 与 `python -m pytest tools/`，确认无回归。
+
 ---
 
 ## 📄 开源协议
 
-本项目采用 [GNU AGPLv3](LICENSE) 协议开源。
+本项目采用 [GNU AGPLv3](LICENSE) 协议开源，并继承原项目 [`JudgePeach/math-question-bank`](https://github.com/JudgePeach/math-question-bank) 的同款协议。任何分发（含通过网络提供服务）都必须向用户提供完整的对应源代码。
+
+---
+
+## 🙏 致谢
+
+- 感谢 **[JudgePeach](https://github.com/JudgePeach)** 开源 [math-question-bank](https://github.com/JudgePeach/math-question-bank)（MathBank），本项目的全部底层能力均源自该仓库。
+- 感谢各 AI 模型提供方（DeepSeek、通义千问、GPT / Gemini 等）与 LaTeX 排版生态（TeX Live / MacTeX / XeLaTeX / TikZ）让本地化数学备课成为可能。
