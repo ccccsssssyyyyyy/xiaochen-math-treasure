@@ -868,7 +868,8 @@
                     category_chapter: chapter,
                     category_knowledge: knowledge,
                     image_paths: JSON.stringify(Array.from(uploadedImages)),
-                    tags: tags
+                    tags: tags,
+                    related_curriculums: JSON.stringify(getRelatedChapters())
                 });
                 
                 const formData = new FormData();

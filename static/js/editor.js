@@ -187,20 +187,38 @@ let bankQuestionsRetryTimer = null;
         // an explicit request snapshot keeps those later edits dirty instead of
         // accidentally treating the current DOM as the server-confirmed state.
         function backupEditorState(id = null, draftId = null, requestSnapshot = null) {
-            const snapshot = requestSnapshot || {
-                content: document.getElementById('editContent').value,
-                answer_markdown: document.getElementById('editAnswerMarkdown').value,
-                review: document.getElementById('editReview').value,
-                question_type: document.getElementById('editQType').value,
-                difficulty: document.getElementById('editDifficulty').value,
-                source: document.getElementById('editSource').value,
-                category_compulsory: document.getElementById('editCompulsory').value,
-                category_chapter: document.getElementById('editChapter').value,
-                category_knowledge: document.getElementById('editKnowledge').value,
-                image_paths: JSON.stringify(uploadedImages),
-                tags: document.getElementById('editTags') ? document.getElementById('editTags').value : '',
-                related_curriculums: window.relatedChapters ? JSON.stringify(window.relatedChapters) : '[]'
-            };
+            const mergedRelated = window.relatedChapters ? JSON.stringify(window.relatedChapters) : '[]';
+            const snapshot = requestSnapshot
+                ? {
+                    id: id,
+                    draftId: draftId,
+                    content: requestSnapshot.content,
+                    answer_markdown: requestSnapshot.answer_markdown,
+                    review: requestSnapshot.review,
+                    question_type: requestSnapshot.question_type,
+                    difficulty: requestSnapshot.difficulty,
+                    source: requestSnapshot.source,
+                    category_compulsory: requestSnapshot.category_compulsory,
+                    category_chapter: requestSnapshot.category_chapter,
+                    category_knowledge: requestSnapshot.category_knowledge,
+                    image_paths: requestSnapshot.image_paths,
+                    tags: requestSnapshot.tags,
+                    related_curriculums: mergedRelated
+                }
+                : {
+                    content: document.getElementById('editContent').value,
+                    answer_markdown: document.getElementById('editAnswerMarkdown').value,
+                    review: document.getElementById('editReview').value,
+                    question_type: document.getElementById('editQType').value,
+                    difficulty: document.getElementById('editDifficulty').value,
+                    source: document.getElementById('editSource').value,
+                    category_compulsory: document.getElementById('editCompulsory').value,
+                    category_chapter: document.getElementById('editChapter').value,
+                    category_knowledge: document.getElementById('editKnowledge').value,
+                    image_paths: JSON.stringify(uploadedImages),
+                    tags: document.getElementById('editTags') ? document.getElementById('editTags').value : '',
+                    related_curriculums: mergedRelated
+                };
             originalQuestionState = {
                 id: id,
                 draftId: draftId,
