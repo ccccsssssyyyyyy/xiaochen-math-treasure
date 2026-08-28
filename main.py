@@ -1663,6 +1663,14 @@ def compile_tikz_to_png(tikz_code: str) -> str:
         mactex_bin = "/Library/TeX/texbin"
         if os.path.exists(mactex_bin) and mactex_bin not in os.environ.get("PATH", ""):
             os.environ["PATH"] = os.environ.get("PATH", "") + os.path.pathsep + mactex_bin
+    elif platform.system() == "Windows":
+        # Windows 上 TeX Live 默认装在 C:\texlive\<年>\bin\windows，安装器未必加入 PATH，自动探测并补齐
+        texlive_root = r"C:\texlive"
+        if os.path.isdir(texlive_root):
+            for _year in sorted(os.listdir(texlive_root), reverse=True):
+                _bin = os.path.join(texlive_root, _year, "bin", "windows")
+                if os.path.isdir(_bin) and _bin not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = os.environ.get("PATH", "") + os.path.pathsep + _bin
 
     if not shutil.which("xelatex"):
         raise RuntimeError("系统未检测到 'xelatex' 编译器。请确保您的系统已安装 MacTeX/TeX Live 并将其加入 PATH。")
@@ -5231,6 +5239,9 @@ def _find_soffice() -> str:
         "/opt/homebrew/bin/soffice",
         "/usr/local/bin/soffice",
         "/usr/bin/soffice",
+        # Windows 默认安装路径（与 pandoc 的 Windows 探测对称处理）
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
     ]
     for c in candidates:
         if os.path.exists(c):

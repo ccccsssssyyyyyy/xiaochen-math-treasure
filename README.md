@@ -180,6 +180,12 @@ flowchart LR
    - Windows：双击 `启动题库系统.bat`
    - 命令行：`python -m uvicorn main:app --reload`，浏览器开 `http://127.0.0.1:8000`
 
+> [!NOTE]  
+> **Windows 源码运行要点**
+> - 需先装 **Python 3.10+**（安装时勾选 Add to PATH）。双击 `启动题库系统.bat` 会自动建 `venv` 并装依赖；也可手动：`python -m venv venv` → `venv\Scripts\activate` → `pip install -r requirements.txt` → `python main.py`。
+> - **不要**把 macOS 上的 `venv/` 拷到 Windows——虚拟环境含平台专属二进制，必须在本机重建。
+> - 用到 **Word 导入 / TikZ 公式图 / PDF 导出** 时，请装好 **LibreOffice**、**TeX Live**（或 MiKTeX）、**Pandoc** 并加入 PATH。程序已内置 Windows 默认安装路径自动探测（LibreOffice 默认 `C:\Program Files\LibreOffice\program\`、TeX Live 默认 `C:\texlive\<年>\bin\windows`），按默认路径安装即可免配；若自定义安装，请手动把其 `bin` 目录加入 PATH。
+
 > [!TIP]  
 > **拆解建议**
 >
