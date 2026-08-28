@@ -79,6 +79,8 @@ from mathbank.curriculums import (
     build_default_metadata,
     get_curriculum_preset,
     load_curriculum,
+    normalize_difficulty,
+    normalize_tag_list,
 )
 from mathbank.prompts import (
     COMMON_OCR_PROMPT,
@@ -2182,21 +2184,6 @@ def normalize_fillin_macro(text: str) -> str:
     return text
 
 
-def normalize_tag_list(raw: str) -> str:
-    """将逗号/顿号/分号分隔的多标签字符串规范化为逗号分隔、去空白、保序去重的字符串。"""
-    if not raw or not isinstance(raw, str):
-        return ""
-    separators = re.compile(r"[,，;；\n]+")
-    items = [s.strip() for s in separators.split(raw) if s and s.strip()]
-    seen = set()
-    result = []
-    for it in items:
-        if it not in seen:
-            seen.add(it)
-            result.append(it)
-    return ",".join(result)
-
-
 def _normalize_question_content(content: str) -> str:
     """将题干归一化为查重指纹：去题号前缀、去所有空白、简化 LaTeX 等价差异。"""
     if not content or not isinstance(content, str):
@@ -2390,14 +2377,14 @@ def create_question(
         if not category_knowledge and category_chapter:
             category_knowledge = category_chapter
 
-        # 规范化多标签：逗号分隔、去空白、去重、保序
-        norm_knowledge_list = normalize_tag_list(knowledge_list)
+        # 规范化多标签：受控词表映射 + 逗号分隔、去空白、去重、保序
+        norm_knowledge_list = normalize_tag_list(knowledge_list, field="knowledge_list")
         # 防御性剥离：任何入库路径（含手动录入）都移除题干开头残留的原卷顺序题号
         content = _strip_leading_question_number(content)
-        norm_solve_method = normalize_tag_list(solve_method)
+        norm_solve_method = normalize_tag_list(solve_method, field="solve_method")
         # 若知识点多标签为空，但单值知识点存在，则回填到多标签
         if not norm_knowledge_list and category_knowledge:
-            norm_knowledge_list = normalize_tag_list(category_knowledge)
+            norm_knowledge_list = normalize_tag_list(category_knowledge, field="knowledge_list")
 
         db_question = Question(
             content=content,
@@ -2550,10 +2537,10 @@ def update_question(
         if not category_knowledge and category_chapter:
             category_knowledge = category_chapter
 
-        norm_knowledge_list = normalize_tag_list(knowledge_list)
+        norm_knowledge_list = normalize_tag_list(knowledge_list, field="knowledge_list")
         if not norm_knowledge_list and category_knowledge:
-            norm_knowledge_list = normalize_tag_list(category_knowledge)
-        norm_solve_method = normalize_tag_list(solve_method)
+            norm_knowledge_list = normalize_tag_list(category_knowledge, field="knowledge_list")
+        norm_solve_method = normalize_tag_list(solve_method, field="solve_method")
 
         db_question.content = content
         db_question.question_type = question_type
@@ -3340,11 +3327,8 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
             if question_type not in VALID_TYPES:
                 question_type = "single_choice"
 
-        # 难度
-        VALID_DIFF = {"easy_error", "challenge", "qiangji"}
-        difficulty = result.get("difficulty", "")
-        if difficulty not in VALID_DIFF:
-            difficulty = "easy_error"
+        # 难度（唯一事实来源：mathbank.curriculums.DIFFICULTY_VALUES）
+        difficulty = normalize_difficulty(result.get("difficulty", ""))
 
         # 来源：清洗分隔符（· • 、 ， 等）与多余空白
         source = (result.get("source") or "").strip()
@@ -4740,22 +4724,9 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
     for q in parsed_questions:
         q["source"] = (q.get("source") or paper_title).strip()
 
-        # 规范化 AI 自动打标的知识点 / 解题方法多标签
-        raw_kl = q.get("knowledge_list")
-        if isinstance(raw_kl, list):
-            q["knowledge_list"] = ",".join([str(x).strip() for x in raw_kl if str(x).strip()])
-        elif isinstance(raw_kl, str):
-            q["knowledge_list"] = ",".join([s.strip() for s in re.split(r"[,，;；\n]+", raw_kl) if s.strip()])
-        else:
-            q["knowledge_list"] = ""
-
-        raw_sm = q.get("solve_method")
-        if isinstance(raw_sm, list):
-            q["solve_method"] = ",".join([str(x).strip() for x in raw_sm if str(x).strip()])
-        elif isinstance(raw_sm, str):
-            q["solve_method"] = ",".join([s.strip() for s in re.split(r"[,，;；\n]+", raw_sm) if s.strip()])
-        else:
-            q["solve_method"] = ""
+        # 规范化 AI 自动打标的知识点 / 解题方法多标签（受控词表映射 + 去重）
+        q["knowledge_list"] = normalize_tag_list(q.get("knowledge_list"), field="knowledge_list")
+        q["solve_method"] = normalize_tag_list(q.get("solve_method"), field="solve_method")
 
         # 清理多余的双重转义 \n
         for field in ["content", "answer_markdown"]:

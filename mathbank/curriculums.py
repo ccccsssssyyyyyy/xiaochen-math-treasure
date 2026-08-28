@@ -7,7 +7,10 @@ JavaScript constants.
 
 from copy import deepcopy
 from functools import lru_cache
+from pathlib import Path
 import json
+import re
+import unicodedata
 
 from mathbank.paths import CURRICULUMS_DIR
 
@@ -48,6 +51,111 @@ DEFAULT_DIFFICULTIES = [
         "color": "text-purple-600 bg-purple-50 border-purple-200",
     },
 ]
+
+# Canonical difficulty vocabulary — the single source of truth consumed by
+# prompts, input validation, DB defaults and the frontend health-check.
+# Keep this in sync with DEFAULT_DIFFICULTIES above.
+DIFFICULTY_VALUES = {d["value"] for d in DEFAULT_DIFFICULTIES}
+
+
+def normalize_difficulty(value: str | None, default: str = "normal") -> str:
+    """Return a difficulty value from the canonical vocabulary.
+
+    Anything outside DIFFICULTY_VALUES (None, "", or the legacy "medium")
+    falls back to ``default`` (常规题 / normal).
+    """
+
+    value = str(value or "").strip()
+    return value if value in DIFFICULTY_VALUES else default
+
+
+# ---------------------------------------------------------------------------
+# Tag vocabulary — controlled vocabulary for the free-text multi-tag fields
+# (knowledge_list / solve_method). This is the single source of truth so that
+# AI auto-tagging and manual entry converge on canonical names instead of
+# spawning near-duplicate variants ("函数单调性" vs "函数的单调性").
+# ---------------------------------------------------------------------------
+
+RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+TAG_VOCAB_PATH = RESOURCES_DIR / "tag_vocabulary.json"
+
+TAG_FIELDS = ("knowledge_list", "solve_method")
+
+
+def _norm_text(value) -> str:
+    """NFKC normalize + collapse all whitespace (incl. full-width spaces)."""
+
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value)))
+
+
+@lru_cache(maxsize=1)
+def load_tag_vocabulary() -> dict:
+    """Return ``{field: {canonical: [aliases]}}`` from the bundled JSON.
+
+    A missing file or an empty field falls back to an empty structure so
+    callers never have to guard against ``None``.
+    """
+
+    empty = {f: {} for f in TAG_FIELDS}
+    try:
+        with open(TAG_VOCAB_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return empty
+    return {f: data.get(f, {}) for f in TAG_FIELDS}
+
+
+@lru_cache(maxsize=1)
+def tag_alias_index() -> dict:
+    """Return ``{field: {normalized_alias: canonical}}`` for O(1) lookup."""
+
+    index = {f: {} for f in TAG_FIELDS}
+    for field, vocab in load_tag_vocabulary().items():
+        if field not in index:
+            continue
+        for canonical, aliases in vocab.items():
+            for alias in aliases or []:
+                index[field][_norm_text(alias)] = canonical
+    return index
+
+
+def normalize_tag_list(raw, field: str | None = None) -> str:
+    """Normalize a multi-tag value into a comma-joined, de-duplicated string.
+
+    Pipeline:
+    1. Accept ``str`` **or** ``list``/``tuple`` (AI classification returns lists).
+    2. Split on comma / 、 / ; / newline, strip, NFKC-normalize each token.
+    3. If ``field`` is a controlled tag field, map every token to its canonical
+       name via the vocabulary, so legacy variants (e.g. ``函数的单调性``)
+       collapse into the canonical ``函数单调性``.
+    4. De-duplicate on the *final* (possibly remapped) value, preserving order.
+
+    Tokens absent from the vocabulary are kept verbatim — they become new
+    canonical candidates for later review rather than being silently dropped.
+    """
+
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        raw = ",".join(str(x) for x in raw)
+    if not isinstance(raw, str):
+        raw = str(raw)
+
+    tokens = [s.strip() for s in re.split(r"[,，;；\n]+", raw) if s and s.strip()]
+    if not tokens:
+        return ""
+
+    alias = tag_alias_index().get(field) if field in TAG_FIELDS else None
+    if alias:
+        tokens = [alias.get(_norm_text(t), t) for t in tokens]
+
+    seen = set()
+    result = []
+    for t in tokens:
+        if t and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return ", ".join(result)
 
 
 def normalize_version_code(version: str) -> str:

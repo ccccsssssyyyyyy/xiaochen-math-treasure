@@ -100,7 +100,7 @@ class Question(Base):
     category_compulsory = Column(String(100), default="", index=True)  # 必修/选修/选择性必修
     category_chapter = Column(String(100), default="", index=True)  # 章节
     category_knowledge = Column(String(100), default="", index=True)  # 知识点
-    difficulty = Column(String(50), default="medium", index=True)  # easy, medium, hard
+    difficulty = Column(String(50), default="normal", index=True)  # easy_error, normal, challenge, qiangji
     source = Column(String(200), default="")  # 来源
     answer_markdown = Column(Text, default="")  # 答案与解析 (LaTeX + markdown)
     review = Column(Text, default="")  # 评述 (允许空白)
@@ -447,6 +447,25 @@ def init_db():
                 print("Successfully auto-migrated legacy question categories to A-version question_curriculums mapping.")
     except Exception as e:
         raise RuntimeError("数据库旧字段或索引迁移失败，服务已停止启动") from e
+
+    # Remap legacy / invalid difficulty values to the canonical default.
+    # Keeps the difficulty column consistent with the 4-value vocabulary
+    # (easy_error / normal / challenge / qiangji) used across the app.
+    # Idempotent: only rows whose difficulty is NULL or outside the vocabulary
+    # (e.g. the legacy "medium") are touched.
+    try:
+        from mathbank.curriculums import DIFFICULTY_VALUES
+
+        valid_tuple = tuple(DIFFICULTY_VALUES)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE questions SET difficulty = 'normal' "
+                    f"WHERE difficulty IS NULL OR difficulty NOT IN {valid_tuple}"
+                )
+            )
+    except Exception as remap_err:
+        print(f"[Database] Difficulty remap skipped: {remap_err}")
 
     migration_result = migrate_database(
         engine, pre_migration_backup=pre_migration_backup

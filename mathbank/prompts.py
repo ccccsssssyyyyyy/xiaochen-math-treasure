@@ -50,7 +50,7 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         "2. 必须在上面的可选教材范围中为本题挑选最合适的一个【学段】（例如：必修一）和一个【所属章节】（例如：5. 三角函数，必须是可选章节中的精确字符串）。\n"
         f"3. {CLASSIFICATION_PRIORITY_RULE}\n"
         "4. 判定细粒度题型 `question_type`，取值只能是如下之一：单选题为 `single_choice`，多选题为 `multi_choice`，填空题为 `fill_in_blank`，解答题为 `detailed_answer`。通过题干判断单选/多选（如题干含\"多选题\"、\"(多选)\"、要求选出多个选项等）。题干出现 `\\fillin` 时判为 `fill_in_blank`，出现 `\\begin{choices}` 时判为选择题；无法可靠判断时默认为 `single_choice`。\n"
-        "5. 判定难度 `difficulty`：易错题为 `easy_error`，挑战题为 `challenge`，强基题为 `qiangji`；无法判断时默认为 `easy_error`。\n"
+        "5. 判定难度 `difficulty`：易错题为 `easy_error`，常规题为 `normal`，挑战题为 `challenge`，强基题为 `qiangji`；无法判断时默认为 `normal`（常规题）。\n"
         "6. 从题干开头剥离出处信息填入 `source`，例如 \"2024·全国·高考真题\" 清洗为 \"2024全国高考真题\"（去掉 \"·\"、\"•\" 等分隔符与多余空格，合并连续空白）。无出处则为空字符串。\n"
         "7. 必须在上面的可选教材范围中为本题挑选最合适的一个 `compulsory`（学段，精确字符串）、一个 `chapter`（章节，精确字符串）、一个 `category_knowledge`（小节，必须是可选小节中的精确字符串，不存在则给最接近的章节名）。\n"
         "8. `knowledge_list` 与 `solve_method` 均为字符串数组：knowledge_list 为本题知识点文本标签（如 [\"函数单调性\",\"导数应用\"]），solve_method 为本题解题方法文本标签（如 [\"导数法\",\"分类讨论\"]）。\n"
@@ -58,7 +58,7 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         "10. 你的输出必须是一个合法 JSON 字符串，包含且仅包含以下 key，不要有任何多余的 Markdown 标记、代码块或解释文字：\n"
         "{\n"
         '  "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
-        '  "difficulty": "easy_error / challenge / qiangji",\n'
+        '  "difficulty": "easy_error / normal / challenge / qiangji",\n'
         '  "source": "清洗后的来源字符串",\n'
         '  "compulsory": "学段名称",\n'
         '  "chapter": "具体章节名称",\n'
@@ -201,7 +201,7 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         "【可选教材范围与章节】:\n"
         f"{curriculum_text}\n"
         "【核心拆题与分类规范】:\n"
-        "1. 字段分类：挑选精确匹配的学段 `category_compulsory` 与章节 `category_chapter`；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
+        "1. 字段分类：挑选精确匹配的学段 `category_compulsory` 与章节 `category_chapter`；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
         "1.0 题干纯净规则（极重要）：`content` 必须是去掉原卷顺序题号后的纯净题干，严禁在开头保留如 \"16.\"、\"（16）\"、\"16、\"、\"一.\"、\"(1)\" 这类原卷大题/小题编号——这些编号由系统在组卷时统一生成，残留会导致重复编号。仅当编号后紧跟的实质内容是题干的一部分时才保留（即不要误删题干中自然出现的小问序号）。\n"
         "1.2 标签自动标注（重要）：必须为每道题额外产出 `knowledge_list`（字符串数组，列出本题涉及的**全部**细粒度知识点，如 [\"函数单调性\", \"导数应用\"]，可跨多个知识点）与 `solve_method`（单个字符串，给出本题**最贴切的核心解题方法/思想方法**，如 \"数形结合\"、\"分类讨论\"、\"换元法\"、\"待定系数法\"、\"反证法\"、\"归纳法\" 等，仅取最具代表性的一个）。\n"
         "1.3 关联章节与主题标签（融合题重要）：对跨章节的融合题，额外产出 `related_chapters`（字符串数组，列出本题**关联**的其他学段/章节/小节，格式为 \"学段 / 章节 / 小节\"，如 \"必修一 / 集合与函数概念 / 函数的基本性质\"；主分类已填的章节不必重复；单章节题给空数组 []）；以及 `tags`（字符串数组，列出本题**主题/思想方法**标签，如 [\"数形结合\", \"转化与化归\"]，可多选；单题可留空 []）。\n"
@@ -241,7 +241,7 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         '      "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
         '      "category_compulsory": "学段名称",\n'
         '      "category_chapter": "章节名称",\n'
-        '      "difficulty": "easy_error / challenge / qiangji",\n'
+        '      "difficulty": "easy_error / normal / challenge / qiangji",\n'
         '      "source": "出处信息或 null",\n'
         '      "knowledge_list": ["细粒度知识点1", "细粒度知识点2"],\n'
         '      "solve_method": "核心解题方法 (如: 数形结合)",\n'

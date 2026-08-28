@@ -415,8 +415,19 @@
         };
         const typeCount = { single_choice: 0, multi_choice: 0, fill_in_blank: 0, detailed_answer: 0 };
         const typeScore = { single_choice: 0, multi_choice: 0, fill_in_blank: 0, detailed_answer: 0 };
-        // Difficulty distribution (normalize known variants)
-        const diffCount = { easy: 0, medium: 0, hard: 0, unknown: 0 };
+        // Difficulty distribution — group by the canonical difficulty values
+        // from systemMetadata (easy_error / normal / challenge / qiangji).
+        const diffMetaList = (window.systemMetadata && window.systemMetadata.difficulties) || [
+            { value: 'easy_error', label: '易错题' },
+            { value: 'normal', label: '常规题' },
+            { value: 'challenge', label: '挑战题' },
+            { value: 'qiangji', label: '强基题' }
+        ];
+        const diffCount = {};
+        diffMetaList.forEach(d => { diffCount[d.value] = 0; });
+        diffCount.__unknown = 0;
+        // 3-tier mapping for the stacked 易/中/难 bar:
+        //   易 = 常规题 + 易错题, 中 = 挑战题, 难 = 强基题 (computed below)
         // Knowledge coverage
         const knowSet = new Set();
 
@@ -429,10 +440,8 @@
                 typeScore[t] += (parseInt(it.score, 10) || 5);
             }
             const d = q.difficulty;
-            if (d === 'easy' || d === 'normal' || d === 'easy_error') diffCount.easy++;
-            else if (d === 'medium' || d === 'challenge') diffCount.medium++;
-            else if (d === 'hard' || d === 'qiangji') diffCount.hard++;
-            else diffCount.unknown++;
+            if (diffCount[d] !== undefined) diffCount[d]++;
+            else diffCount.__unknown++;
             const kl = q.knowledge_list || q.category_knowledge || '';
             kl.split(/[,，;；\n]+/).forEach(k => {
                 const kk = k.trim();
@@ -463,10 +472,13 @@
             ? `<div class="flex flex-wrap gap-1.5 mt-1">${typeChip('single_choice')}${typeChip('multi_choice')}${typeChip('fill_in_blank')}${typeChip('detailed_answer')}</div>`
             : `<div class="text-[10px] text-slate-400 mt-1">暂无题型分布</div>`;
 
-        // Difficulty bar
+        // Difficulty bar (3-tier: 易 = 常规+易错, 中 = 挑战, 难 = 强基)
         const diffTotal = totalCount || 1;
-        const easyPct = Math.round((diffCount.easy / diffTotal) * 100);
-        const medPct = Math.round((diffCount.medium / diffTotal) * 100);
+        const easyN = (diffCount.easy_error || 0) + (diffCount.normal || 0);
+        const medN = (diffCount.challenge || 0);
+        const hardN = (diffCount.qiangji || 0);
+        const easyPct = Math.round((easyN / diffTotal) * 100);
+        const medPct = Math.round((medN / diffTotal) * 100);
         const hardPct = Math.max(0, 100 - easyPct - medPct);
         const diffBarHtml = totalCount > 0 ? `
             <div class="mt-1">
@@ -1026,10 +1038,10 @@
     ];
     const SPEC_DIFFS = [
         { value: '', label: '不限难度' },
-        { value: 'easy', label: '普通题' },
         { value: 'easy_error', label: '易错题' },
-        { value: 'medium', label: '挑战题' },
-        { value: 'hard', label: '强基题' }
+        { value: 'normal', label: '常规题' },
+        { value: 'challenge', label: '挑战题' },
+        { value: 'qiangji', label: '强基题' }
     ];
 
     function buildSpecSelect(options, selectedVal, cls) {
@@ -1272,10 +1284,10 @@
         // 5. Build Difficulty options
         let diffOptions = `<option value="">全部难度</option>`;
         const difficulties = metadata.difficulties || [
-            { value: 'easy', label: '普通题' },
             { value: 'easy_error', label: '易错题' },
-            { value: 'medium', label: '挑战题' },
-            { value: 'hard', label: '强基题' }
+            { value: 'normal', label: '常规题' },
+            { value: 'challenge', label: '挑战题' },
+            { value: 'qiangji', label: '强基题' }
         ];
         difficulties.forEach(d => {
             diffOptions += `<option value="${escapeHtml(d.value)}" ${f.difficulty === d.value ? 'selected' : ''}>${escapeHtml(d.label)}</option>`;
@@ -1860,15 +1872,17 @@
         const totalScore = validCartStats.reduce((sum, item) => sum + (parseInt(item.score, 10) || 5), 0);
         const totalCount = validCartStats.length;
 
-        // Calculate difficulty ratio
+        // Calculate difficulty ratio (canonical values:
+        // 易 = 常规题+易错题, 中 = 挑战题, 难 = 强基题)
         let easyCount = 0, medCount = 0, hardCount = 0;
         validCartStats.forEach(item => {
             const q = window.PaperStore.questionsMap[item.id];
-            if (q) {
-                if (q.difficulty === 'easy' || q.difficulty === 'normal') easyCount++;
-                else if (q.difficulty === 'hard' || q.difficulty === 'qiangji') hardCount++;
-                else medCount++;
-            }
+            if (!q) return;
+            const d = q.difficulty;
+            if (d === 'easy_error' || d === 'normal') easyCount++;
+            else if (d === 'challenge') medCount++;
+            else if (d === 'qiangji') hardCount++;
+            // 其他/未知值不计入 3 档比例条
         });
         const easyPct = totalCount > 0 ? Math.round((easyCount / totalCount) * 100) : 0;
         const medPct = totalCount > 0 ? Math.round((medCount / totalCount) * 100) : 0;
@@ -3398,11 +3412,9 @@
             }
         } else {
             const fallbackMap = {
-                easy: '普通题',
                 easy_error: '易错题',
-                medium: '挑战题',
+                normal: '常规题',
                 challenge: '挑战题',
-                hard: '强基题',
                 qiangji: '强基题'
             };
             label = fallbackMap[diff] || diff;
@@ -3411,11 +3423,11 @@
         if (!colorClass) {
             if (typeof window.getDifficultyColor === 'function') {
                 colorClass = window.getDifficultyColor(diff);
-            } else if (diff === 'easy' || diff === 'normal') {
+            } else if (diff === 'normal') {
                 colorClass = 'text-blue-600 bg-blue-50 border border-blue-200/60 dark:bg-blue-900/30 dark:text-blue-300';
             } else if (diff === 'easy_error') {
                 colorClass = 'text-green-600 bg-green-50 border border-green-200/60 dark:bg-green-900/30 dark:text-green-300';
-            } else if (diff === 'hard' || diff === 'qiangji') {
+            } else if (diff === 'qiangji') {
                 colorClass = 'text-purple-600 bg-purple-50 border border-purple-200/60 dark:bg-purple-900/30 dark:text-purple-300';
             } else if (diff === 'challenge') {
                 colorClass = 'text-red-600 bg-red-50 border border-red-200/60 dark:bg-red-900/30 dark:text-red-300';
