@@ -52,7 +52,8 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         "6. 从题干开头剥离出处信息填入 `source`，例如 \"2024·全国·高考真题\" 清洗为 \"2024全国高考真题\"（去掉 \"·\"、\"•\" 等分隔符与多余空格，合并连续空白）。无出处则为空字符串。\n"
         "7. 必须在上面的可选教材范围中为本题挑选最合适的一个 `compulsory`（学段，精确字符串）、一个 `chapter`（章节，精确字符串）、一个 `category_knowledge`（小节，必须是可选小节中的精确字符串，不存在则给最接近的章节名）。\n"
         "8. `knowledge_list` 与 `solve_method` 均为字符串数组：knowledge_list 为本题知识点文本标签（如 [\"函数单调性\",\"导数应用\"]），solve_method 为本题解题方法文本标签（如 [\"导数法\",\"分类讨论\"]）。\n"
-        "9. 你的输出必须是一个合法 JSON 字符串，包含且仅包含以下 key，不要有任何多余的 Markdown 标记、代码块或解释文字：\n"
+        "9. 综合题/融合题常跨越多个章节。除主分类（compulsory/chapter/category_knowledge）外，若本题确实还涉及教材范围内其他章节，请在 `related_chapters` 中以数组给出这些【额外】章节，每个元素为 {\"compulsory\": \"学段\", \"chapter\": \"章节\", \"knowledge\": \"小节\"}（小节可省略或给最接近章节名，必须是上面教材范围内的精确字符串）。若本题仅属于单一章节，则 `related_chapters` 给空数组 []。\n"
+        "10. 你的输出必须是一个合法 JSON 字符串，包含且仅包含以下 key，不要有任何多余的 Markdown 标记、代码块或解释文字：\n"
         "{\n"
         '  "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
         '  "difficulty": "easy_error / challenge / qiangji",\n'
@@ -61,7 +62,8 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         '  "chapter": "具体章节名称",\n'
         '  "category_knowledge": "小节名称",\n'
         '  "knowledge_list": ["知识点1", "知识点2"],\n'
-        '  "solve_method": ["方法1", "方法2"]\n'
+        '  "solve_method": ["方法1", "方法2"],\n'
+        '  "related_chapters": [{"compulsory": "学段", "chapter": "额外章节", "knowledge": "小节"}]\n'
         "}\n"
         "不要包含 ```json ``` 标记，只输出最干净的 JSON。"
     )

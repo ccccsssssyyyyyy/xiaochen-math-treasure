@@ -78,6 +78,19 @@ def configure_sqlite_wal(database_engine: Engine) -> str | None:
         pass
     return mode
 
+def _safe_json_list(value):
+    """Parse a JSON-encoded list stored as TEXT; return [] on any failure."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
 class Question(Base):
     __tablename__ = "questions"
 
@@ -98,6 +111,7 @@ class Question(Base):
     tags = Column(Text, default="")  # 自定义标签 (逗号分隔或字符串)
     knowledge_list = Column(Text, default="")  # 知识点多标签 (逗号分隔，AI 自动打标 + 手动修正)
     solve_method = Column(Text, default="")  # 解题方法多标签 (逗号分隔，AI 自动打标 + 手动修正)
+    related_curriculums = Column(Text, default="[]")  # 关联章节(JSON数组: [{compulsory,chapter,knowledge}])，融合题多章节归属
     usage_count = Column(Integer, default=0, index=True)  # 组卷引用次数
     created_at = Column(DateTime, default=_utcnow_naive)
 
@@ -136,6 +150,7 @@ class Question(Base):
             "tags": self.tags,
             "knowledge_list": self.knowledge_list or "",
             "solve_method": self.solve_method or "",
+            "related_curriculums": _safe_json_list(self.related_curriculums),
             "usage_count": self.usage_count or 0,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
@@ -158,6 +173,7 @@ class Question(Base):
             "tags": self.tags,
             "knowledge_list": self.knowledge_list or "",
             "solve_method": self.solve_method or "",
+            "related_curriculums": _safe_json_list(self.related_curriculums),
             "usage_count": self.usage_count or 0,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
@@ -387,6 +403,10 @@ def init_db():
             if "solve_method" not in columns:
                 conn.execute(text("ALTER TABLE questions ADD COLUMN solve_method TEXT DEFAULT ''"))
                 print("Added column 'solve_method' to questions table successfully.")
+
+            if "related_curriculums" not in columns:
+                conn.execute(text("ALTER TABLE questions ADD COLUMN related_curriculums TEXT DEFAULT '[]'"))
+                print("Added column 'related_curriculums' to questions table successfully.")
 
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_compulsory ON questions (category_compulsory)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_questions_category_chapter ON questions (category_chapter)"))

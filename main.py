@@ -26,8 +26,8 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from sqlalchemy import or_
+from sqlalchemy import or_, text
+from sqlalchemy import or_, text
 from dotenv import load_dotenv
 
 from mathbank.database import Question, QuestionCurriculum, Paper, PaperQuestion, engine, get_db, init_db
@@ -2054,7 +2054,17 @@ def list_questions(
     if comp_val:
         query = query.filter(Question.category_compulsory == comp_val)
     if chap_val:
-        query = query.filter(Question.category_chapter == chap_val)
+        # 主分类命中，或关联章节(related_curriculums JSON)中含有该章节，融合题也能被检索到。
+        # 使用 JSON1 函数精确匹配章节，避免 LIKE 通配符/转义位置带来的脆弱性。
+        query = query.filter(
+            or_(
+                Question.category_chapter == chap_val,
+                text(
+                    "EXISTS (SELECT 1 FROM json_each(COALESCE(related_curriculums, '[]')) "
+                    "WHERE json_extract(value, '$.chapter') = :chap)"
+                ).bindparams(chap=chap_val),
+            )
+        )
     if know_val:
         query = query.filter(Question.category_knowledge == know_val)
     if knowledge_list:
@@ -2268,6 +2278,48 @@ def check_document_imported(name: str = "", db: Session = Depends(get_db)):
     return {"imported": count > 0, "count": count}
 
 
+def parse_related_curriculums(raw):
+    """Validate and normalize the related_curriculums payload.
+
+    Accepts a JSON string or a list. Returns a compact JSON string for storage.
+    Each entry must be a dict with at least a non-empty ``chapter``. Entries are
+    deduplicated by (compulsory, chapter, knowledge).
+    """
+    if raw is None:
+        return "[]"
+    if isinstance(raw, str):
+        if not raw.strip():
+            return "[]"
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return "[]"
+    else:
+        data = raw
+    if not isinstance(data, list):
+        return "[]"
+    seen = set()
+    out = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        chapter = (item.get("chapter") or "").strip()
+        if not chapter:
+            continue
+        compulsory = (item.get("compulsory") or "").strip()
+        knowledge = (item.get("knowledge") or "").strip()
+        key = (compulsory, chapter, knowledge)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "compulsory": compulsory,
+            "chapter": chapter,
+            "knowledge": knowledge,
+        })
+    return json.dumps(out, ensure_ascii=False)
+
+
 @app.post("/api/questions")
 def create_question(
     background_tasks: BackgroundTasks,
@@ -2285,6 +2337,7 @@ def create_question(
     tags: str = Form(""),
     knowledge_list: str = Form(""),  # 知识点多标签 (逗号分隔)
     solve_method: str = Form(""),  # 解题方法多标签 (逗号分隔)
+    related_curriculums: str = Form("[]"),  # 关联章节(JSON数组: [{compulsory,chapter,knowledge}])
     related_question_id: str = Form(""),
     image_paths: str = Form("[]"),  # JSON array string
     force: str = Form("false"),  # 查重命中时是否强制入库
@@ -2339,6 +2392,7 @@ def create_question(
             tags=tags,
             knowledge_list=norm_knowledge_list,
             solve_method=norm_solve_method,
+            related_curriculums=parse_related_curriculums(related_curriculums),
         )
         db_question.image_paths = parsed_img_paths
         
@@ -2438,6 +2492,7 @@ def update_question(
     tags: str = Form(""),
     knowledge_list: str = Form(""),
     solve_method: str = Form(""),
+    related_curriculums: str = Form("[]"),  # 关联章节(JSON数组)
     related_question_id: str = Form(""),
     image_paths: str = Form("[]"),
     db: Session = Depends(get_db)
@@ -2488,6 +2543,7 @@ def update_question(
         db_question.tikz_code = tikz_code
         db_question.knowledge_list = norm_knowledge_list
         db_question.solve_method = norm_solve_method
+        db_question.related_curriculums = parse_related_curriculums(related_curriculums)
         if figure_align in ["right", "center", "bottom_right"]:
             db_question.figure_align = figure_align
         db_question.tags = tags
@@ -3306,6 +3362,37 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
         if isinstance(solve_method, str):
             solve_method = [x.strip() for x in re.split(r"[,，;；\n]+", solve_method) if x.strip()]
 
+        # 关联章节（融合题）：主分类之外的额外章节，需校验存在性后保留
+        related_chapters = result.get("related_chapters", []) or []
+        if isinstance(related_chapters, str):
+            try:
+                related_chapters = json.loads(related_chapters)
+            except Exception:
+                related_chapters = []
+        if not isinstance(related_chapters, list):
+            related_chapters = []
+        valid_related = []
+        seen_rel = set()
+        for item in related_chapters:
+            if not isinstance(item, dict):
+                continue
+            rc = (item.get("compulsory") or "").strip()
+            rch = (item.get("chapter") or "").strip()
+            rk = (item.get("knowledge") or "").strip()
+            if not rch:
+                continue
+            # 章节必须存在于当前教材目录，否则丢弃（避免脏数据）
+            if rc in curr and rch in curr.get(rc, {}):
+                if not rk or rk not in curr[rc][rch]:
+                    rk = rch
+            else:
+                continue
+            key = (rc, rch, rk)
+            if key in seen_rel:
+                continue
+            seen_rel.add(key)
+            valid_related.append({"compulsory": rc, "chapter": rch, "knowledge": rk})
+
         return {
             "status": "success",
             "question_type": question_type,
@@ -3316,6 +3403,7 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
             "category_knowledge": category_knowledge,
             "knowledge_list": knowledge_list,
             "solve_method": solve_method,
+            "related_chapters": valid_related,
             "is_fallback": is_fallback,
             "raw_recommendation": raw_recommendation,
         }
@@ -4242,7 +4330,16 @@ def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
         if compulsory:
             query = query.filter(Question.category_compulsory == compulsory)
         if chapter:
-            query = query.filter(Question.category_chapter == chapter)
+            # 主分类命中，或关联章节(JSON)中含有该章节，融合题也能被检索到
+            query = query.filter(
+                or_(
+                    Question.category_chapter == chapter,
+                    text(
+                        "EXISTS (SELECT 1 FROM json_each(COALESCE(related_curriculums, '[]')) "
+                        "WHERE json_extract(value, '$.chapter') = :chap)"
+                    ).bindparams(chap=chapter),
+                )
+            )
         if knowledge:
             query = query.filter(Question.category_knowledge == knowledge)
         # 知识点多标签（knowledge_list 支持逗号分隔多值 OR，边界 LIKE）
