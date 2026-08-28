@@ -665,7 +665,7 @@ def test_question_selection_and_save_are_transactional():
     select_end = import_source.index("window.reloadCurrentQuestionSilently", select_start)
     select_source = import_source[select_start:select_end]
     save_start = import_source.index("function saveQuestion(skipCheck = false)")
-    save_end = import_source.index("// AI classification modal handlers", save_start)
+    save_end = import_source.index("function deleteQuestion", save_start)
     save_source = import_source[save_start:save_end]
 
     assert "EditorState.useQuestion(item)" not in select_source
@@ -908,7 +908,7 @@ function fetch() {{
   return new Promise(resolve => pendingFetches.push(resolve));
 }}
 let activeCard = null;
-const document = {{ getElementById() {{ return activeCard; }} }};
+const document = {{ getElementById() {{ return activeCard; }}, querySelector() {{ return null; }} }};
 {helpers_source}
 {save_source}
 

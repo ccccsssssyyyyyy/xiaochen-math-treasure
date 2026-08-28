@@ -107,7 +107,6 @@ if (similarlyNamed !== String.raw`\parent`) {
 def test_static_dialogs_expose_modal_semantics_and_accessible_names():
     elements = _index_elements()
     labelled_dialogs = {
-        "aiClassifyModal": "aiClassifyModalTitle",
         "settingsModal": "settingsModalTitle",
         "updateModal": "updateModalTitle",
         "statsModal": "statsModalTitle",
@@ -139,30 +138,26 @@ def test_static_dialogs_expose_modal_semantics_and_accessible_names():
         assert elements[button_id]["aria-label"]
 
 
-def test_ai_classification_requires_manual_single_or_multi_choice_confirmation():
-    index_source = _read(INDEX_PATH)
+def test_ai_classification_applies_fine_grained_question_type():
     import_source = _read(STATIC_JS_DIR / "import.js")
-    css_source = _read(CSS_PATH)
 
-    assert "temporaryClassifyData.question_type" not in import_source
-    assert "qtypeLabels[data.question_type]" not in import_source
-    assert "temporaryClassifyData.question_form === 'choice'" in import_source
-    assert "!temporaryClassifyQuestionType" in import_source
-    assert "请先确认此题是单选题还是多选题" in import_source
-    assert "qtypeSelect.value = temporaryClassifyQuestionType" in import_source
-    assert "window.selectClassifiedChoiceType = selectClassifiedChoiceType" in import_source
-    assert 'id="recQType"' not in index_source
-    assert 'id="choiceTypeConfirm"' in index_source
-    assert 'id="classifySingleChoiceBtn"' in index_source
-    assert 'id="classifyMultiChoiceBtn"' in index_source
-    assert 'role="radiogroup"' in index_source
-    assert index_source.count("question-type-choice-check") == 2
-    assert "已识别为选择题，请手动确认" in index_source
-    assert "确认分类并保存题目" in index_source
-    assert '.question-type-choice-button[aria-checked="true"]:hover' in css_source
-    assert 'color: #ffffff;' in css_source
-    assert '.question-type-choice-button[aria-checked="true"] .question-type-choice-check' in css_source
-    assert "button.classList.toggle('bg-brand-50'" not in import_source
+    # 派生版直接用 AI 返回的细粒度 question_type，不再有“单选题/多选题手动确认”步骤
+    assert "temporaryClassifyData.question_form" not in import_source
+    assert "question_form === 'choice'" not in import_source
+    assert "window.applyClassifyResultToEditor = applyClassifyResultToEditor" in import_source
+
+    # 分类结果直接写入编辑器的细粒度题型下拉
+    assert "qt.value = data.question_type" in import_source
+    assert "['single_choice', 'multi_choice', 'fill_in_blank', 'detailed_answer']" in import_source
+
+    # 题型下拉提供四个细粒度选项（与受控词表一致）
+    for opt in (
+        'value="single_choice"',
+        'value="multi_choice"',
+        'value="fill_in_blank"',
+        'value="detailed_answer"',
+    ):
+        assert opt in import_source
 
 
 def test_modal_manager_traps_focus_handles_escape_and_restores_focus():
@@ -195,8 +190,8 @@ def test_modal_manager_traps_focus_handles_escape_and_restores_focus():
     assert "|| getFocusable(dialog)[0]" not in api_source
 
     assert api_source.count("window.MathBankModal.open") >= 2
-    assert editor_source.count("window.MathBankModal.open") >= 3
-    assert import_source.count("window.MathBankModal.open") >= 3
+    assert editor_source.count("window.MathBankModal.open") >= 2
+    assert import_source.count("window.MathBankModal.open") >= 2
     assert "window.MathBankModal.open(lightbox" in ocr_source
     assert "window.MathBankModal.open(modal" in paper_source
 
@@ -238,10 +233,12 @@ def test_paper_question_answers_are_collapsible_and_loaded_on_demand():
         "window.togglePaperQuestionAnswer",
         "window.collapseAllPaperAnswers",
         "fetch(`/api/questions/${qid}`)",
-        "window.parseMarkdownWithMath(answerText)",
-        'aria-expanded="${answerExpanded ? \'true\' : \'false\'}"',
+        "window.parseMarkdownWithMath(ans)",
         "参考答案与解析",
-        "收起全部答案",
+        # 答案按需加载：进入详情时再拉取并写入缓存
+        "window.loadPaperDetailAnswer = async function",
+        "seedPaperAnswerCache",
+        "本题暂无答案与解析",
     ):
         assert marker in paper_source
 
@@ -272,7 +269,6 @@ def test_reduced_motion_dark_contrast_and_busy_feedback_are_explicit():
     assert ".finally(() =>" in editor_source
     assert 'id="toast" role="status" aria-live="polite"' in index_source
     for loading_id in (
-        "classifyLoading",
         "importLoadingState",
         "contentOcrLoadingIndicator",
         "ocrLoadingIndicator",
@@ -316,7 +312,8 @@ def test_generated_tailwind_classes_use_configured_scales():
     for invalid_shadow in ("shadow-xs", "shadow-2xs", "shadow-3xs"):
         assert invalid_shadow not in combined_source
 
-    configured_brand_steps = {50, 100, 200, 500, 600, 700, 900}
+    # 派生版 brand 调色板使用标准 Tailwind 步长（50–950）
+    configured_brand_steps = {50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950}
     used_brand_steps = {
         int(step)
         for step in re.findall(

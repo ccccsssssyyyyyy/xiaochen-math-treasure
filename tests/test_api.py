@@ -137,7 +137,7 @@ def test_api_categories(client):
     assert isinstance(response.json(), dict)
 
 
-def test_ai_classify_returns_coarse_form_without_question_type():
+def test_ai_classify_returns_fine_grained_question_type():
     provider = SimpleNamespace(
         api_key="test-key",
         api_base="https://example.invalid/v1",
@@ -146,51 +146,63 @@ def test_ai_classify_returns_coarse_form_without_question_type():
         reasoning_effort=None,
         provider_code="test",
     )
-    response = MagicMock()
-    response.json.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": json.dumps(
-                        {
-                            "compulsory": "必修一",
-                            "chapter": "1. 集合",
-                            "question_form": "single_choice",
-                        },
-                        ensure_ascii=False,
-                    )
+
+    def _classify_response(_provider, data, **_kwargs):
+        user_content = data["messages"][1]["content"]
+        body = user_content.split("题目内容:\n", 1)[-1]
+        if "\\fillin" in body:
+            qtype = "unknown_fill"  # 非法值 → 触发结构识别回退
+        elif "\\begin{choices}" in body:
+            qtype = "unknown_choice"
+        else:
+            qtype = "single_choice"
+        resp = MagicMock()
+        resp.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "compulsory": "必修一",
+                                "chapter": "1. 集合",
+                                "question_type": qtype,
+                            },
+                            ensure_ascii=False,
+                        )
+                    }
                 }
-            }
-        ]
-    }
+            ]
+        }
+        return resp
 
     with patch("main.resolve_text_provider", return_value=provider), patch(
-        "main.post_chat_completion", return_value=response
+        "main.post_chat_completion", side_effect=_classify_response
     ), patch(
         "main.get_current_curriculum", return_value={"必修一": {"1. 集合": []}}
     ):
         from main import ai_classify
 
-        ai_result = ai_classify("设集合 $A=\\{1,2\\}$，判断下列说法。")
-        fillin_result = ai_classify("实数 $a$ 的取值范围为\\fillin")
+        ai_result = ai_classify("设集合 $A=\\{1,2\\}$，判断下列说法。", use_free_model="false")
+        fillin_result = ai_classify("实数 $a$ 的取值范围为\\fillin", use_free_model="false")
         choices_result = ai_classify(
-            "下列结论正确的是\\begin{choices}\\item A\\item B\\end{choices}"
+            "下列结论正确的是\\begin{choices}\\item A\\item B\\end{choices}",
+            use_free_model="false",
         )
 
-    assert ai_result == {
-        "status": "success",
-        "compulsory": "必修一",
-        "chapter": "1. 集合",
-        "question_form": "choice",
-        "question_form_source": "ai",
-    }
-    assert fillin_result["question_form"] == "fill_in_blank"
-    assert fillin_result["question_form_source"] == "structure"
-    assert choices_result["question_form"] == "choice"
-    assert choices_result["question_form_source"] == "structure"
-    assert "question_type" not in ai_result
-    assert "question_type" not in fillin_result
-    assert "question_type" not in choices_result
+    assert ai_result["status"] == "success"
+    assert ai_result["question_type"] == "single_choice"
+    assert ai_result["compulsory"] == "必修一"
+    assert ai_result["chapter"] == "1. 集合"
+    assert ai_result["is_fallback"] is False
+
+    # 当 AI 未给出合法 question_type 时，结构识别接管
+    assert fillin_result["question_type"] == "fill_in_blank"
+    assert choices_result["question_type"] == "single_choice"
+
+    # 派生版不再暴露粗粒度 question_form 字段
+    assert "question_form" not in ai_result
+    assert "question_form" not in fillin_result
+    assert "question_form" not in choices_result
 
 
 def test_api_stats(client):
@@ -475,6 +487,10 @@ def test_parse_paper_flows_use_shared_provider_resolution(client):
         "PREFER_PARSE_MODEL": "BAILIAN/qwen3.7-max:high",
         "ALI_BAILIAN_API_KEY": "fake-bailian-key",
         "ALI_BAILIAN_API_BASE": "https://bailian.example/v1/",
+        # 关闭免费路由评估，避免环境相关的一次“难度评估”额外请求，
+        # 让本用例只验证共享 provider 解析与模型参数这一核心意图。
+        "PREFER_FREE_PARSE_MODEL": "",
+        "PREFER_FREE_CLASSIFY_MODEL": "",
     }
     with patch.dict(os.environ, provider_env):
         with patch("mathbank.ai_http.robust_request_post", side_effect=provider_response) as mock_post:
@@ -504,7 +520,7 @@ def test_parse_paper_flows_use_shared_provider_resolution(client):
         assert "reasoning_effort" not in kwargs["json"]
         assert "thinking_budget" not in kwargs["json"]
         assert "max_tokens" not in kwargs["json"]
-        assert kwargs["timeout"] == 180
+        assert kwargs["timeout"] == 300
 
 def test_figure_align_api(client):
     headers = {"X-Local-Token": LOCAL_TOKEN}

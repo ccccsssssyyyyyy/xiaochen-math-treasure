@@ -105,13 +105,14 @@ def test_classification_prompts_prefer_later_curriculum_module():
         assert "仅作为背景条件被提及" in prompt
 
 
-def test_single_question_classification_prompt_requests_only_coarse_question_form():
+def test_single_question_classification_prompt_requests_fine_grained_question_type():
     prompt = build_classification_system_prompt({"必修一": {"1. 集合": []}})
 
     assert '"compulsory"' in prompt
     assert '"chapter"' in prompt
-    assert '"question_form"' in prompt
-    assert "question_type" not in prompt
-    assert "包含且仅包含以下三个 key" in prompt
-    assert "任何选择题一律为 `choice`" in prompt
-    assert "严禁输出或猜测 `single_choice`、`multi_choice`" in prompt
+    assert '"question_type"' in prompt
+    assert "question_form" not in prompt
+    # 细粒度题型取值必须明确列出，且不再要求输出粗粒度 question_form
+    for fine_type in ("single_choice", "multi_choice", "fill_in_blank", "detailed_answer"):
+        assert f"`{fine_type}`" in prompt
+    assert "无法可靠判断时默认为 `single_choice`" in prompt

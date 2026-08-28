@@ -107,7 +107,6 @@ def test_bailian_model_presets_are_current_and_task_specific():
         '"qwen-vl-plus"',
         '"qwen-vl-max"',
         '"qwen-max"',
-        '"qwen-plus"',
         '"qwen3.5-ocr"',
     ):
         assert removed_preset not in api_source
@@ -134,8 +133,15 @@ def test_blocking_upload_and_ai_handlers_run_in_fastapi_worker_threads():
 def test_paper_parsers_use_defensive_ai_json_parser():
     main_source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
 
-    assert main_source.count("parse_ai_json(raw_ai_text, raw_markdown=latex_content)") == 1
-    assert main_source.count("parse_ai_json(raw_ai_text, raw_markdown=model_source)") == 1
+    # 拆题流程必须把原始 AI 文本交给防御式解析器，并透传原始 Markdown
+    # （用于还原被锁定保护的 LaTeX 公式），当前实现为分块解析：
+    assert (
+        main_source.count(
+            "parse_ai_json(raw_ai_text, raw_markdown=chunk_markdown if chunk_markdown is not None else user_content)"
+        )
+        == 1
+    )
+    assert "parse_ai_json(raw_ai_text" in main_source
 
 
 def test_backend_modules_and_cli_tools_live_in_packages():

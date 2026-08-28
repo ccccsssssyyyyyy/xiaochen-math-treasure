@@ -62,7 +62,7 @@ def test_docx_task_restores_formula_before_returning_questions():
         },
     }
 
-    def fake_parse(locked_text, _generate_answers):
+    def fake_parse(locked_text, _generate_answers, separated_mode=None):
         assert '<mathbank-math id="' in locked_text
         assert r"$f(x)=x^2+1$" in locked_text
         lock_id = re.search(r'id="(MBM_[^"]+)"', locked_text).group(1)
@@ -83,5 +83,6 @@ def test_docx_task_restores_formula_before_returning_questions():
     task = DOCUMENT_TASKS.snapshot(task_id)
     DOCUMENT_TASKS.remove(task_id)
     assert task["status"] == "completed"
-    assert task["data"][0]["content"] == r"1. 已知 $f(x)=x^2+1$，求最小值。"
+    # post_process_pdf_parsed_questions 会剥离题号前缀（"1. "），故最终内容无前缀
+    assert task["data"][0]["content"] == r"已知 $f(x)=x^2+1$，求最小值。"
     assert task["diagnostics"]["math_locks_restored"] == 1
