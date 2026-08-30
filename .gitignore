@@ -89,3 +89,9 @@ tests/artifacts/*
 
 # 12. 忽略个人项目记忆文档（含项目进度，避免误提交到上游公开仓库）
 .workbuddy/
+
+# 13. 忽略本地改前备份与一次性清理脚本（调试残留，防止 git add -A 误提交）
+*.bak
+*.bak-*
+cleanup_star_garble.py
+cleanup_report.txt
