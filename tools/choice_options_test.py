@@ -56,4 +56,10 @@ check("幂等性", out7a == out7b)
 check("空字符串", normalize_choice_options_to_latex("") == "")
 check("None 安全", normalize_choice_options_to_latex(None) == "")
 
+# 9. 公式分母 (a+b)(c+d)(a+c)(b+d) 不被误判为选项（数学模式保护）
+formula = r"$\chi^{2}=\frac{n(ad-bc)^{2}}{(a+b)(c+d)(a+c)(b+d)}$，其中 $n=a+b+c+d$。"
+out9 = normalize_choice_options_to_latex(formula)
+check("公式内 (a+b) 等不被误判为选项", out9 == formula)
+check("公式不出现 \\begin{choices}", "\\begin{choices}" not in out9)
+
 print("\nALL PASS: normalize_choice_options_to_latex")

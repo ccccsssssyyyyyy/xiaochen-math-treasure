@@ -37,6 +37,44 @@ _LABEL_PREFIX = re.compile(
 )
 
 
+# 数学模式保护：扫描选项前，先把 $...$ / $$...$$ / \(...\) / \[...\] / 数学环境整体替换为
+# 占位符，避免公式内 (a+b)(c+d) 等被 OPTION_START 误判为选项 A/B/C/D。
+# 占位符仅由私有区字符 + 数字组成，不含任何「字母紧邻 .、)）」结构，故不会触发选项识别；
+# 扫描结束后再原样还原，保证公式零损耗。
+_MATH_OPEN = "\uE000"
+_MATH_CLOSE = "\uE001"
+_MATH_DELIM_RE = re.compile(
+    r"\$\$([\s\S]*?)\$\$"          # $$...$$
+    r"|\$([^$\n]*?)\$"            # $...$
+    r"|\\\[([\s\S]*?)\\\]"        # \[...\]
+    r"|\\\(([\s\S]*?)\\\)"        # \(...\)
+)
+_MATH_ENV_RE = re.compile(
+    r"\\begin\{"
+    r"(equation|equation\*|align|align\*|gather|gather\*|multline|multline\*|"
+    r"flalign|flalign\*|cases|matrix|pmatrix|bmatrix|vmatrix|Vmatrix|"
+    r"smallmatrix|array|split|aligned|gathered|displaymath|math|eqnarray|eqnarray\*)"
+    r"\}([\s\S]*?)\\end\{\1\}"
+)
+
+
+def _protect_math(content: str):
+    holes = []
+    def _stash(m):
+        holes.append(m.group(0))
+        return _MATH_OPEN + str(len(holes) - 1) + _MATH_CLOSE
+    protected = _MATH_DELIM_RE.sub(_stash, content)
+    protected = _MATH_ENV_RE.sub(_stash, protected)
+    return protected, holes
+
+
+def _restore_math(protected: str, holes: list) -> str:
+    def _restore(m):
+        idx = int(m.group(1))
+        return holes[idx] if 0 <= idx < len(holes) else m.group(0)
+    return re.sub(_MATH_OPEN + r"(\d+)" + _MATH_CLOSE, _restore, protected)
+
+
 def _letter_of(match: "re.Match") -> str:
     return (match.group(1) or match.group(2) or "").upper()
 
@@ -73,7 +111,8 @@ def _normalize_existing_choices(content: str) -> str:
 
 
 def _wrap_inline_choices(content: str) -> str:
-    matches = list(_OPTION_START.finditer(content))
+    protected, holes = _protect_math(content)
+    matches = list(_OPTION_START.finditer(protected))
     if len(matches) < 2:
         return content
 
@@ -123,10 +162,10 @@ def _wrap_inline_choices(content: str) -> str:
         return content
 
     # 自右向左替换，避免偏移污染
-    out = content
+    out = protected
     for s, e, r in sorted(replacements, key=lambda x: x[0], reverse=True):
         out = out[:s] + r + out[e:]
-    return out
+    return _restore_math(out, holes)
 
 
 def normalize_choice_options_to_latex(content: str) -> str:

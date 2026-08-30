@@ -2437,6 +2437,31 @@ let bankQuestionsRetryTimer = null;
         // ⚠️ 项目约定禁用正则后行断言(lookbehind)，故以「前导字符捕获组」替代 Python
         // 版本的 (?<![\w（(])：由 group(1) 吃掉前置字符，实际起点为 index + group(1).length。
         // ------------------------------------------------------------------
+        // 数学模式保护：扫描选项前，先把 $...$ / $$...$$ / \(...\) / \[...\] / 数学环境
+        // 整体替换为占位符，避免公式内 (a+b)(c+d) 等被 OPTION_START 误判为选项 A/B/C/D。
+        // 占位符仅含私有区字符 + 数字，不含「字母紧邻 .、)）」结构，故不会触发选项识别；
+        // 扫描结束后再原样还原（与后端 mathbank/latex_normalize.py 保持同一套语义）。
+        function _protectMath(text) {
+            var holes = [];
+            function stash(m) {
+                holes.push(m);
+                return '\uE000' + (holes.length - 1) + '\uE001';
+            }
+            // $$...$$ 必须排在 $...$ 之前；再处理 \[...\] 与 \(...\)
+            var delimRe = /\$\$([\s\S]*?)\$\$|\$([^$\n]*?)\$|\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)/g;
+            text = text.replace(delimRe, stash);
+            var envRe = /\\begin\{(equation|equation\*|align|align\*|gather|gather\*|multline|multline\*|flalign|flalign\*|cases|matrix|pmatrix|bmatrix|vmatrix|Vmatrix|smallmatrix|array|split|aligned|gathered|displaymath|math|eqnarray|eqnarray\*)\}([\s\S]*?)\\end\{\1\}/g;
+            text = text.replace(envRe, stash);
+            return { text: text, holes: holes };
+        }
+
+        function _restoreMath(text, holes) {
+            return text.replace(/\uE000(\d+)\uE001/g, function (m, n) {
+                var i = parseInt(n, 10);
+                return (i >= 0 && i < holes.length) ? holes[i] : m;
+            });
+        }
+
         function _choicesLetterOf(marker) {
             var m = String(marker).match(/[A-Ea-e]/);
             return m ? m[0].toUpperCase() : '';
@@ -2465,9 +2490,14 @@ let bankQuestionsRetryTimer = null;
 
             if (typeof text !== 'string' || !text) return text;
 
+            // 扫描前先隐藏数学模式（$...$/$$...$$/\(...\)/\[...\]/数学环境），避免公式内 (a+b) 等被误判为选项。
+            // 占位符不含「字母紧邻 .、)）」结构，故不会触发选项识别；扫描结束后再原样还原。
+            var _ncProt = _protectMath(text);
+            var work = _ncProt.text;
+
             // 已有 choices 环境：只清理 \item 内残留的显式 A./B. 标号（避免与自动编号重复）
-            if (text.indexOf('\\begin{choices}') !== -1) {
-                return text.replace(CHOICES_ENV_RE, function (match, inner) {
+            if (work.indexOf('\\begin{choices}') !== -1) {
+                return _restoreMath(work.replace(CHOICES_ENV_RE, function (match, inner) {
                     var items = inner.split(/\\item/)
                         .map(function (s) { return s.trim(); })
                         .filter(function (s) { return s.length > 0; })
@@ -2476,10 +2506,10 @@ let bankQuestionsRetryTimer = null;
                     return '\\begin{choices}\n'
                         + items.map(function (it) { return '\\item ' + it; }).join('\n')
                         + '\n\\end{choices}';
-                });
+                }), _ncProt.holes);
             }
 
-            var matches = _scanOptionStarts(text, OPTION_START_RE);
+            var matches = _scanOptionStarts(work, OPTION_START_RE);
             if (matches.length < 2) return text;
 
             // 把「字母递增 1」的连续匹配聚合成选项段
@@ -2502,18 +2532,18 @@ let bankQuestionsRetryTimer = null;
                 if (run.length < 2) continue;
                 var start = run[0].start;
                 var last = run[run.length - 1];
-                var tail = text.slice(last.end);
+                var tail = work.slice(last.end);
                 var tm = TRAILING_MARKERS_RE.exec(tail);
                 var bodyEnd, consumeEnd;
                 if (tm) {
                     // 选项正文截止到「答案/解析」标记之前，标记及其后内容属答案区，一并丢弃
                     bodyEnd = last.end + tm.index;
-                    consumeEnd = text.length;
+                    consumeEnd = work.length;
                 } else {
                     bodyEnd = last.end + tail.length;
                     consumeEnd = bodyEnd;
                 }
-                var block = text.slice(start, bodyEnd);
+                var block = work.slice(start, bodyEnd);
                 var subs = _scanOptionStarts(block, OPTION_START_RE);
                 var items = [];
                 for (var s = 0; s < subs.length; s++) {
@@ -2535,11 +2565,11 @@ let bankQuestionsRetryTimer = null;
             if (!replacements.length) return text;
             // 自右向左替换，避免偏移污染
             replacements.sort(function (a, b) { return b.start - a.start; });
-            var out = text;
+            var out = work;
             for (var k = 0; k < replacements.length; k++) {
                 out = out.slice(0, replacements[k].start) + replacements[k].text + out.slice(replacements[k].end);
             }
-            return out;
+            return _restoreMath(out, _ncProt.holes);
         }
         window.normalizeChoiceOptions = normalizeChoiceOptions;
 
