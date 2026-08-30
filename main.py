@@ -41,7 +41,11 @@ from mathbank.task_manager import (
     TaskManager,
     TaskQueueFull,
 )
-from mathbank.docx_helper import extract_docx_markdown
+from mathbank.docx_helper import (
+    extract_docx_markdown,
+    compress_docx_image_links,
+    decompress_docx_image_links_in_questions,
+)
 from mathbank.content_locks import lock_visible_math, restore_visible_math
 from mathbank.tex_helper import (
     MAX_TEX_BYTES,
@@ -3345,8 +3349,9 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
         source = re.sub(r"\s+", "", source)
 
         # 学段 / 章节：校验必须存在于 curriculum，否则回退到第一个可用学段/章节
-        compulsory = result.get("compulsory", "")
-        chapter = result.get("chapter", "")
+        # 兼容模型可能输出的旧字段名 category_compulsory / category_chapter
+        compulsory = result.get("compulsory") or result.get("category_compulsory") or ""
+        chapter = result.get("chapter") or result.get("category_chapter") or ""
         is_fallback = False
         raw_recommendation = ""
         if not (compulsory in curr and chapter in curr.get(compulsory, {})):
@@ -3558,7 +3563,7 @@ def _extract_questions_list(parsed_data):
         raise Exception("AI 返回的 JSON 格式不正确，期望是一个数组或包含 questions 列表的对象。")
 
 
-def _parse_single_chunk(user_content, decision, system_instructions, max_output_tokens, timeout, chunk_markdown=None):
+def _parse_single_chunk(user_content, decision, system_instructions, max_output_tokens, timeout, paid_timeout=300, chunk_markdown=None):
     """解析单个文本块；含免费模型超时/连接失败自动回退付费（回退会改写 decision 供后续块复用）。"""
     provider = decision["provider"]
     api_key = provider.api_key
@@ -3569,8 +3574,11 @@ def _parse_single_chunk(user_content, decision, system_instructions, max_output_
         raise ValueError(f"未配置对应的 API Key ({provider.credential_label})，无法智能拆解试卷！请在工作台右上角设置面板进行配置。")
 
     payload = _build_parse_payload(provider, model_name, system_instructions, user_content, max_output_tokens)
+    # 主调用超时：免费模型用短超时（FREE_PARSE_TIMEOUT）以便及时回退；
+    # 纯付费场景（无免费模型）则直接给足付费超时（PAID_PARSE_TIMEOUT）。
+    primary_timeout = paid_timeout if not decision.get("used_free") else timeout
     try:
-        response = post_chat_completion(provider, payload, timeout=timeout, provider_name=provider_name)
+        response = post_chat_completion(provider, payload, timeout=primary_timeout, provider_name=provider_name)
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
         paid_provider = decision.get("paid_provider")
         if decision.get("used_free") and paid_provider is not None:
@@ -3585,7 +3593,7 @@ def _parse_single_chunk(user_content, decision, system_instructions, max_output_
             model_name = provider.model_name
             provider_name = provider.provider_label
             payload = _build_parse_payload(provider, model_name, system_instructions, user_content, max_output_tokens)
-            response = post_chat_completion(provider, payload, timeout=timeout, provider_name=provider_name)
+            response = post_chat_completion(provider, payload, timeout=paid_timeout, provider_name=provider_name)
             decision["used_free"] = False
             decision["reason"] = (decision.get("reason") or "") + "；免费模型超时已自动回退付费"
         else:
@@ -3597,37 +3605,197 @@ def _parse_single_chunk(user_content, decision, system_instructions, max_output_
     return _extract_questions_list(parsed_data)
 
 
-def _parse_chunks_to_questions(document_text, decision, system_instructions, generate_answers_bool, separated_mode=False):
+# 多块拆题时附带给下一段的「上一段末尾」字符数。用于让模型判断本段开头是否是
+# 上一道题的延续（跨页/跨块题目兜底）。过大浪费 token，过小看不出上下文。
+CHUNK_CONTEXT_CHARS = 800
+
+
+def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lock: bool = True) -> str:
+    """多块拆题时，除首块外后续块使用的精简系统提示（Plan C）。
+
+    完整系统提示约 3.7K 字，多块文档每块重复发送浪费明显。后续块改用本精简版，
+    仅保留输出 JSON 结构、字段枚举与「公式必须原样保留、不得展开」等关键约束，
+    整体下降约 75% 系统提示 token，同时不影响首块质量。
+    formula_lock 必须与首块一致：DOCX/TeX 锁定路径用 True（保留 [[Mn]] 协议），
+    PDF 未锁定路径用 False（要求用 $...$ 主动包裹，禁止 [[Mn]]）。
+    """
+    base = (
+        "你是资深高中数学教研专家。正在解析一份多段试卷的其中一段（首段已给出完整规则，"
+        "此处仅给精简提醒）。必须且只能输出严格合法 JSON，字段为 questions 数组，每条题目含：\n"
+        "- content：纯净题干（去掉原卷大题号，保留 LaTeX 与图片占位符 [[IMGn]]"
+        + ("、公式占位符 [[Mn]]" if formula_lock else "")
+        + "）\n"
+        "- answer_markdown：答案与解析\n"
+        "- question_type：single_choice / multi_choice / fill_in_blank / detailed_answer\n"
+        "- compulsory、chapter：学段 / 章节名称\n"
+        "- difficulty：easy_error / normal / challenge / qiangji\n"
+        "- source：出处信息或 null\n"
+        "- knowledge_list：字符串数组；solve_method：单个字符串；related_chapters：字符串数组；tags：字符串数组\n"
+        "- referenced_images：字符串数组（把 [[IMGn]] 列入）\n"
+        "- answer_belongs_to：仅分离模式需要，否则 null\n"
+        "【关键保留规则】\n"
+    )
+    if formula_lock:
+        formula_section = (
+            "1. 公式：输入中形如 `<mathbank-math id=\"M1\">$...$</mathbank-math>` 的公式，输出时必须原样替换为且仅一次 `[[M1]]`，绝不许输出公式本身的 LaTeX、绝不许展开 `[[M1]]`。\n"
+        )
+    else:
+        formula_section = (
+            "1. 公式：本卷公式未做锁定标记，你必须在输出时把每一个数学公式/符号/表达式用 `$...$`（行内）或 `$$...$$`（独立）完整包裹，原样保留公式本体与 `$` 定界符，绝不许丢弃 `$`，绝不许使用 `[[Mn]]` 占位符。\n"
+        )
+    base = base + formula_section + (
+        "2. 图片：输入中的 `[[IMGn]]` 必须原样保留，并列入 referenced_images，不得展开为 URL 或改写。\n"
+        "3. 选择题选项统一 `\\begin{choices}\\item...\\end{choices}` 且每项独立成行；填空题用 `\\fillin`；加粗用 `\\textbf{}`（禁双星号）；严禁用单个 `*` 把几何顶点/变量做成 Markdown 斜体（如 `*X*`），一律用 `$...$` 包裹（如 `$X$`）。\n"
+        "4. 完整保留 tabular/array/matrix/cases/aligned 等数学与表格结构。\n"
+        "5. 字符串内换行用 `\\n`，LaTeX 反斜杠写成 `\\\\`；不要包裹 ```json 代码块。只解析本段内的题目。\n"
+        "6. 输入中若含 `<上文片段>...</上文片段>`，它只是上一段的末尾，唯一用途是帮你判断本段开头"
+        "是否是上一道题的延续（例如上一段末尾停在「（1）」、本段开头是「（2）」，说明它们同属一道大题）。"
+        "严禁把上文片段中的任何内容输出成题目，也严禁据此凭空补全；只有 `<本段正文>` 内的内容才是你要解析的题目。\n"
+    )
+    if extra_system_note:
+        base = base + extra_system_note
+    return base
+
+
+# ---------------------------------------------------------------------------
+# 落库前净化：把模型用 Markdown 单星号斜体包裹的变量（*X*、*ABC*、*x₀* 等）
+# 还原为 LaTeX 数学模式 $...$，并修正 PDF 提取产生的 cp1252 误码字符。
+# 提示词已加护栏禁止单星号斜体（治本），本函数作为兜底（兜住历史与偶发）。
+# 注意：¥（日元）在中文数学应用题里可能合法出现，故实时净化不含 ¥→∞，
+#       仅一次性存量清洗脚本对确认的脏题单独处理。
+# ---------------------------------------------------------------------------
+_GARBLE_MAP_LIVE = {
+    "\u00a3": "\u2264",   # £ → ≤
+    "\u00b4": "\u00d7",   # ´ → ×
+    "\u00ce": "\u2208",   # Î → ∈
+    "\u00a2": "\u2032",   # ¢ → ′ (prime)
+    "\u00ae": "\u2192",   # ® → →
+}
+
+_MATHY_INNER = (
+    r"[A-Za-z0-9"
+    r"α-ωΑ-Ω"                                   # 希腊字母
+    r"₀₁₂₃₄₅₆₇₈₉"                              # 下标数字
+    r"⁰¹²³⁴⁵⁶⁷⁸⁹"                              # 上标数字
+    r"¼½¾"                                      # 分数
+    r"±×÷·′″°∞≤≥≠≈≡∈∉∪∩⊂⊆∑∏√∂∫"               # 数学符号
+    r"\s\^\_\+\-\*\/\(\)\[\]\.\,\;\:\!\?\=]"    # 运算符/标点/空白
+)
+_MATHY_PATTERN = re.compile(r"^" + _MATHY_INNER + r"*$")
+_STAR_RE = re.compile(r"(?<!\*)\*([^*$\\\n]+)\*(?!\*)")
+
+
+def _clean_star_emphasis_in_text(text, garble_map):
+    """把文本中的 *变量* 斜体还原为 $变量$，并修正误码字符（仅处理 $...$ 数学模式之外的部分）。"""
+    if not text:
+        return text
+    for bad, good in garble_map.items():
+        if bad in text:
+            text = text.replace(bad, good)
+    if "*" not in text:
+        return text
+    # 仅在「非数学模式」（$...$ 之外）处理单星号斜体，避免破坏已有公式。
+    parts = text.split("$")
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            out.append(part)
+            continue
+
+        def _repl(m):
+            inner = m.group(1).strip()
+            if inner and _MATHY_PATTERN.match(inner):
+                return "$" + inner + "$"
+            return m.group(0)
+
+        out.append(_STAR_RE.sub(_repl, part))
+    return "$".join(out)
+
+
+def sanitize_question_markdown(question, garble_map=_GARBLE_MAP_LIVE):
+    """落库前净化单道题的 content / answer_markdown：修正误码 + 单星号斜体转数学模式。"""
+    for field in ("content", "answer_markdown"):
+        val = question.get(field)
+        if isinstance(val, str) and ("*" in val or any(b in val for b in garble_map)):
+            new_val = _clean_star_emphasis_in_text(val, garble_map)
+            if new_val != val:
+                question[field] = new_val
+    return question
+
+
+def _report_parse_progress(progress_callback, done, total):
+    """向解析任务回报分块进度。回调本身出错不得影响解析主流程。"""
+
+    if not progress_callback:
+        return
+    try:
+        progress_callback(done, total)
+    except Exception:
+        pass
+
+
+def _parse_chunks_to_questions(document_text, decision, system_instructions, generate_answers_bool, separated_mode=False, progress_callback=None, extra_system_note: str = "", formula_lock: bool = True):
     """将（可能超长的）试卷文本按题号边界分块，逐块调用 LLM 解析，合并去重。
 
     彻底解决「超长文档 → AI 输出超过 max_tokens 被截断 → JSON 解析失败 → 拆解失败」。
     单块失败不会拖垮整卷，会跳过并继续；所有块都失败才抛错。
+
+    progress_callback: 可选回调 (done, total)，每完成/跳过一段即调用一次，
+    供解析任务刷新进度，避免长卷拆解期间前端因长时间无变化而误判超时。
     """
     max_output_tokens = 65536
-    PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟
+    FREE_PARSE_TIMEOUT = 90   # 免费模型（SiliconFlow Qwen3-VL-8B-Instruct）对复杂数学题易 ReadTimeout；
+                             # 正常返回通常 <60s，90s 足够其完成，超时即视为卡死立即回退付费
+    PAID_PARSE_TIMEOUT = 300 # 付费回退（deepseek-v4-flash）给足 5 分钟，避免复杂大题二次超时丢块
 
     chunks = split_markdown_into_question_chunks(document_text)
     total = len(chunks)
     if total <= 1:
-        return _parse_single_chunk(
+        result = _parse_single_chunk(
             chunks[0] if chunks else document_text,
-            decision, system_instructions, max_output_tokens, PARSE_TIMEOUT,
+            decision, system_instructions, max_output_tokens, FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT,
         )
+        result = [sanitize_question_markdown(q) for q in result]
+        _report_parse_progress(progress_callback, 1, 1)
+        return result
 
     print(f"[Parse Chunking] 文档较长，已切分为 {total} 段逐段解析。")
+    # Plan C：首块用完整系统提示；后续块改用精简提示，避免每块重复 ~3.7K 字系统提示。
+    condensed_system = _build_condensed_parse_system_prompt(extra_system_note, formula_lock)
     all_questions = []
     for idx, chunk in enumerate(chunks):
+        # 跨页/跨块兜底：把上一段末尾作为「上文片段」附上，让模型能判断本段开头
+        # 是否是上一道题的延续（如上一块末尾停在「（1）」、本块开头是「（2）」），
+        # 避免把半道题当成完整题输出。chunk_markdown 仍传原始 chunk，保持诊断一致。
+        context_block = ""
+        if idx > 0:
+            prev = chunks[idx - 1]
+            tail = prev[-CHUNK_CONTEXT_CHARS:] if len(prev) > CHUNK_CONTEXT_CHARS else prev
+            if tail.strip():
+                context_block = (
+                    "<上文片段 仅用于判断题目的开头是否完整，严禁把其中的内容作为题目输出>\n"
+                    f"{tail}\n"
+                    "</上文片段>\n\n"
+                )
         user_content = (
             f"[这是试卷的第 {idx + 1}/{total} 段，请只解析本段内的题目，"
-            f"忽略其它段落；返回格式仍为 {{\"questions\": [...]}}。]\n\n{chunk}"
+            f"忽略其它段落；返回格式仍为 {{\"questions\": [...]}}。]\n\n"
+            f"{context_block}"
+            f"<本段正文 这才是你要解析的内容>\n{chunk}\n</本段正文>"
         )
+        chunk_system = system_instructions if idx == 0 else condensed_system
         try:
-            qs = _parse_single_chunk(user_content, decision, system_instructions, max_output_tokens, PARSE_TIMEOUT, chunk_markdown=chunk)
+            qs = _parse_single_chunk(user_content, decision, chunk_system, max_output_tokens, FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT, chunk_markdown=chunk)
+            for q in qs:
+                sanitize_question_markdown(q)
             all_questions.extend(qs)
             print(f"[Parse Chunking] 第 {idx + 1}/{total} 段解析完成，本段 {len(qs)} 题。")
         except Exception as exc:
             print(f"[Parse Chunking] 第 {idx + 1}/{total} 段解析失败，跳过该段：{type(exc).__name__}: {exc}")
             continue
+        finally:
+            # 放在 finally 中：即使该段走 continue 跳过，进度也照常回报。
+            _report_parse_progress(progress_callback, idx + 1, total)
 
     if not all_questions:
         raise Exception("所有分块均解析失败，无法拆解试卷。")
@@ -3637,9 +3805,15 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
 def parse_paper_text_internal(
     latex_content: str,
     generate_answers_bool: bool,
-    separated_mode: bool = False
+    separated_mode: bool = False,
+    progress_callback=None,
+    extra_system_note: str = "",
+    formula_lock: bool = True,
 ) -> list:
-    """内部通用函数：调用选定的 LLM 接口，将 LaTeX 试卷内容解析拆分为结构化 JSON 卡片"""
+    """内部通用函数：调用选定的 LLM 接口，将 LaTeX 试卷内容解析拆分为结构化 JSON 卡片
+
+    progress_callback: 可选回调 (done, total)，逐段回报分块解析进度，供调用方刷新任务进度。
+    """
     decision = decide_parse_model(latex_content)
     provider = decision["provider"]
     api_key = provider.api_key
@@ -3651,14 +3825,19 @@ def parse_paper_text_internal(
         raise ValueError(f"未配置对应的 API Key ({provider.credential_label})，无法智能拆解试卷！请在工作台右上角设置面板进行配置。")
 
     system_instructions = build_pdf_parse_system_prompt(
-        get_current_curriculum(), generate_answers_bool, separated_mode=separated_mode
+        get_current_curriculum(), generate_answers_bool, separated_mode=separated_mode,
+        formula_lock=formula_lock,
     )
+    if extra_system_note:
+        system_instructions = system_instructions + extra_system_note
 
     max_output_tokens = 65536
     PARSE_TIMEOUT = 300  # 免费模型对大文档响应较慢，放宽到 5 分钟（保留以备调用方参考）
 
     parsed_questions = _parse_chunks_to_questions(
-        latex_content, decision, system_instructions, generate_answers_bool, separated_mode
+        latex_content, decision, system_instructions, generate_answers_bool, separated_mode,
+        progress_callback=progress_callback, extra_system_note=extra_system_note,
+        formula_lock=formula_lock,
     )
 
     # 强制进行静默净化：若未勾选自动生成答案，则对于没有带有 [EXTRACTED_ORIGINAL] 的解析和解答，将其强行抹平为空。
@@ -3723,7 +3902,8 @@ def ai_parse_paper(
         system_instructions = build_import_parse_system_prompt(get_current_curriculum())
 
         parsed_questions = _parse_chunks_to_questions(
-            model_source, decision, system_instructions, generate_answers_bool, False
+            model_source, decision, system_instructions, generate_answers_bool, False,
+            formula_lock=True,
         )
         # 回退后更新实际使用的模型名（供 eval_decision 准确上报）
         model_name = decision["provider"].model_name
@@ -4250,9 +4430,12 @@ def process_ocr_illustrations(text: str) -> str:
 
 
 def find_source_page_by_overlap(q_text: str, ocr_results: list) -> int:
-    """利用 3-shingle（三字符切片）特征重合度，计算题目最可能所属的 PDF 原始物理页码"""
+    """利用 3-shingle（三字符切片）特征重合度，计算题目最可能所属的 PDF 原始物理页码（本地索引）。
+
+    返回本地页索引（0-based，与 ocr_results / page_images 顺序一致）；无匹配时返回 -1。
+    """
     if not q_text or not ocr_results:
-        return 0
+        return -1
     
     import re
     def clean_for_compare(t: str) -> str:
@@ -4261,10 +4444,10 @@ def find_source_page_by_overlap(q_text: str, ocr_results: list) -> int:
         
     cleaned_q = clean_for_compare(q_text)
     if not cleaned_q:
-        return 0
+        return -1
         
-    best_page = 0
-    max_overlap = -1
+    best_page = -1
+    max_overlap = 0
     
     for idx, page_text in enumerate(ocr_results):
         if not page_text:
@@ -4288,6 +4471,23 @@ def find_source_page_by_overlap(q_text: str, ocr_results: list) -> int:
             best_page = idx
             
     return best_page
+
+
+def assign_source_pages_by_overlap(questions: list, page_texts: list) -> None:
+    """为每道题写入 source_page（0-based 本地页索引），使前端“手动截图”能直接跳到该题所在页。
+
+    基于 find_source_page_by_overlap 的 3-shingle 文本重合度匹配；page_texts 的顺序必须与
+    前端展示的 page_images 严格一致（PDF = 目标页顺序；Word = 转 PDF 后的物理页顺序）。
+    """
+    if not page_texts:
+        return
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        sp = find_source_page_by_overlap(q.get("content", "") or "", page_texts)
+        if sp >= 0:
+            q["source_page"] = sp
+
 
 @app.post("/api/paper/ai-select")
 def ai_select_paper(payload: dict, db: Session = Depends(get_db)):
@@ -4786,10 +4986,11 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
         for q in parsed_questions:
             if not q.get("image_paths"):
                 p_source = find_source_page_by_overlap(q.get("content", ""), ocr_results)
-                crops = page_crops.get(p_source, [])
-                if crops:
-                    q["image_paths"] = crops
-                    print(f"[PDF PostProcess Failsafe] 成功通过重合度，将第 {p_source + 1} 页的插图 {crops} 兜底分配给题目: {q.get('content')[:40]}...")
+                if p_source >= 0:
+                    crops = page_crops.get(p_source, [])
+                    if crops:
+                        q["image_paths"] = crops
+                        print(f"[PDF PostProcess Failsafe] 成功通过重合度，将第 {p_source + 1} 页的插图 {crops} 兜底分配给题目: {q.get('content')[:40]}...")
 
     # 6. 从 content 题干中静默移除已经绑定至 image_paths 内部的占位图片语法，以避免重叠渲染
     for q in parsed_questions:
@@ -5030,22 +5231,44 @@ def run_pdf_parsing_task(
         auto_title = extract_title_from_latex(full_latex_content)
         if auto_title:
             paper_title = auto_title
+        # 与 Word 链路一致：逐段回报进度，避免长卷拆解期间前端误判超时。
+        def _report_pdf_split_progress(done, total):
+            ratio = (done / total) if total else 1.0
+            DOCUMENT_TASKS.update(
+                task_id,
+                status="ai_splitting",
+                progress=80 + int(10 * ratio),
+                log=f"正在调用大模型拆解题目（第 {done}/{total} 段）...",
+            )
+
         parsed_questions = parse_paper_text_internal(
             full_latex_content,
             generate_answers,
             separated_mode=separated_mode,
+            progress_callback=_report_pdf_split_progress,
+            formula_lock=False,
         )
         DOCUMENT_TASKS.check_cancelled(task_id)
         current_step = "post_process"
         DOCUMENT_TASKS.step_start(task_id, current_step)
+        DOCUMENT_TASKS.update(
+            task_id,
+            status="post_processing",
+            progress=92,
+            log="题目已拆分完成，正在整理卡片与插图映射...",
+        )
         final_questions = post_process_pdf_parsed_questions(
             parsed_questions,
             paper_title,
             task_id,
             ocr_results,
         )
+        # 方案B：按文本重合度把每题定位到原卷物理页，写 source_page 供手动截图直接跳转
+        assign_source_pages_by_overlap(final_questions, ocr_results)
         DOCUMENT_TASKS.check_cancelled(task_id)
         DOCUMENT_TASKS.step_complete_all(task_id)
+        # 同 Word 链路：显式改写局部变量，避免收尾异常被误报为 post_process 失败。
+        current_step = "finalize"
         DOCUMENT_TASKS.complete(
             task_id,
             log="完成！已为您提取并拆分全部题目卡片。",
@@ -5309,6 +5532,10 @@ def run_docx_parsing_task(
 
         full_markdown_content = docx_res["markdown"]
         img_count = docx_res.get("image_count", 0)
+
+        # Plan A：把插图长链接压成 [[IMGn]] 短占位符，拆题完成后再还原为真实链接，
+        # 避免「模型看不到图却被强制保留长链接」造成的输入/输出双向 token 浪费。
+        compressed_markdown_content, docx_img_map = compress_docx_image_links(full_markdown_content)
         diagnostics = docx_res.get("diagnostics", {})
         converted_count = diagnostics.get("omml_converted", 0) + diagnostics.get("mtef_converted", 0)
         review_count = diagnostics.get("review_required", 0)
@@ -5337,26 +5564,80 @@ def run_docx_parsing_task(
             paper_title = auto_title
 
         # Keep every formula visible in-place for the model's mathematical
-        # understanding, while assigning an immutable ID. The model returns
-        # the ID and the server restores the exact Word-extracted source.
+        # understanding, while assigning an immutable (compact) ID. The model
+        # returns the ID and the server restores the exact Word-extracted source.
         locked_markdown_content, math_locks = lock_visible_math(
-            full_markdown_content,
+            compressed_markdown_content,
             task_id.replace("-", "")[:16],
         )
         diagnostics["math_locks_created"] = len(math_locks)
+
+        # Plan A：仅当文档含插图时，把图片占位符协议注入系统提示（PDF/TEX 路径不含此说明）。
+        docx_image_note = ""
+        if docx_img_map:
+            docx_image_note = (
+                "\n【Word 文档图片协议】:\n"
+                "本文 Word 试卷的图片在输入中以 [[IMG1]]、[[IMG2]]… 这样的占位符标注"
+                "（已替代原始长链接以节省篇幅，原图并未丢失）。你必须原样保留这些占位符："
+                "题干里图片出现的位置就写 [[IMGn]]，并且把对应的 [[IMGn]] 也列入该题目的 "
+                "referenced_images 数组。系统会在拆题后自动把 [[IMGn]] 还原为真实图片链接，"
+                "你切勿将其展开为 URL、也不要改写成其它形式。\n"
+            )
         DOCUMENT_TASKS.check_cancelled(task_id)
-        parsed_questions = parse_paper_text_internal(locked_markdown_content, generate_answers, separated_mode=separated_mode)
+
+        # 长卷（如含数千个 MathType 公式的教辅）拆解可能持续十分钟以上。
+        # 逐段回报进度，避免前端在整个 ai_split 阶段看不到任何变化而误判超时。
+        def _report_docx_split_progress(done, total):
+            ratio = (done / total) if total else 1.0
+            DOCUMENT_TASKS.update(
+                task_id,
+                status="ai_splitting",
+                progress=70 + int(18 * ratio),
+                log=f"正在调用教研模型拆题（第 {done}/{total} 段）...",
+                document_type="docx",
+            )
+
+        parsed_questions = parse_paper_text_internal(
+            locked_markdown_content,
+            generate_answers,
+            separated_mode=separated_mode,
+            progress_callback=_report_docx_split_progress,
+            extra_system_note=docx_image_note,
+            formula_lock=True,
+        )
         lock_report = restore_visible_math(parsed_questions, math_locks, strict=False)
         diagnostics.update(lock_report)
         if "warnings" in lock_report:
             diagnostics.setdefault("warnings", []).extend(lock_report["warnings"])
 
+        # Plan A：把 [[IMGn]] 占位符还原为真实图片链接，并校验是否丢失。
+        if docx_img_map:
+            img_warnings = decompress_docx_image_links_in_questions(parsed_questions, docx_img_map)
+            if img_warnings:
+                diagnostics.setdefault("warnings", []).extend(img_warnings)
+
         DOCUMENT_TASKS.check_cancelled(task_id)
         current_step = "post_process"
         DOCUMENT_TASKS.step_start(task_id, current_step)
+        DOCUMENT_TASKS.update(
+            task_id,
+            status="post_processing",
+            progress=90,
+            log="题目已拆分完成，正在整理卡片、图片与知识点标注...",
+            document_type="docx",
+        )
         final_questions = post_process_pdf_parsed_questions(parsed_questions, paper_title, task_id, [full_markdown_content])
         DOCUMENT_TASKS.check_cancelled(task_id)
         DOCUMENT_TASKS.step_complete_all(task_id)
+        # step_complete_all 只清状态字典里的 current_step，不会改这里的局部变量。
+        # 显式改写，避免后续收尾环节出错时被误报成「post_process 步骤失败」。
+        current_step = "finalize"
+        DOCUMENT_TASKS.update(
+            task_id,
+            progress=95,
+            log="正在生成原卷预览图并做公式保真校验...",
+            document_type="docx",
+        )
 
         # 方案C：标记公式可能异常的单题（供前端卡片红色警告）
         from mathbank.docx_helper import detect_mathtype_garbage_residual
@@ -5390,6 +5671,15 @@ def run_docx_parsing_task(
                 pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.pdf"
                 if pdf_path.exists() and pdf_path.stat().st_size > 0:
                     page_images = _render_pdf_bytes_to_page_images(pdf_path.read_bytes(), task_id, temp_assets)
+                    # 方案C：逐页提取转 PDF 后的物理文本，按文本重合度把每题定位到对应页，
+                    # 写 source_page 供手动截图直接跳到本题所在页（page_images 与文本页序一致）。
+                    try:
+                        import fitz as _fitz
+                        with _fitz.open(pdf_path) as _doc:
+                            _docx_page_texts = [_doc.load_page(i).get_text() for i in range(len(_doc))]
+                        assign_source_pages_by_overlap(final_questions, _docx_page_texts)
+                    except Exception as _e:
+                        print(f"[DOCX source_page] 页码映射失败（不影响入库）: {_e}")
                 src_docx_path.unlink(missing_ok=True)
                 pdf_path.unlink(missing_ok=True)
             else:

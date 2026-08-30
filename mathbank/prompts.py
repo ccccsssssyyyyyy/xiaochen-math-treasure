@@ -130,7 +130,7 @@ def build_ai_solve_prompts(
         "2. 逻辑严密与极简凝练：推导过程必须逻辑完备、因果严谨（写明公理定理前提，不盲目跳步），但语言精练直奔得分点，拒绝任何多余的口水话或过度解释。\n"
         f"3. 零多余前言尾注：回答必须干净地从结构化板块开始，第一个字符必须是“{first_block_header}”，严禁包含任何问候语、前言、导语或尾注总结。\n"
         "【LaTeX 与段落换行规范】\n"
-        "1. 必须使用标准 LaTeX 语法书写公式（行内 $...$，行间 $$\\n...\\n$$）。绝对禁止使用 Markdown 的 ** 双星号加粗语法，标题必须使用 LaTeX 粗体 `\\\\textbf{...}`。\n"
+        "1. 必须使用标准 LaTeX 语法书写公式（行内 $...$，行间 $$\\n...\\n$$）。绝对禁止使用 Markdown 的 ** 双星号加粗语法，也严禁用单个 `*` 把几何顶点/变量做成 Markdown 斜体（一律用 `$...$` 包裹），标题必须使用 LaTeX 粗体 `\\\\textbf{...}`。\n"
         "2. 物理换行与空行规范 (极重要)：在分步推导、证明步骤（如“解：”、“(1) 证明：”、“因为”、“所以”、“故”）、不同小问以及标题与段落之间，必须使用空行/双回车（\\n\\n）分隔！单回车无法实现物理换行。\n"
         f"{format_rules}\n"
         "请直接输出上述结构化板块。"
@@ -180,7 +180,7 @@ def build_paper_selection_prompts(
     return system_prompt, user_content
 
 
-def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False) -> str:
+def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False, formula_lock: bool = True) -> str:
     curriculum_text = build_curriculum_text(curriculum)
     
     if generate_answers_bool:
@@ -196,21 +196,37 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
             "- 若原试卷无答案，必须将 `answer_markdown` 设为空字符串 \"\"，绝对不要现场推导或编造答案！"
         )
 
+    # 公式协议分支：
+    #  - DOCX / TeX 路径在调用 parse 前已用 lock_visible_math 将公式锁定为
+    #    <mathbank-math id="M1"> 标记，模型须输出 [[M1]] 占位符，服务端再还原；
+    #  - PDF 路径不锁定公式（PDF 提取无锁定步骤）。若仍要求输出 [[M1]] 占位符，
+    #    模型会把未锁定的公式 $ 误删导致公式丢失，故 PDF 须改为「主动用 $...$ 包裹」。
+    if formula_lock:
+        formula_lock_section = (
+            "2.1 公式锁定协议（极其重要，漏掉会导致整卷导入失败）：输入中所有公式都被包裹为 `<mathbank-math id=\"M1\">完整公式</mathbank-math>`（编号 M1、M2… 递增），标签内的公式仅用于你理解题意，是只读来源。你在输出 `content` 和 `answer_markdown` 时，必须将每个 `<mathbank-math id=\"M1\">$...$</mathbank-math>` 原样替换为且仅替换为一次对应的 `[[M1]]`，禁止输出公式本身的 LaTeX、禁止删除该标记、禁止改名、禁止把同一 id 放进多个题目。\n"
+            "2.1.1 示例：输入题干为\"全集 <mathbank-math id=\"M1\">$U=\\{1,2\\}$</mathbank-math> 已知...\"，则输出 `content` 必须是\"全集 [[M1]] 已知...\"，系统会自动把 [[M1]] 还原为原公式。你绝不能输出 $U=\\{1,2\\}$。\n"
+            "2.1.2 即使你觉得某个公式很简单，也绝不许把 `[[M1]]` 展开成 LaTeX；必须保持 `[[Mn]]` 形式，否则公式将丢失或串题。\n"
+        )
+    else:
+        formula_lock_section = (
+            "2.1 公式直接包裹协议（极其重要，漏掉会导致公式丢失）：本卷（PDF 提取）公式**未做锁定标记**，原始公式以纯文本/Unicode 或零散 `$...$` 出现。你必须在输出 `content` 和 `answer_markdown` 时，把**每一个**数学公式、符号、变量与表达式用 LaTeX 数学模式完整包裹——行内公式用 `$...$`，独立成行的公式用 `$$...$$`。\n"
+            "2.1.1 必须原样保留公式本体（含 `$` 定界符），绝对禁止丢弃 `$`、禁止把公式写成纯中文/纯文本、禁止用 `[[Mn]]` 占位符（本卷无锁定标记，输出中不得出现任何 `[[Mn]]`）。\n"
+            "2.1.2 示例：输入题干为\"全集 U={1,2} 已知...\"，则输出 `content` 必须是\"全集 $U=\\{1,2\\}$ 已知...\"，公式必须带 `$` 包裹，且不得出现 `[[M1]]` 这类占位符。\n"
+        )
+
     system_instructions = (
         "你是一位资深高中数学教研专家与 LaTeX 排版大师。请阅读输入的试卷源码，智能切分为题目列表 JSON。\n\n"
         "【可选教材范围与章节】:\n"
         f"{curriculum_text}\n"
         "【核心拆题与分类规范】:\n"
-        "1. 字段分类：挑选精确匹配的学段 `category_compulsory` 与章节 `category_chapter`；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
+        "1. 字段分类：挑选精确匹配的学段 `compulsory` 与章节 `chapter`；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
         "1.0 题干纯净规则（极重要）：`content` 必须是去掉原卷顺序题号后的纯净题干，严禁在开头保留如 \"16.\"、\"（16）\"、\"16、\"、\"一.\"、\"(1)\" 这类原卷大题/小题编号——这些编号由系统在组卷时统一生成，残留会导致重复编号。仅当编号后紧跟的实质内容是题干的一部分时才保留（即不要误删题干中自然出现的小问序号）。\n"
         "1.2 标签自动标注（重要）：必须为每道题额外产出 `knowledge_list`（字符串数组，列出本题涉及的**全部**细粒度知识点，如 [\"函数单调性\", \"导数应用\"]，可跨多个知识点）与 `solve_method`（单个字符串，给出本题**最贴切的核心解题方法/思想方法**，如 \"数形结合\"、\"分类讨论\"、\"换元法\"、\"待定系数法\"、\"反证法\"、\"归纳法\" 等，仅取最具代表性的一个）。\n"
         "1.3 关联章节与主题标签（融合题重要）：对跨章节的融合题，额外产出 `related_chapters`（字符串数组，列出本题**关联**的其他学段/章节/小节，格式为 \"学段 / 章节 / 小节\"，如 \"必修一 / 集合与函数概念 / 函数的基本性质\"；主分类已填的章节不必重复；单章节题给空数组 []）；以及 `tags`（字符串数组，列出本题**主题/思想方法**标签，如 [\"数形结合\", \"转化与化归\"]，可多选；单题可留空 []）。\n"
         f"1.1 {CLASSIFICATION_PRIORITY_RULE}\n"
         "2. 文字与插图忠实保留：100% 完整保留题干所有汉字，绝对禁止删除“（如图）”、“如图所示”、“如右图所示”等几何指代描述！绝对保留 Markdown/LaTeX 原有的图片链接（如 `![](/static/uploads/...)` 或 `\\includegraphics{...}`），并将其 URL/文件名提取至 `referenced_images` 数组中。如输入中出现 `[公式待核对]`、`[公式结构待核对]`、`[特殊字符待核对]` 或“公式无法安全提取”，必须原样保留标记及紧随的预览图，绝不得猜测、补写或替换公式。\n"
-        "2.1 公式锁定协议（极其重要，漏掉会导致整卷导入失败）：输入中所有公式都被包裹为 `<mathbank-math id=\"MBM_...\">完整公式</mathbank-math>`，标签内的公式仅用于你理解题意，是只读来源。你在输出 `content` 和 `answer_markdown` 时，必须将每个 `<mathbank-math id=\"MBM_XXX_0001\">$...$</mathbank-math>` 原样替换为且仅替换为一次对应的 `[[MBM_XXX_0001]]`，禁止输出公式本身的 LaTeX、禁止删除该标记、禁止改名、禁止把同一 id 放进多个题目。\n"
-        "2.1.1 示例：输入题干为\"全集 <mathbank-math id=\"MBM_DOCX_0001\">$U=\\{1,2\\}$</mathbank-math> 已知...\"，则输出 `content` 必须是\"全集 [[MBM_DOCX_0001]] 已知...\"，系统会自动把 [[MBM_DOCX_0001]] 还原为原公式。你绝不能输出 $U=\\{1,2\\}$。\n"
-        "2.1.2 即使你觉得某个公式很简单，也绝不许把 `[[MBM_...]]` 展开成 LaTeX；必须保持 `[[...]]` 形式，否则公式将丢失或串题。\n"
-        "3. 公式格式化与排版环境：选择题选项统一格式化为 `\\begin{choices} \\item ... \\end{choices}` 环境；**每个选项必须独立成行、以 \\item 开头，严禁将 A./B./C./D. 多个选项写在同一行内联（如 `A. $...$ B. $...$`）**；系统会自动为每个选项编号 A/B/C/D，故 \\item 内不得再写 A./B. 等显式标号；填空题下划线统一使用标准的 `\\fillin` 宏；文本加粗必须使用 `\\textbf{...}`（严禁双星号 `**`）。\n"
+        + formula_lock_section +
+        "3. 公式格式化与排版环境：选择题选项统一格式化为 `\\begin{choices} \\item ... \\end{choices}` 环境；**每个选项必须独立成行、以 \\item 开头，严禁将 A./B./C./D. 多个选项写在同一行内联（如 `A. $...$ B. $...$`）**；系统会自动为每个选项编号 A/B/C/D，故 \\item 内不得再写 A./B. 等显式标号；填空题下划线统一使用标准的 `\\fillin` 宏；文本加粗必须使用 `\\textbf{...}`（严禁双星号 `**`）；同时严禁用单个 `*` 把几何顶点、随机变量、参数等做成 Markdown 斜体（如 `*ABC*`、`*X*`、`*x_0*`），这类符号一律用 `$...$` 包裹（如 `$ABC$`、`$X$`、`$x_0$`）。\n"
         "4. 符号与公式规范：仅对含义明确的 Unicode 数学字符与结构（如 √、∈、α、β以及分子/分母边界清晰的分式）规范化为等价 LaTeX 语法（如 `\\sqrt{...}`, `\\frac{...}{...}`, `\\in`, `\\alpha`）。不得将普通字母 `j`、`p` 等根据语境猜成希腊字母或分式；不得根据题意自行重建原文中已损坏、缺失或标记待核对的公式。\n"
         "4.1 PDF 跨页协议：`<!-- MATHBANK_PDF_PAGE:N -->` 仅表示后续原文来自 PDF 第 N 页，用于来源追踪，不是题目边界，也不得出现在输出题干中。若一道题的题干、公式、表格、选项或解析跨越页标，必须按上下文合并为同一道完整题目，禁止按页拆成两题。\n"
         "5. 换行与段落规范：不同小问（如 (1)、(2)、(i)、(ii)）、证明推导步骤与自然段落之间，必须使用双换行/空行（`\\n\\n`）分隔！\n"
@@ -239,8 +255,8 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         '      "content": "纯净题干（包含 LaTeX 排版与图片标记）",\n'
         '      "answer_markdown": "答案与解析",\n'
         '      "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
-        '      "category_compulsory": "学段名称",\n'
-        '      "category_chapter": "章节名称",\n'
+        '      "compulsory": "学段名称",\n'
+        '      "chapter": "章节名称",\n'
         '      "difficulty": "easy_error / normal / challenge / qiangji",\n'
         '      "source": "出处信息或 null",\n'
         '      "knowledge_list": ["细粒度知识点1", "细粒度知识点2"],\n'

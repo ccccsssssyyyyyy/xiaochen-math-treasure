@@ -4,10 +4,32 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import logging
+import os
 import threading
+import time as _time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+
+# 诊断日志：多文件并发排查用，默认静默（不影响测试与正常性能）。
+# 复现问题时用环境变量开启：MATHBANK_DIAGNOSTICS=1 启动服务即可在 stderr 看到 [TaskManager] 行。
+_DIAG_ENABLED = os.environ.get("MATHBANK_DIAGNOSTICS") == "1"
+_diag_logger = logging.getLogger("mathbank.task_manager")
+if _DIAG_ENABLED:
+    _diag_handler = logging.StreamHandler()
+    _diag_handler.setFormatter(logging.Formatter("[TaskManager] %(message)s"))
+    _diag_logger.addHandler(_diag_handler)
+    _diag_logger.setLevel(logging.INFO)
+    _diag_logger.propagate = False
+
+
+def _diag(msg: str) -> None:
+    """多文件并发排查诊断日志，仅当 MATHBANK_DIAGNOSTICS=1 时输出。"""
+    if not _DIAG_ENABLED:
+        return
+    _diag_logger.info("%s", msg)
 
 
 TERMINAL_STATUSES = {"completed", "error", "cancelled"}
@@ -285,7 +307,9 @@ class TaskManager:
         **kwargs: Any,
     ) -> Future:
         if not self._capacity.acquire(blocking=False):
+            _diag(f"submit 拒绝: task_id={task_id} 容量已满 -> TaskQueueFull")
             raise TaskQueueFull("后台任务繁忙，请稍后重试。")
+        submit_time = _time.monotonic()
         with self._lock:
             record = self._records.get(task_id)
             if record is None:
@@ -302,6 +326,8 @@ class TaskManager:
         def runner():
             if record.cancel_event.is_set():
                 raise TaskCancelled(f"任务已取消: {task_id}")
+            waited = _time.monotonic() - submit_time
+            _diag(f"worker 开始执行: task_id={task_id} 入队等待={waited:.1f}s")
             return function(*args, **kwargs)
 
         try:
@@ -337,10 +363,12 @@ class TaskManager:
                     record.state.update(
                         {"status": "cancelled", "progress": 0, "log": "任务已取消。"}
                     )
+                    _diag(f"task 终态(取消): task_id={task_id}")
                 else:
                     error = future.exception()
                     if error is None:
                         record.state.update({"status": "completed", "progress": 100})
+                        _diag(f"task 完成: task_id={task_id}")
                     else:
                         record.state.update(
                             {
@@ -349,6 +377,7 @@ class TaskManager:
                                 "error": f"后台任务执行失败: {type(error).__name__}",
                             }
                         )
+                        _diag(f"task 失败: task_id={task_id} -> {type(error).__name__}: {error}")
                 record.updated_at = dt.datetime.now(dt.timezone.utc)
         finally:
             self._capacity.release()
