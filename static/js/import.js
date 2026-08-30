@@ -1695,7 +1695,7 @@
                     throw new Error(data.message || data.detail || 'OCR 未返回识别结果');
                 }
                 if (textEl) textEl.value = String(data.latex);
-                showToast('识别完成，请核对后插入到题干或解析。');
+                showToast('识别完成，请核对后插入（题干/解析可分别切换替换或追加）。');
             } catch (err) {
                 if (textEl) textEl.value = '';
                 if (panel) panel.classList.add('hidden');
@@ -1706,6 +1706,39 @@
         function closePdfCropOcrPanel() {
             const panel = document.getElementById('pdfCropOcrPanel');
             if (panel) panel.classList.add('hidden');
+        }
+
+        const OCR_MODE_KEY_PREFIX = 'pdf_crop_ocr_mode_';
+        function getOcrMode(target) {
+            try {
+                const m = localStorage.getItem(OCR_MODE_KEY_PREFIX + target);
+                return (m === 'append' || m === 'replace') ? m : 'replace';
+            } catch (e) {
+                return 'replace';
+            }
+        }
+        function setOcrMode(target, mode) {
+            if (mode !== 'replace' && mode !== 'append') return;
+            try { localStorage.setItem(OCR_MODE_KEY_PREFIX + target, mode); } catch (e) { /* localStorage 不可用时忽略 */ }
+            refreshOcrModeUI(target);
+        }
+        function refreshOcrModeUI(target) {
+            const mode = getOcrMode(target);
+            const cap = (target === 'answer') ? 'Answer' : 'Content';
+            const rep = document.getElementById('ocrMode' + cap + 'Replace');
+            const app = document.getElementById('ocrMode' + cap + 'Append');
+            if (rep) {
+                const on = mode === 'replace';
+                rep.className = 'px-2 py-1 rounded text-[10px] font-bold transition-colors ' + (on ? 'bg-brand-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600');
+            }
+            if (app) {
+                const on = mode === 'append';
+                app.className = 'px-2 py-1 rounded text-[10px] font-bold transition-colors ' + (on ? 'bg-brand-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600');
+            }
+        }
+        function refreshAllOcrModeUI() {
+            refreshOcrModeUI('content');
+            refreshOcrModeUI('answer');
         }
 
         function insertPdfCropOcrResult(target) {
@@ -1732,10 +1765,15 @@
                 showToast('未找到编辑框。', 'error');
                 return;
             }
-            const prev = String(textarea.value || '').trim();
-            textarea.value = prev ? (prev + '\n\n' + latex) : latex;
+            if (getOcrMode(target) === 'append') {
+                const prev = String(textarea.value || '').trim();
+                textarea.value = prev ? (prev + '\n\n' + latex) : latex;
+                showToast(target === 'answer' ? '已插入到解析。' : '已插入到题干。');
+            } else {
+                textarea.value = latex;
+                showToast(target === 'answer' ? '已替换当前解析。' : '已替换当前题干。');
+            }
             textarea.dispatchEvent(new Event('input'));
-            showToast(target === 'answer' ? '已插入到解析。' : '已插入到题干。');
             closePdfCropOcrPanel();
             closePdfCropModal();
         }
@@ -1743,6 +1781,8 @@
         window.runOcrOnCroppedImage = runOcrOnCroppedImage;
         window.closePdfCropOcrPanel = closePdfCropOcrPanel;
         window.insertPdfCropOcrResult = insertPdfCropOcrResult;
+        window.setOcrMode = setOcrMode;
+        refreshAllOcrModeUI();
 
         function performOrphanedTempCropsCleanup() {
             const tempPaths = [];

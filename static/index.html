@@ -2038,15 +2038,25 @@
                         <div class="flex items-center justify-between">
                             <span class="text-[10px] font-bold text-slate-300 flex items-center space-x-1.5">
                                 <i class="fa-solid fa-wand-magic-sparkles text-brand-500"></i>
-                                <span>OCR 识别结果（建议先核对修正，再插入）</span>
+                                <span>OCR 识别结果（建议先核对修正，再插入；题干/解析的写入方式可分别切换替换或追加）</span>
                             </span>
                             <button onclick="closePdfCropOcrPanel()" class="text-[10px] font-bold text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded hover:bg-slate-800 transition-colors">收起</button>
                         </div>
                         <textarea id="pdfCropOcrText" rows="5" class="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 font-mono text-[11px] outline-none focus:border-brand-500 resize-none custom-scrollbar" placeholder="识别结果将显示在这里，可直接修改后再插入..."></textarea>
-                        <div class="flex items-center justify-end space-x-2">
+                        <div class="flex items-center justify-end space-x-2 flex-wrap gap-y-2">
                             <span class="text-[10px] text-slate-500 mr-auto">插入到第 <span id="pdfCropOcrTargetIndex" class="font-bold text-slate-300">-</span> 题</span>
-                            <button onclick="insertPdfCropOcrResult('content')" class="px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold text-[11px] transition-all active:scale-95">插入到题干</button>
-                            <button onclick="insertPdfCropOcrResult('answer')" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] transition-all active:scale-95">插入到解析</button>
+                            <div class="flex items-center gap-1" title="题干写入方式：替换=覆盖当前题干，追加=拼接到末尾（与解析独立，首次选择后记住）">
+                                <span class="text-[10px] text-slate-500">题干</span>
+                                <button id="ocrModeContentReplace" onclick="setOcrMode('content','replace')" class="px-2 py-1 rounded text-[10px] font-bold bg-brand-600 text-white transition-colors">替换</button>
+                                <button id="ocrModeContentAppend" onclick="setOcrMode('content','append')" class="px-2 py-1 rounded text-[10px] font-bold bg-slate-700 text-slate-200 hover:bg-slate-600 transition-colors">追加</button>
+                            </div>
+                            <button onclick="insertPdfCropOcrResult('content')" class="px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold text-[11px] transition-all active:scale-95">插入题干</button>
+                            <div class="flex items-center gap-1" title="解析写入方式：替换=覆盖当前解析，追加=拼接到末尾（与题干独立，首次选择后记住）">
+                                <span class="text-[10px] text-slate-500">解析</span>
+                                <button id="ocrModeAnswerReplace" onclick="setOcrMode('answer','replace')" class="px-2 py-1 rounded text-[10px] font-bold bg-slate-700 text-slate-200 hover:bg-slate-600 transition-colors">替换</button>
+                                <button id="ocrModeAnswerAppend" onclick="setOcrMode('answer','append')" class="px-2 py-1 rounded text-[10px] font-bold bg-slate-700 text-slate-200 hover:bg-slate-600 transition-colors">追加</button>
+                            </div>
+                            <button onclick="insertPdfCropOcrResult('answer')" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] transition-all active:scale-95">插入解析</button>
                         </div>
                     </div>
                 </div>
