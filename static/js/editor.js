@@ -1820,8 +1820,12 @@ let bankQuestionsRetryTimer = null;
                     return;
                 }
                 
+                // 预览渲染前先归一化选项：即便编辑框里仍是内联的 A. ... B. ...，
+                // 预览也按最终入库形态（choices 环境）呈现，做到所见即所得。
+                // 只影响展示，不改动编辑框原文（原文在粘贴/失焦时才归一化）。
+                const displayText = normalizeChoiceOptions(text);
                 // Formatted content (standard Markdown with protected LaTeX to HTML)
-                let html = parseMarkdownWithMath(text);
+                let html = parseMarkdownWithMath(displayText);
                 
                 previewContainer.innerHTML = html;
                 paperContainer.innerHTML = html;
@@ -1899,7 +1903,25 @@ let bankQuestionsRetryTimer = null;
             // Attach inputs
             editContent.addEventListener('input', debounce(updateContentPreview, 250));
             editAnswer.addEventListener('input', debounce(updateAnswerPreview, 250));
-            
+
+            // 选择题选项归一化：把内联的 A. ... B. ... 改写为 choices 环境，
+            // 让编辑框里的 LaTeX 本身就是规范形态（后端入库时还会再做一次兜底）。
+            // 仅在内容确实会被改变时才改写，避免无谓地触发「未保存修改」判定。
+            const normalizeEditContentInPlace = () => {
+                const raw = editContent.value;
+                if (!raw) return;
+                const normalized = normalizeChoiceOptions(raw);
+                if (normalized === raw) return;
+                editContent.value = normalized;
+                if (typeof updateContentPreview === 'function') updateContentPreview();
+            };
+            // 粘贴：等浏览器把内容放进 textarea 之后再归一化
+            editContent.addEventListener('paste', () => {
+                window.setTimeout(normalizeEditContentInPlace, 0);
+            });
+            // 失焦：手工输入的选项在离开编辑框时归一化
+            editContent.addEventListener('blur', normalizeEditContentInPlace);
+
             const editReview = document.getElementById('editReview');
             const updateReviewPreview = () => {
                 const text = editReview.value;
@@ -2381,6 +2403,122 @@ let bankQuestionsRetryTimer = null;
             return window.MathBankSafe.sanitizeRichHtml(preprocessFormulaForKaTeX(text));
         }
         window.parseMarkdownWithMath = parseMarkdownWithMath;
+
+        // ------------------------------------------------------------------
+        // 选择题选项归一化（与后端 mathbank/latex_normalize.py 的同名函数保持一致）
+        //
+        // 后端在入库时会归一化，但那要等到「保存」才生效；录入过程中（粘贴、手输）
+        // 编辑框里仍是内联形态（A. ... B. ...），预览也因此渲染成挤在一起的一行。
+        // 这里在前端补上同一套归一化，做到所见即所得。
+        //
+        // ⚠️ 项目约定禁用正则后行断言(lookbehind)，故以「前导字符捕获组」替代 Python
+        // 版本的 (?<![\w（(])：由 group(1) 吃掉前置字符，实际起点为 index + group(1).length。
+        // ------------------------------------------------------------------
+        function _choicesLetterOf(marker) {
+            var m = String(marker).match(/[A-Ea-e]/);
+            return m ? m[0].toUpperCase() : '';
+        }
+
+        function _scanOptionStarts(source, optionRe) {
+            var found = [];
+            var m;
+            optionRe.lastIndex = 0;
+            while ((m = optionRe.exec(source)) !== null) {
+                var letter = _choicesLetterOf(m[2]);
+                if (letter) {
+                    found.push({ start: m.index + m[1].length, end: m.index + m[0].length, letter: letter });
+                }
+                if (m.index === optionRe.lastIndex) optionRe.lastIndex++;
+            }
+            return found;
+        }
+
+        function normalizeChoiceOptions(text) {
+            // 正则放在函数内：既避免脚本初始化顺序问题，也避免 g 标志的 lastIndex 共享状态。
+            var CHOICES_ENV_RE = /\\begin\{choices\}([\s\S]*?)\\end\{choices\}/g;
+            var OPTION_START_RE = /(^|[^\w（(])((?:（\s*[A-Ea-e]\s*）|\(?\s*[A-Ea-e]\s*[\.、)）]))/g;
+            var TRAILING_MARKERS_RE = /(答案|解析|故选|参考答案)/;
+            var LABEL_PREFIX_RE = /^\s*(?:（\s*[A-Ea-e]\s*）|\(?\s*[A-Ea-e]\s*[\.、)）])\s*/;
+
+            if (typeof text !== 'string' || !text) return text;
+
+            // 已有 choices 环境：只清理 \item 内残留的显式 A./B. 标号（避免与自动编号重复）
+            if (text.indexOf('\\begin{choices}') !== -1) {
+                return text.replace(CHOICES_ENV_RE, function (match, inner) {
+                    var items = inner.split(/\\item/)
+                        .map(function (s) { return s.trim(); })
+                        .filter(function (s) { return s.length > 0; })
+                        .map(function (s) { return s.replace(LABEL_PREFIX_RE, '').trim(); });
+                    if (!items.length) return match;
+                    return '\\begin{choices}\n'
+                        + items.map(function (it) { return '\\item ' + it; }).join('\n')
+                        + '\n\\end{choices}';
+                });
+            }
+
+            var matches = _scanOptionStarts(text, OPTION_START_RE);
+            if (matches.length < 2) return text;
+
+            // 把「字母递增 1」的连续匹配聚合成选项段
+            var runs = [];
+            var current = [matches[0]];
+            for (var i = 1; i < matches.length; i++) {
+                var prev = current[current.length - 1];
+                if (matches[i].letter.charCodeAt(0) === prev.letter.charCodeAt(0) + 1) {
+                    current.push(matches[i]);
+                } else {
+                    runs.push(current);
+                    current = [matches[i]];
+                }
+            }
+            runs.push(current);
+
+            var replacements = [];
+            for (var r = 0; r < runs.length; r++) {
+                var run = runs[r];
+                if (run.length < 2) continue;
+                var start = run[0].start;
+                var last = run[run.length - 1];
+                var tail = text.slice(last.end);
+                var tm = TRAILING_MARKERS_RE.exec(tail);
+                var bodyEnd, consumeEnd;
+                if (tm) {
+                    // 选项正文截止到「答案/解析」标记之前，标记及其后内容属答案区，一并丢弃
+                    bodyEnd = last.end + tm.index;
+                    consumeEnd = text.length;
+                } else {
+                    bodyEnd = last.end + tail.length;
+                    consumeEnd = bodyEnd;
+                }
+                var block = text.slice(start, bodyEnd);
+                var subs = _scanOptionStarts(block, OPTION_START_RE);
+                var items = [];
+                for (var s = 0; s < subs.length; s++) {
+                    var end = (s + 1 < subs.length) ? subs[s + 1].start : block.length;
+                    var body = block.slice(subs[s].end, end).replace(LABEL_PREFIX_RE, '').trim();
+                    if (body) items.push(body);
+                }
+                if (items.length >= 2) {
+                    replacements.push({
+                        start: start,
+                        end: consumeEnd,
+                        text: '\\begin{choices}\n'
+                            + items.map(function (it) { return '\\item ' + it; }).join('\n')
+                            + '\n\\end{choices}'
+                    });
+                }
+            }
+
+            if (!replacements.length) return text;
+            // 自右向左替换，避免偏移污染
+            replacements.sort(function (a, b) { return b.start - a.start; });
+            var out = text;
+            for (var k = 0; k < replacements.length; k++) {
+                out = out.slice(0, replacements[k].start) + replacements[k].text + out.slice(replacements[k].end);
+            }
+            return out;
+        }
+        window.normalizeChoiceOptions = normalizeChoiceOptions;
 
         // Format raw OCR questions by detecting choice options and introducing nice line breaks
         function formatQuestionContent(text) {
