@@ -1756,6 +1756,28 @@ let bankQuestionsRetryTimer = null;
             });
         }
 
+        // 短选项（如 $P(X>2)>0.2$）在窄预览栏里即使「不溢出」，4 列挤成一行也显得局促，
+        // 观感等同内联文本。因此除「不溢出」外，再要求每列保有最低可用宽度。
+        // 可用 window.__MIN_CHOICES_COLUMN_PX 覆盖（便于测试与微调）。
+        const MIN_CHOICES_COLUMN_PX = 150;
+
+        function choicesGridColumnWidth(grid, columns) {
+            if (columns <= 1) return grid.clientWidth;
+            let gap = 8; // 与容器上的 gap-2 对应
+            try {
+                const cs = window.getComputedStyle(grid);
+                const parsed = parseFloat(cs.columnGap || cs.gap || '');
+                if (!isNaN(parsed)) gap = parsed;
+            } catch (e) { /* 读取失败时沿用 8px 兜底 */ }
+            return (grid.clientWidth - (columns - 1) * gap) / columns;
+        }
+
+        function choicesGridTooCramped(grid, columns) {
+            if (columns <= 1) return false;
+            const min = Number(window.__MIN_CHOICES_COLUMN_PX) || MIN_CHOICES_COLUMN_PX;
+            return choicesGridColumnWidth(grid, columns) < min;
+        }
+
         function adaptSingleChoicesGrid(grid) {
             if (!grid || !grid.isConnected || grid.clientWidth <= 0) return;
             const preferred = getPreferredChoicesColumns(grid);
@@ -1767,7 +1789,8 @@ let bankQuestionsRetryTimer = null;
                 // Force the browser to resolve the candidate track widths before
                 // comparing each rendered KaTeX option's real scroll width.
                 void grid.offsetWidth;
-                if (!choicesGridOverflows(grid)) {
+                // 先要放得下（不溢出），再要放得舒服（每列不低于最低宽度）。
+                if (!choicesGridOverflows(grid) && !choicesGridTooCramped(grid, columns)) {
                     selected = columns;
                     break;
                 }
