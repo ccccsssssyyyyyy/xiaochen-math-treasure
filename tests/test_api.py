@@ -463,7 +463,7 @@ def test_parse_paper_flows_use_shared_provider_resolution(client):
 
     def provider_response(_url, **kwargs):
         user_content = kwargs["json"]["messages"][1]["content"]
-        lock_ids = re.findall(r'id="(MBM_[^"]+)"', user_content)
+        lock_ids = re.findall(r'id="(M\d+)"', user_content)
         if not lock_ids:
             return mock_resp
         locked_resp = MagicMock()

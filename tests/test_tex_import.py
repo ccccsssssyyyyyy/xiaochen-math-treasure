@@ -172,7 +172,7 @@ def test_tex_parse_route_preprocesses_and_restores_original_formulas(client):
         sent_source = kwargs["json"]["messages"][1]["content"]
         assert r"\documentclass" not in sent_source
         assert r"$x\in\mathbb{R}$" in sent_source
-        lock_ids = re.findall(r'id="(MBM_[^"]+)"', sent_source)
+        lock_ids = re.findall(r'id="(M\d+)"', sent_source)
         assert len(lock_ids) == 2
         payload = {
             "questions": [

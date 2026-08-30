@@ -16,7 +16,11 @@ from mathbank.omml_helper import (
     normalize_word_formula_latex,
     normalize_word_linear_latex_boundaries,
 )
-from mathbank.docx_helper import extract_docx_markdown
+from mathbank.docx_helper import (
+    extract_docx_markdown,
+    _validate_archive,
+    _is_guard_excluded,
+)
 
 from mathbank.mtef_helper import decode_mtef_formula, mtef_to_latex
 
@@ -694,3 +698,80 @@ def test_docx_upload_task_api_validation():
     status_res = client.get(f"/api/tasks/{task_id}/status")
     assert status_res.status_code == 200
     assert "status" in status_res.json()
+
+
+def _make_package_with_extra(extra_files: dict) -> bytes:
+    """构造一个含任意额外条目的 docx 压缩包，用于护栏语义测试。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        z.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>试卷</w:t></w:r></w:p></w:body></w:document>',
+        )
+        for name, content in extra_files.items():
+            z.writestr(name, content)
+    return buf.getvalue()
+
+
+def test_guard_excludes_mathtype_ole_and_wmf_entries():
+    """护栏计数应排除 MathType 的 OLE 嵌入与 WMF 预览缩略图。"""
+    assert _is_guard_excluded("word/embeddings/oleObject1.bin") is True
+    assert _is_guard_excluded("word/media/image388.wmf") is True
+    assert _is_guard_excluded("word/media/image1.png") is False
+    assert _is_guard_excluded("word/document.xml") is False
+
+
+def test_validate_archive_allows_mathtype_heavy_docx():
+    """公式密集的 MathType 试卷（每个公式产生 oleObject*.bin + 同名 .wmf）
+    不应被误判为压缩包异常，即便总条目数远超原 5000 上限。"""
+    extra = {}
+    # 模拟 6000 个公式：每个带来 1 个 OLE 嵌入 + 1 个 WMF 预览
+    for i in range(1, 6001):
+        extra[f"word/embeddings/oleObject{i}.bin"] = b"\x01\x00"
+        extra[f"word/media/image{i}.wmf"] = b"\x02\x00"
+    package = _make_package_with_extra(extra)
+    # 不应抛异常
+    import zipfile as _zf
+    with _zf.ZipFile(io.BytesIO(package)) as z:
+        _validate_archive(z)
+
+
+def test_validate_archive_still_blocks_true_zip_bomb():
+    """真实恶意压缩包（海量会被实际处理的位图资源）仍应被护栏拦截。"""
+    extra = {f"word/media/bomb{i}.png": b"\x03\x00" for i in range(25000)}
+    package = _make_package_with_extra(extra)
+    import zipfile as _zf
+    with _zf.ZipFile(io.BytesIO(package)) as z:
+        try:
+            _validate_archive(z)
+            raised = False
+            err = ""
+        except ValueError as exc:
+            raised = True
+            err = str(exc)
+    assert raised is True
+    assert "超过" in err
+
+
+def test_validate_archive_keeps_total_size_backstop():
+    """解压后总体积护栏（200MB）仍对全部条目生效，不受计数口径调整影响。"""
+    # 多个“会被处理”的中等位图，单成员未超 50MB，但累计超过 200MB，
+    # 应触发总体积护栏（而非单成员护栏）。
+    medium = bytes(5 * 1024 * 1024)
+    extra = {f"word/media/big{i}.png": medium for i in range(50)}  # 50 * 5MB = 250MB
+    package = _make_package_with_extra(extra)
+    import zipfile as _zf
+    with _zf.ZipFile(io.BytesIO(package)) as z:
+        try:
+            _validate_archive(z)
+            raised = False
+            err = ""
+        except ValueError as exc:
+            raised = True
+            err = str(exc)
+    assert raised is True
+    assert "200MB" in err
