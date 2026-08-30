@@ -95,3 +95,7 @@ tests/artifacts/*
 *.bak-*
 cleanup_star_garble.py
 cleanup_report.txt
+
+# 14. 忽略批量分类脚本产出的审阅清单（调试/对账用，不入库）
+classify_uncategorized_report.csv
+classify_uncategorized_ai_report.csv
