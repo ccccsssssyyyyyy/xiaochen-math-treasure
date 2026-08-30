@@ -743,18 +743,77 @@
                 x.className = 'text-brand-400 hover:text-brand-700';
                 x.innerHTML = '<i class="fa-solid fa-xmark"></i>';
                 x.title = '移除';
-                x.onclick = () => { window.relatedChapters.splice(idx, 1); renderRelatedChaptersChips(); };
+                x.onclick = () => {
+                    window.relatedChapters.splice(idx, 1);
+                    renderRelatedChaptersChips();
+                    // 删掉当前项后，下拉回填新的第一条（或清空），保持两者一致
+                    syncRelatedDropdownsFromChapters();
+                };
                 chip.appendChild(x);
                 container.appendChild(chip);
             });
         }
         window.renderRelatedChaptersChips = renderRelatedChaptersChips;
 
+        // 把第一条关联章节回填到三级下拉，让 AI（或已存数据）识别出的章节链在下拉里直接可见，
+        // 避免观感上像是「AI 没填、还得自己选一遍」。
+        // 注意：这里只回填显示，不改变存储——真正的取值仍以 window.relatedChapters 为准；
+        // 修改下拉后点「添加关联章节」走的是原有去重逻辑。
+        function syncRelatedDropdownsFromChapters() {
+            const compSelect = document.getElementById('editRelCompulsory');
+            const chapSelect = document.getElementById('editRelChapter');
+            const knowSelect = document.getElementById('editRelKnowledge');
+            if (!compSelect || !chapSelect || !knowSelect) return;
+
+            const first = (window.relatedChapters || [])[0];
+
+            // 无关联章节：清空下拉，避免残留上一次的选择
+            if (!first) {
+                compSelect.value = '';
+                if (typeof compSelect.onchange === 'function') compSelect.onchange();
+                return;
+            }
+
+            // 学段。若该值不在候选词表里，select.value 会落空；
+            // 此时放弃回填，保持下拉为空——完整章节链在 chip 上依然可见。
+            if (first.compulsory) {
+                compSelect.value = first.compulsory;
+                if (compSelect.value !== first.compulsory) {
+                    compSelect.value = '';
+                    if (typeof compSelect.onchange === 'function') compSelect.onchange();
+                    return;
+                }
+            }
+            // 触发级联：填充章节候选
+            if (typeof compSelect.onchange === 'function') compSelect.onchange();
+
+            // 章节
+            if (first.chapter) {
+                chapSelect.value = first.chapter;
+                if (chapSelect.value !== first.chapter) {
+                    chapSelect.value = '';
+                }
+                // 触发级联：填充小节候选并更新「添加」按钮可用状态
+                if (typeof chapSelect.onchange === 'function') chapSelect.onchange();
+            }
+
+            // 小节（可选；与章节同名时视为未指定）
+            const knowledge = (first.knowledge && first.knowledge !== first.chapter) ? first.knowledge : '';
+            if (knowledge) {
+                knowSelect.value = knowledge;
+                if (knowSelect.value !== knowledge) knowSelect.value = '';
+            } else {
+                knowSelect.value = '';
+            }
+        }
+        window.syncRelatedDropdownsFromChapters = syncRelatedDropdownsFromChapters;
+
         function setRelatedChapters(arr) {
             window.relatedChapters = Array.isArray(arr)
                 ? arr.map(x => ({ compulsory: x.compulsory || '', chapter: x.chapter || '', knowledge: x.knowledge || '' }))
                 : [];
             renderRelatedChaptersChips();
+            syncRelatedDropdownsFromChapters();
         }
         window.setRelatedChapters = setRelatedChapters;
 
@@ -837,24 +896,13 @@
                     return false;
                 }
                 
-                // 学段 / 章节缺失时不再弹窗，直接提示并聚焦让用户手工补齐（OCR 自动分类通常已填好）
-                if (!skipCheck && (!compulsory || !chapter)) {
-                    const missingField = !compulsory ? '学段' : '章节';
-                    showToast(`保存失败：请先填写${missingField}（AI 可能未识别，请手动选择）`, 'error');
-                    const focusEl = !compulsory
-                        ? document.getElementById('editCompulsory')
-                        : document.getElementById('editChapter');
-                    if (focusEl) {
-                        focusEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        focusEl.classList.remove('border-slate-200');
-                        focusEl.classList.add('ring-2', 'ring-brand-500', 'border-brand-500');
-                        setTimeout(() => {
-                            focusEl.classList.remove('ring-2', 'ring-brand-500', 'border-brand-500');
-                            focusEl.classList.add('border-slate-200');
-                        }, 2500);
-                        focusEl.focus();
-                    }
-                    return false;
+                // 学段 / 章节缺失不再拦截导入：自动归入「未分类」后照常入库，稍后可在题库内手动调整
+                let finalCompulsory = compulsory;
+                let finalChapter = chapter;
+                if (!finalCompulsory || !finalChapter) {
+                    finalCompulsory = finalCompulsory || '未分类';
+                    finalChapter = finalChapter || '未分类';
+                    showToast('学段/章节缺失，已自动归入「未分类」，可在题库中手动调整', 'info');
                 }
 
                 const requestBackupSnapshot = Object.freeze({
@@ -864,8 +912,8 @@
                     question_type: qtype,
                     difficulty: difficulty,
                     source: source,
-                    category_compulsory: compulsory,
-                    category_chapter: chapter,
+                    category_compulsory: finalCompulsory,
+                    category_chapter: finalChapter,
                     category_knowledge: knowledge,
                     image_paths: JSON.stringify(Array.from(uploadedImages)),
                     tags: tags,
@@ -875,8 +923,8 @@
                 const formData = new FormData();
                 formData.append('content', content);
                 formData.append('question_type', qtype);
-                formData.append('category_compulsory', compulsory);
-                formData.append('category_chapter', chapter);
+                formData.append('category_compulsory', finalCompulsory);
+                formData.append('category_chapter', finalChapter);
                 formData.append('category_knowledge', knowledge);
                 formData.append('difficulty', difficulty);
                 formData.append('source', source);
@@ -1076,6 +1124,9 @@
                     startIndex: startIndex,
                     count: list.length
                 });
+                // 已有分组头的"X/Y"分母可能已经过时（先前的 renderFileGroupHeader 在渲染时
+                // 快照了 total），这里统一刷成最新总数，避免"1/1、2/2、3/3"这种自欺标号。
+                refreshAllFileGroupHeaders();
             }
             window.__currentParseStartIndex = startIndex;
             return { generation: parsedQuestionsGeneration, startIndex, count: list.length };
@@ -1153,21 +1204,39 @@
         let zoomFactor = 1.0;
 
         window.zoomPdfCropIn = function() {
-            zoomFactor = Math.min(5.0, zoomFactor + 0.25);
+            // 相对缩放：对大图也更自然（每次放大 20%）
+            zoomFactor = Math.min(5.0, zoomFactor * 1.2);
             applyZoom();
         };
 
         window.zoomPdfCropOut = function() {
-            zoomFactor = Math.max(0.2, zoomFactor - 0.25);
+            zoomFactor = Math.max(0.1, zoomFactor / 1.2);
             applyZoom();
         };
+
+        function applyPdfCropAutoFit() {
+            const wrapper = document.getElementById('pdfCropCanvasWrapper');
+            const img = document.getElementById('pdfCropActiveImage');
+            if (!wrapper || !img) return;
+
+            // 弹窗首次打开时可能尚未布局完成，用 wrapper 尺寸；取不到时用视口兜底
+            let availW = wrapper.clientWidth || window.innerWidth - 280;
+            let availH = wrapper.clientHeight || window.innerHeight - 220;
+
+            // 减去滚动条/内边距留白，避免贴边
+            availW = Math.max(120, availW - 48);
+            availH = Math.max(120, availH - 48);
+
+            const fit = Math.min(1, availW / Math.max(baseWidth, 1), availH / Math.max(baseHeight, 1));
+            zoomFactor = fit > 0 ? fit : 1;
+            window.cropAutoFitDone = true;
+            applyZoom();
+        }
 
         window.resetPdfCropZoom = function() {
             // 回到首次打开时的整页自适应缩放
             window.cropAutoFitDone = false;
-            const activeImg = document.getElementById('pdfCropActiveImage');
-            if (activeImg) activeImg.onload();
-            else applyZoom();
+            applyPdfCropAutoFit();
         };
 
         function applyZoom() {
@@ -1231,22 +1300,45 @@
             window.pdfPageImages = entry.pageImages;
             if (entry.taskId) window.currentPdfTaskId = entry.taskId;
             window.activeCropQuestionIndex = questionIndex;
-            activePageIndex = 0;
             zoomFactor = 1.0;
             baseWidth = 0;
             baseHeight = 0;
             window.lastCropLoadedSrc = '';
             window.cropAutoFitDone = false;
-            
+
+            // 方案B+C：直接跳到该题对应的原卷页（source_page 为 0-based 本地页索引，与 page_images 对齐）
+            const q = parsedQuestionsData[questionIndex];
+            let startPage = 0;
+            const hasSourcePage = q && typeof q.source_page === 'number' && q.source_page >= 0 && q.source_page < window.pdfPageImages.length;
+            if (hasSourcePage) {
+                startPage = q.source_page;
+            }
+            activePageIndex = startPage;
+
             // Render sidebar page thumbnails
             renderPdfPagesThumbnails();
-            
+
             // Setup drawing listeners FIRST to avoid load race conditions
             setupPdfCropDrawListeners();
-            
-            // Load the first page (triggers src change and onload cleanly)
-            loadPdfCropPage(0);
-            
+
+            // Load the target page (triggers src change and onload cleanly)
+            loadPdfCropPage(startPage);
+
+            // 打开弹窗时清空上一次的 OCR 结果，避免残留误插到别的题
+            closePdfCropOcrPanel();
+            const ocrTextEl = document.getElementById('pdfCropOcrText');
+            if (ocrTextEl) ocrTextEl.value = '';
+
+            // 更新底部提示：明确告知本题所在页，消除“不知道点的是哪一页”的困惑
+            const hint = document.getElementById('pdfCropHint');
+            if (hint) {
+                if (hasSourcePage) {
+                    hint.innerHTML = `<i class="fa-solid fa-circle-info text-brand-500"></i><span>已自动跳到本题所在第 <b class="text-brand-600">${startPage + 1}</b> 页，可用上方 ◀ ▶ 或点击左侧缩略图翻页，在图上按住左键拖拽框选插图区域。</span>`;
+                } else {
+                    hint.innerHTML = `<i class="fa-solid fa-circle-info text-brand-500"></i><span>提示：在上方 PDF 页面图上按住鼠标左键并拖拽，即可框选题目中的几何插图区域。</span>`;
+                }
+            }
+
             // Show modal
             const modal = document.getElementById('pdfCropModal');
             modal.classList.remove('hidden');
@@ -1255,6 +1347,16 @@
                 modal.classList.remove('opacity-0');
                 modal.querySelector('div').classList.remove('scale-95');
                 modal.querySelector('div').classList.add('scale-100');
+                // 把高亮的本题所在缩略图滚动到可视区域
+                const thumbs = document.getElementById('pdfPagesThumbnailsContainer');
+                if (thumbs && thumbs.children[startPage]) {
+                    thumbs.children[startPage].scrollIntoView({ block: 'nearest' });
+                }
+                // 图片若已缓存，onload 不会触发；加上弹窗刚显示，手动触发一次自适应
+                const activeImg = document.getElementById('pdfCropActiveImage');
+                if (activeImg && activeImg.complete && typeof activeImg.onload === 'function' && !window.cropAutoFitDone) {
+                    activeImg.onload();
+                }
             }, 50);
         }
 
@@ -1312,13 +1414,28 @@
             const img = document.getElementById('pdfCropActiveImage');
             const safePageUrl = window.MathBankSafe.safeImageUrl(window.pdfPageImages[pageIdx]);
             console.log(`[PDF预览] 主图 P${pageIdx + 1}: 原始URL="${window.pdfPageImages[pageIdx]}", safeUrl="${safePageUrl}"`);
+            // 注意：img.onload / onerror 由 setupPdfCropDrawListeners 统一安装，
+            // 这里只负责切 src，不要覆盖，否则首次自适应缩放逻辑会失效。
             img.src = safePageUrl || '';
-            // 监听 img 的 load/error 事件
-            img.onload = () => console.log(`[PDF预览] ✅ 主图 P${pageIdx + 1} 加载成功`);
-            img.onerror = (e) => console.error(`[PDF预览] ❌ 主图 P${pageIdx + 1} 加载失败, src="${img.src}"`, e);
-            
+
+            // 翻页时把当前页缩略图滚动到可视区域（block:nearest 仅在不可见时滚动）
+            const thumbs = document.getElementById('pdfPagesThumbnailsContainer');
+            if (thumbs && thumbs.children[pageIdx]) {
+                thumbs.children[pageIdx].scrollIntoView({ block: 'nearest' });
+            }
+
             clearPdfCropSelection();
         }
+
+        window.cropPrevPage = function() {
+            if (activePageIndex > 0) loadPdfCropPage(activePageIndex - 1);
+        };
+
+        window.cropNextPage = function() {
+            if (window.pdfPageImages && activePageIndex < window.pdfPageImages.length - 1) {
+                loadPdfCropPage(activePageIndex + 1);
+            }
+        };
 
         function setupPdfCropDrawListeners() {
             const wrapper = document.getElementById('pdfCropCanvasWrapper');
@@ -1339,14 +1456,14 @@
                     e.preventDefault();
                     const zoomSpeed = 0.03;
                     if (e.deltaY < 0) {
-                        zoomFactor = Math.min(5.0, zoomFactor + zoomSpeed);
+                        zoomFactor = Math.min(5.0, zoomFactor * (1 + zoomSpeed));
                     } else {
-                        zoomFactor = Math.max(0.2, zoomFactor - zoomSpeed);
+                        zoomFactor = Math.max(0.1, zoomFactor / (1 + zoomSpeed));
                     }
                     applyZoom();
                 }
             }, { passive: false });
-            
+
             // Bind image onload
             activeImg.onload = function() {
                 // 用图片真实像素作为缩放基准（不再受 CSS 宽高上限约束），
@@ -1355,16 +1472,17 @@
                 baseHeight = activeImg.naturalHeight || activeImg.clientHeight || 800;
                 window.lastCropLoadedSrc = activeImg.src;
 
-                // 首次打开时自动缩放使整页刚好放入可视区，避免一开就超出屏幕
+                // 首次打开/重置时自动缩放使整页刚好放入可视区，避免一开就超出屏幕
                 if (!window.cropAutoFitDone) {
-                    const wrapper = document.getElementById('pdfCropCanvasWrapper');
-                    const availW = (wrapper ? wrapper.clientWidth : window.innerWidth) - 48;
-                    const availH = (wrapper ? wrapper.clientHeight : window.innerHeight) - 48;
-                    const fit = Math.min(1, availW / baseWidth, availH / baseHeight);
-                    zoomFactor = fit > 0 ? fit : 1;
-                    window.cropAutoFitDone = true;
+                    applyPdfCropAutoFit();
+                } else {
+                    applyZoom();
                 }
-                applyZoom();
+            };
+
+            activeImg.onerror = function(e) {
+                console.error(`[PDF预览] ❌ 主图加载失败, src="${activeImg.src}"`, e);
+                showToast('页面图加载失败，请重试', 'error');
             };
             
             // Bind drawing select listeners
@@ -1418,6 +1536,8 @@
                 if (rectWidth > 15 && rectHeight > 15) {
                     document.getElementById('pdfCropConfirmBtn').disabled = false;
                     document.getElementById('pdfCropClearBtn').disabled = false;
+                    const ocrBtn = document.getElementById('pdfCropOcrBtn');
+                    if (ocrBtn) ocrBtn.disabled = false;
                 } else {
                     clearPdfCropSelection();
                 }
@@ -1439,9 +1559,12 @@
             
             const clearBtn = document.getElementById('pdfCropClearBtn');
             if (clearBtn) clearBtn.disabled = true;
+
+            const ocrBtn = document.getElementById('pdfCropOcrBtn');
+            if (ocrBtn) ocrBtn.disabled = true;
         }
 
-        function submitPdfCropCoordinates() {
+        function submitPdfCropCoordinates(ocrMode = false) {
             const img = document.getElementById('pdfCropActiveImage');
             const container = document.getElementById('pdfCropImageContainer');
             
@@ -1454,9 +1577,20 @@
             const ymax = ((rectTop + rectHeight) / containerRect.height) * 100.0;
             
             const confirmBtn = document.getElementById('pdfCropConfirmBtn');
-            confirmBtn.disabled = true;
-            confirmBtn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i><span>正在裁剪...</span>';
-            
+            const ocrBtn = document.getElementById('pdfCropOcrBtn');
+            const clearBtn = document.getElementById('pdfCropClearBtn');
+            const activeBtn = ocrMode ? ocrBtn : confirmBtn;
+            const activeBtnHtml = activeBtn ? activeBtn.innerHTML : '';
+
+            if (confirmBtn) confirmBtn.disabled = true;
+            if (ocrBtn) ocrBtn.disabled = true;
+            if (clearBtn) clearBtn.disabled = true;
+            if (activeBtn) {
+                activeBtn.innerHTML = ocrMode
+                    ? '<i class="fa-solid fa-spinner animate-spin"></i><span>正在识别...</span>'
+                    : '<i class="fa-solid fa-spinner animate-spin"></i><span>正在裁剪...</span>';
+            }
+
             fetch('/api/ai/manual-crop-pdf', {
                 method: 'POST',
                 headers: {
@@ -1477,52 +1611,138 @@
                 return r.json();
             })
             .then(data => {
-                if (data.status === 'success') {
-                    showToast("裁剪并生成配图成功！已自动关联至此题卡。");
-                    
-                    const croppedUrl = window.MathBankSafe.safeImageUrl(data.image_path);
-                    if (!croppedUrl) throw new Error('裁剪接口返回了无效的图片路径');
-                    window.tempCroppedPathsThisSession.push(croppedUrl);
-                    
-                    const qIdx = window.activeCropQuestionIndex;
-                    if (qIdx !== null && parsedQuestionsData[qIdx]) {
-                        const q = parsedQuestionsData[qIdx];
-                        if (!q.image_paths) q.image_paths = [];
-                        
-                        if (!q.image_paths.includes(croppedUrl)) {
-                            q.image_paths.push(croppedUrl);
-                        }
-                        
-                        // Append the image tag to content textarea to render in card preview
-                        const card = document.getElementById(`parsed-card-${qIdx}`);
-                        if (card) {
-                            const textarea = card.querySelector('.card-content-textarea');
-                            if (textarea) {
-                                textarea.value = textarea.value.trim() + `\n\n![插图](${croppedUrl})\n\n`;
-                                textarea.dispatchEvent(new Event('input'));
-                            }
-                        }
-                        
-                        const badgesContainer = document.getElementById(`card-images-badges-${qIdx}`);
-                        if (badgesContainer) {
-                            badgesContainer.innerHTML = '';
-                            q.image_paths.forEach(path => appendSafeImageBadge(badgesContainer, path));
-                        }
-                    }
-                    
-                    closePdfCropModal();
-                } else {
+                if (data.status !== 'success') {
                     throw new Error(data.message || "裁剪错误");
                 }
+
+                const croppedUrl = window.MathBankSafe.safeImageUrl(data.image_path);
+                if (!croppedUrl) throw new Error('裁剪接口返回了无效的图片路径');
+                window.tempCroppedPathsThisSession.push(croppedUrl);
+
+                const qIdx = window.activeCropQuestionIndex;
+                if (qIdx === null || qIdx === undefined || !parsedQuestionsData[qIdx]) {
+                    throw new Error('未找到对应的题目卡片');
+                }
+                const q = parsedQuestionsData[qIdx];
+                if (!q.image_paths) q.image_paths = [];
+
+                if (!q.image_paths.includes(croppedUrl)) {
+                    q.image_paths.push(croppedUrl);
+                }
+
+                const badgesContainer = document.getElementById(`card-images-badges-${qIdx}`);
+                if (badgesContainer) {
+                    badgesContainer.innerHTML = '';
+                    q.image_paths.forEach(path => appendSafeImageBadge(badgesContainer, path));
+                }
+
+                if (ocrMode) {
+                    // OCR 模式：识别为 LaTeX 并在面板中展示供核对，弹窗保持打开
+                    return runOcrOnCroppedImage(croppedUrl, qIdx);
+                }
+
+                // 插图模式：把裁剪图作为插图追加到题干
+                const card = document.getElementById(`parsed-card-${qIdx}`);
+                if (card) {
+                    const textarea = card.querySelector('.card-content-textarea');
+                    if (textarea) {
+                        textarea.value = textarea.value.trim() + `\n\n![插图](${croppedUrl})\n\n`;
+                        textarea.dispatchEvent(new Event('input'));
+                    }
+                }
+
+                showToast("裁剪并生成配图成功！已自动关联至此题卡。");
+                closePdfCropModal();
+                return null;
             })
             .catch(err => {
                 console.error(err);
-                showToast(`手动截图报错: ${err.message}`, 'error');
+                showToast(`${ocrMode ? 'OCR 识别' : '手动截图'}报错: ${err.message}`, 'error');
             })
             .finally(() => {
-                confirmBtn.innerHTML = '<i class="fa-solid fa-crop-simple mr-1.5"></i><span>确认截取配图</span>';
+                if (activeBtn) activeBtn.innerHTML = activeBtnHtml;
+                // 弹窗未关闭时（OCR 模式或出错）恢复按钮可用状态
+                if (rectWidth > 15 && rectHeight > 15) {
+                    if (confirmBtn) confirmBtn.disabled = false;
+                    if (ocrBtn) ocrBtn.disabled = false;
+                    if (clearBtn) clearBtn.disabled = false;
+                }
             });
         }
+
+        // 跨页/缺失内容兜底：把裁剪图送 OCR 识别为 LaTeX，先展示供核对再插入
+        async function runOcrOnCroppedImage(imageUrl, qIdx) {
+            const panel = document.getElementById('pdfCropOcrPanel');
+            const textEl = document.getElementById('pdfCropOcrText');
+            const idxEl = document.getElementById('pdfCropOcrTargetIndex');
+            if (idxEl) idxEl.textContent = String(qIdx + 1);
+            if (textEl) textEl.value = '正在识别中，请稍候...';
+            if (panel) panel.classList.remove('hidden');
+            try {
+                const resp = await fetch(imageUrl, { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('无法读取裁剪图片');
+                const blob = await resp.blob();
+                const file = new File([blob], 'pdf_crop.png', { type: blob.type || 'image/png' });
+                const fd = new FormData();
+                fd.append('file', file);
+                const r = await fetch('/api/ocr', {
+                    method: 'POST',
+                    headers: { 'X-Local-Token': localStorage.getItem('local_token') || '' },
+                    body: fd
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok || data.status !== 'success' || !data.latex) {
+                    throw new Error(data.message || data.detail || 'OCR 未返回识别结果');
+                }
+                if (textEl) textEl.value = String(data.latex);
+                showToast('识别完成，请核对后插入到题干或解析。');
+            } catch (err) {
+                if (textEl) textEl.value = '';
+                if (panel) panel.classList.add('hidden');
+                showToast(`OCR 识别失败: ${err.message}`, 'error');
+            }
+        }
+
+        function closePdfCropOcrPanel() {
+            const panel = document.getElementById('pdfCropOcrPanel');
+            if (panel) panel.classList.add('hidden');
+        }
+
+        function insertPdfCropOcrResult(target) {
+            const textEl = document.getElementById('pdfCropOcrText');
+            const qIdx = window.activeCropQuestionIndex;
+            if (!textEl) return;
+            const latex = String(textEl.value || '').trim();
+            if (!latex) {
+                showToast('识别结果为空，无法插入。', 'warning');
+                return;
+            }
+            if (qIdx === null || qIdx === undefined || !parsedQuestionsData[qIdx]) {
+                showToast('未找到对应的题目卡片。', 'error');
+                return;
+            }
+            const card = document.getElementById(`parsed-card-${qIdx}`);
+            if (!card) {
+                showToast('题目卡片尚未渲染。', 'error');
+                return;
+            }
+            const selector = target === 'answer' ? '.card-answer-textarea' : '.card-content-textarea';
+            const textarea = card.querySelector(selector);
+            if (!textarea) {
+                showToast('未找到编辑框。', 'error');
+                return;
+            }
+            const prev = String(textarea.value || '').trim();
+            textarea.value = prev ? (prev + '\n\n' + latex) : latex;
+            textarea.dispatchEvent(new Event('input'));
+            showToast(target === 'answer' ? '已插入到解析。' : '已插入到题干。');
+            closePdfCropOcrPanel();
+            closePdfCropModal();
+        }
+
+        window.runOcrOnCroppedImage = runOcrOnCroppedImage;
+        window.closePdfCropOcrPanel = closePdfCropOcrPanel;
+        window.insertPdfCropOcrResult = insertPdfCropOcrResult;
 
         function performOrphanedTempCropsCleanup() {
             const tempPaths = [];
@@ -2194,6 +2414,8 @@
                 queueProcessing = true;
                 next.status = 'parsing';
                 console.log(`[队列] → 开始处理文件 "${next.name}" (${pendingFiles.filter(f => f.status !== 'pending').length + 1}/${pendingFiles.length})`);
+                window.__fileStartTimes = window.__fileStartTimes || {};
+                window.__fileStartTimes[next.name] = Date.now();
                 renderFileQueue();
                 // 先查库判断该文档是否已导入：已导入（且非强制）则跳过，避免重复拆解；否则正常拆解。
                 checkDocumentImported(next.name).then(info => {
@@ -2255,6 +2477,9 @@
                         cur.error = errorMsg || '拆解失败';
                         console.log(`[队列] ❌ 文件 "${cur.name}" 标记为 failed: ${errorMsg}`);
                     }
+                    const _startTs = (window.__fileStartTimes && window.__fileStartTimes[cur.name]) || null;
+                    const _elapsedSec = _startTs ? Math.round((Date.now() - _startTs) / 1000) : null;
+                    console.log(`[队列] 文件 "${cur.name}" 总耗时=${_elapsedSec != null ? _elapsedSec + 's' : '未知'} (success=${success})`);
                 } else if (!cur) {
                     console.error('[队列] ❌ 无法确定当前文件，队列可能已损坏');
                 } else {
@@ -2391,6 +2616,14 @@
             logEl.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
             consoleDiv.appendChild(logEl);
             consoleDiv.scrollTop = consoleDiv.scrollHeight;
+            // 方案 B：出错或告警时自动展开日志，确保用户不漏看关键提示（平时保持折叠省空间）
+            if (type === 'error' || type === 'warning') {
+                const toggleBtn = document.getElementById('toggleImportLogsBtn');
+                if (consoleDiv.classList.contains('hidden')) {
+                    consoleDiv.classList.remove('hidden');
+                    if (toggleBtn) toggleBtn.textContent = '收起日志';
+                }
+            }
         }
 
         // ---- 拆卷步骤进度条（进度可视化 + 错误定位） ----
@@ -2430,25 +2663,24 @@
                 ringClass = 'bg-white text-slate-400 border-slate-300';
                 textClass = 'text-slate-400';
             }
-            const connector = idx < total - 1
-                ? `<span class="absolute left-[15px] top-8 w-0.5 h-6 ${status === 'done' ? 'bg-emerald-400' : 'bg-slate-200'}"></span>`
-                : '';
+            const isLast = idx === total - 1;
+            // 横向连接线：对齐圆点垂直中心，已完成步骤显示绿色，其余浅灰
+            const connector = isLast
+                ? ''
+                : `<div class="flex-1 h-0.5 mt-2.5 ${status === 'done' ? 'bg-emerald-400' : 'bg-slate-200'}"></div>`;
+            const label = escHtml(step.label || `步骤 ${idx + 1}`);
             const detail = step.detail
-                ? `<p class="text-[10px] text-slate-500 mt-0.5 leading-snug">${escHtml(step.detail)}</p>`
+                ? `<span class="text-[9px] text-slate-500 mt-0.5 block max-w-[76px] truncate" title="${escHtml(step.detail)}">${escHtml(step.detail)}</span>`
                 : '';
-            const errorNote = status === 'error'
-                ? `<p class="text-[10px] text-red-500 mt-0.5 leading-snug font-medium">此步骤出错，请检查上方错误日志</p>`
-                : '';
+            const errorNote = status === 'error' ? ' title="此步骤出错，请检查上方错误日志"' : '';
             return (
-                `<div class="relative flex items-start space-x-3 py-1" data-step-status="${escHtml(status)}">` +
-                    `<div class="relative shrink-0">${connector}` +
-                        `<span class="inline-flex items-center justify-center w-8 h-8 rounded-full border-2 text-xs font-bold ${ringClass}">${icon}</span>` +
-                    `</div>` +
-                    `<div class="pt-1 text-left">` +
-                        `<p class="text-xs ${textClass}">${escHtml(step.label)}</p>` +
+                `<div class="flex items-start ${isLast ? '' : 'flex-1'}" data-step-status="${escHtml(status)}"${errorNote}>` +
+                    `<div class="flex flex-col items-center shrink-0 w-[72px]">` +
+                        `<span class="inline-flex items-center justify-center w-5 h-5 rounded-full border-2 text-[9px] font-bold ${ringClass}">${icon}</span>` +
+                        `<span class="text-[10px] mt-0.5 text-center leading-tight ${textClass}">${label}</span>` +
                         detail +
-                        errorNote +
                     `</div>` +
+                    connector +
                 `</div>`
             );
         }
@@ -2466,6 +2698,16 @@
                 .join('');
             container.innerHTML = html;
         }
+
+        // 切换拆解日志控制台的折叠/展开：顶部进度带默认收起日志，节省主区域空间
+        window.toggleImportLogs = function () {
+            const consoleDiv = document.getElementById('importLogsConsole');
+            const btn = document.getElementById('toggleImportLogsBtn');
+            if (!consoleDiv || !btn) return;
+            const willShow = consoleDiv.classList.contains('hidden');
+            consoleDiv.classList.toggle('hidden', !willShow);
+            btn.textContent = willShow ? '收起日志' : '查看日志';
+        };
 
         function runAIPaperParse(appendMode = false, appendSourceFile = '') {
             const titleInput = document.getElementById('importPaperTitle');
@@ -2503,10 +2745,14 @@
                 document.getElementById('parsedQuestionsWrapper').classList.add('hidden');
             }
             const loadingState = document.getElementById('importLoadingState');
-            // 单文件模式显示加载骨架；多文件追加模式保留审查列表，进度由左侧队列显示
-            if (!appendMode) {
-                loadingState.classList.remove('hidden');
-            }
+            // 始终显示拆解步骤进度条 + 加载骨架（兑现 README「拆卷过程进度可见」）。
+            // 之前此处的 `!appendMode` 守卫会把多文件批量模式（含上传 1 个文件也被判为批量，
+            // inBatchMode >= 1）的右侧加载骨架藏掉，导致步骤进度条、进度百分比、日志、取消按钮全部不可见。
+            // 代价：批量拆下一个文件时右侧会临时被加载骨架盖住，拆完会自动恢复结果区。
+            loadingState.classList.remove('hidden');
+            // 进度条容器也统一在公共入口显示（之前仅 docx 分支单独 unhide，PDF 漏了）
+            const progressBarContainer = document.getElementById('importProgressBarContainer');
+            if (progressBarContainer) progressBarContainer.classList.remove('hidden');
 
             const loadingIcon = loadingState.querySelector('.fa-circle-notch, .fa-spinner, .fa-circle-exclamation');
             if (loadingIcon) {
@@ -2560,6 +2806,7 @@
                     if (taskData.status === 'success') {
                         const taskId = taskData.task_id;
                         appendImportLog(`Word 任务已成功创建！任务 ID: ${taskId}，开始轮询分析切片进度...`, 'success');
+                        console.log(`[队列][提交] 后端已接收 Word 任务 task=${taskId} 文件=${(window.__currentParseSourceFile || (window.currentDocxFile && window.currentDocxFile.name) || '')} 开始轮询`);
                         pollPdfTaskStatus(taskId, importTaskGeneration);
                     } else {
                         throw new Error(taskData.message || '创建 Word 解析任务失败');
@@ -2646,6 +2893,7 @@
                     if (taskData.status === 'success') {
                         const taskId = taskData.task_id;
                         appendImportLog(`任务已成功创建！任务 ID: ${taskId}，开始轮询后台分析进度...`, 'success');
+                        console.log(`[队列][提交] 后端已接收 PDF 任务 task=${taskId} 文件=${(window.__currentParseSourceFile || (window.currentPdfFile && window.currentPdfFile.name) || '')} 开始轮询`);
                         pollPdfTaskStatus(taskId, importTaskGeneration);
                     } else {
                         throw new Error(taskData.message || '创建 PDF 解析任务失败');
@@ -2927,39 +3175,217 @@
             }
         });
 
+        // 拆解任务成功完成后的统一收尾：灌入审查列表、打印诊断、推进队列。
+        // 抽成独立函数，供「轮询到 completed」与「超时判定后的抢救」两条路径复用。
+        function handleParseTaskCompleted(task, taskId, identity) {
+            console.log('[队列] PDF/Word 任务 completed，开始处理完成回调', { identity, appendMode: window.__currentParseAppendMode });
+            if (identity && typeof finishDocumentPoll === 'function' && !finishDocumentPoll(identity)) {
+                console.warn('[队列] ⚠️ finishDocumentPoll 返回 false，generation 可能已过期，但仍尝试推进队列');
+                // 不 return——即使 generation 过期也尝试推进队列，避免卡死
+            }
+            const runBtn = document.getElementById('runParseBtn');
+            let appendMode = window.__currentParseAppendMode;
+            const sourceFile = window.__currentParseSourceFile;
+            const isWordTask = task.document_type === 'docx';
+            const documentLabel = isWordTask ? 'Word' : 'PDF';
+            try {
+                if (appendMode) {
+                    const res = appendParsedQuestions(task.data || [], sourceFile);
+                    appendImportLog(`【${sourceFile}】${documentLabel} 拆解完成，新增 ${res.count} 道题（累计 ${parsedQuestionsData.length} 道）。`, 'success');
+                } else {
+                    replaceParsedQuestions(task.data || []);
+                    appendImportLog(`${documentLabel} 试卷分析并拆解成功！共分析出 ${parsedQuestionsData.length} 道数学题。`, 'success');
+                }
+                if (isWordTask && task.diagnostics) {
+                    const report = task.diagnostics;
+                    const converted = (report.omml_converted || 0) + (report.mtef_converted || 0);
+                    const reviewCount = report.review_required || 0;
+                    appendImportLog(`Word 提取报告：${converted} 个公式已转换，${report.images_extracted || 0} 张图片已保留，${reviewCount} 处需人工核对。`, reviewCount > 0 ? 'warning' : 'info');
+                    const structuralMathType = report.mtef_structural_converted || 0;
+                    const annotatedMathType = report.mtef_annotation_converted || 0;
+                    const compatibleMathType = report.mtef_compatibility_converted || 0;
+                    if (structuralMathType || annotatedMathType || compatibleMathType) {
+                        appendImportLog(`MathType 明细：${structuralMathType} 个按公式结构转换，${annotatedMathType} 个使用内嵌 LaTeX，${compatibleMathType} 个使用有限文本兼容。`, compatibleMathType > 0 ? 'warning' : 'info');
+                    }
+                    const restoredNumbers = report.numbering_converted || 0;
+                    const restoredFormatting = (report.superscripts_converted || 0)
+                        + (report.subscripts_converted || 0)
+                        + (report.underlines_converted || 0)
+                        + (report.text_styles_converted || 0);
+                    if (restoredNumbers || restoredFormatting) {
+                        appendImportLog(`Word 排版语义：已恢复 ${restoredNumbers} 个自动编号、${restoredFormatting} 处上下标/下划线/强调格式。`, 'info');
+                    }
+                    const lockedMath = report.math_locks_created || 0;
+                    if (lockedMath) {
+                        appendImportLog(`公式保真校验：${report.math_locks_restored || 0}/${lockedMath} 个公式已按 Word 原文恢复，拆卷模型未直接改写最终公式。`, 'info');
+                    }
+                    if (reviewCount > 0 && !appendMode) {
+                        showToast(`Word 中有 ${reviewCount} 处公式、字符、图片或表格需人工核对，已保留提示标记。`, 'warning');
+                    }
+                }
+
+                if (appendMode) {
+                    renderParsedQuestionsAppend(window.__currentParseStartIndex || 0);
+                } else {
+                    renderParsedQuestionsList(parsedQuestionsData);
+                }
+
+                document.getElementById('importLoadingState').classList.add('hidden');
+                document.getElementById('parsedQuestionsWrapper').classList.remove('hidden');
+
+                if (runBtn) {
+                    runBtn.disabled = false;
+                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                }
+            } catch (renderErr) {
+                console.error('[队列] ❌ 渲染过程异常（仍尝试推进队列）:', renderErr);
+                appendImportLog(`渲染异常: ${renderErr.message}（队列将继续推进）`, 'error');
+                // 即使渲染异常也不卡队列
+            }
+            // ★★★ 关键：无论前面是否异常，都要推进队列 ★★★
+            console.log('[队列] 准备推进队列: appendMode=', appendMode, 'typeof advanceQueueAfterParse=', typeof advanceQueueAfterParse);
+            if (appendMode) {
+                console.log('[队列] ✅ 调用 advanceQueueAfterParse(true) 推进到下一文件');
+                if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
+            }
+        }
+
+        // 超时/无进展判定。注意：前端判死并不会中止后端任务——
+        // 大卷（如含数千公式的 Word）很可能只是还没算完。因此判死前先查一次最新状态，
+        // 若服务端已完成就直接收题，避免白白浪费一次十几分钟的长耗时拆解。
+        function handleParseTimeout(identity, taskId, reason) {
+            if (typeof finishDocumentPoll === 'function') finishDocumentPoll(identity);
+            const timedOutName = (window.__currentQueueFile && window.__currentQueueFile.name)
+                || window.__currentParseSourceFile || '';
+
+            fetch(`/api/tasks/${taskId}/status`)
+                .then(r => (r.ok ? r.json() : null))
+                .then(latest => {
+                    if (latest && latest.status === 'completed') {
+                        const rescued = (latest.data || []).length;
+                        console.warn('[队列] ⏱️ 超时判定触发，但服务端实际已完成 → 抢救收题', { name: timedOutName, rescued });
+                        appendImportLog(`⏱️ 前端等待超时（${reason}），但服务端实际已完成拆解，已自动回收 ${rescued} 道题。`, 'warning');
+                        handleParseTaskCompleted(latest, taskId, identity);
+                        return;
+                    }
+                    console.warn('[队列] ⚠️ 拆解超时，标记失败并继续下一个文件', { name: timedOutName, reason });
+                    appendImportLog(`⏱️ 文件「${timedOutName}」${reason}，已标记为失败。可点「重试」重新拆解，或「移除」跳过。`, 'error');
+                    if (typeof advanceQueueAfterParse === 'function') {
+                        advanceQueueAfterParse(false, reason);
+                    }
+                })
+                .catch(() => {
+                    console.warn('[队列] ⚠️ 拆解超时且抢救查询失败，标记失败', { name: timedOutName, reason });
+                    appendImportLog(`⏱️ 文件「${timedOutName}」${reason}，已标记为失败。可点「重试」重新拆解。`, 'error');
+                    if (typeof advanceQueueAfterParse === 'function') {
+                        advanceQueueAfterParse(false, reason);
+                    }
+                });
+        }
+
+        // 一次性抢救入口：若某次拆解被前端误判超时、但服务端实际已 completed，
+        // 且任务尚未超过服务端保留时限，可在浏览器控制台执行：
+        //   __rescueCompletedTask('<task_id>')
+        // 直接把已拆好的题目回收到审查列表，无需重新上传、重跑大模型。
+        window.__rescueCompletedTask = function(taskId) {
+            return fetch(`/api/tasks/${taskId}/status`)
+                .then(r => (r.ok ? r.json() : null))
+                .then(task => {
+                    if (!task) {
+                        console.error('[抢救] 任务不存在或已过期：', taskId);
+                        return 0;
+                    }
+                    if (task.status !== 'completed') {
+                        console.error('[抢救] 任务尚未完成，当前状态：', task.status);
+                        return 0;
+                    }
+                    const rescued = (task.data || []).length;
+                    window.__currentParseSourceFile = window.__currentParseSourceFile || (task.document_type === 'docx' ? 'Word 试卷' : 'PDF 试卷');
+                    handleParseTaskCompleted(task, taskId, null);
+                    console.log(`[抢救] ✅ 已回收 ${rescued} 道题到审查列表`);
+                    return rescued;
+                })
+                .catch(err => {
+                    console.error('[抢救] 失败：', err);
+                    return 0;
+                });
+        };
+
         function pollPdfTaskStatus(taskId, generation) {
             if (!isCurrentDocumentImportTask(generation)) return;
             let lastLog = '';
             const runBtn = document.getElementById('runParseBtn');
 
-            stopCurrentDocumentPoll();
-            window.currentPdfTaskId = taskId;
-            const identity = { generation, taskId, intervalId: null, startedAt: Date.now() };
-            activeDocumentPoll = identity;
-            identity.intervalId = setInterval(() => {
-                // 方案B：拆解绝对超时保护。超过 PARSE_TIMEOUT_MS 仍无 completed/error 响应，
-                // 判定后端任务卡死，标记该文件失败并继续下一个，避免全盘卡死、已拆完的题也无法入库。
-                const PARSE_TIMEOUT_MS = window.__PARSE_TIMEOUT_MS || (5 * 60 * 1000);
-                if (Date.now() - identity.startedAt > PARSE_TIMEOUT_MS) {
-                    const timedOutName = (window.__currentQueueFile && window.__currentQueueFile.name)
-                        || window.__currentParseSourceFile || '';
-                    console.warn('[队列] ⚠️ 拆解超时（超过 5 分钟无响应），标记失败并继续下一个文件', { name: timedOutName });
-                    finishDocumentPoll(identity);
-                    appendImportLog(`⏱️ 文件「${timedOutName}」拆解超时（超过 5 分钟无响应），已标记为失败。可点「重试」重新拆解，或「移除」跳过。`, 'error');
-                    if (typeof advanceQueueAfterParse === 'function') {
-                        advanceQueueAfterParse(false, '拆解超时（超过 5 分钟无响应）');
-                    }
-                    return;
-                }
-                fetch(`/api/tasks/${taskId}/status`)
+        stopCurrentDocumentPoll();
+        window.currentPdfTaskId = taskId;
+        const identity = {
+            generation,
+            taskId,
+            intervalId: null,
+            startedAt: Date.now(),
+            lastProgress: -1,
+            lastProgressAt: Date.now(),
+            // 任务是否仍在后端 executor 队列排队（status=pending/queued）。
+            // 排队期间 progress 恒为 0，前端无从判断后端是否卡死，故不计静默超时。
+            backendQueued: false,
+            queuedSince: 0,
+        };
+        activeDocumentPoll = identity;
+
+        // 超时判定：先看「是否长时间毫无进展」，再看绝对上限。
+        // 长卷（如含数千个 MathType 公式的教辅）合法拆解可能超过十分钟，
+        // 只要后端进度在推进就不该判死；但进度长时间不动，就认为任务卡住了。
+        const IDLE_TIMEOUT_MS = window.__PARSE_IDLE_TIMEOUT_MS || (10 * 60 * 1000);  // 10 分钟静默超时
+        const PARSE_TIMEOUT_MS = window.__PARSE_TIMEOUT_MS || (30 * 60 * 1000);     // 30 分钟绝对上限
+
+        identity.intervalId = setInterval(() => {
+            const idleFor = Date.now() - identity.lastProgressAt;
+            // 后端队列排队期间（status=pending/queued，progress 恒为 0）不判静默超时：
+            // 前端无法区分「后端排队中」与「后端卡死」，一律按卡死处理会误杀后续文件
+            // （典型表现：同时上传 3 个文件，第 3 个在排队期间被标记失败，单独上传却正常）。
+            // 排队仍受下方 30 分钟绝对上限约束，不会无限等待。
+            if (!identity.backendQueued && idleFor > IDLE_TIMEOUT_MS) {
+                handleParseTimeout(identity, taskId, `拆解无进展（进度已 ${Math.round(idleFor / 60000)} 分钟未更新）`);
+                return;
+            }
+            if (Date.now() - identity.startedAt > PARSE_TIMEOUT_MS) {
+                handleParseTimeout(identity, taskId, `拆解超时（超过 ${Math.round(PARSE_TIMEOUT_MS / 60000)} 分钟）`);
+                return;
+            }
+            fetch(`/api/tasks/${taskId}/status`)
                 .then(r => {
                     if (!r.ok) throw new Error("获取任务进度失败");
                     return r.json();
                 })
                 .then(task => {
                     if (!isCurrentDocumentPoll(identity)) return;
+                    // [诊断] 每拍打印后端状态，定位多文件时后续文件卡在哪个阶段
+                    const _nowTs = Date.now();
+                    const _idleSec = Math.round((_nowTs - identity.lastProgressAt) / 1000);
+                    const _totalSec = Math.round((_nowTs - identity.startedAt) / 1000);
+                    const _isQueued = (task.status === 'pending' || task.status === 'queued');
+                    console.log(`[队列][轮询] task=${taskId} status=${task.status} progress=${task.progress} idle=${_idleSec}s total=${_totalSec}s${_isQueued ? ' ⚠️仍在后端队列等待(无进度推进)' : ''}`);
+                    // 排队状态同步到 identity 以豁免静默超时，并给用户可见的等待提示。
+                    if (_isQueued) {
+                        if (!identity.backendQueued) {
+                            identity.backendQueued = true;
+                            identity.queuedSince = Date.now();
+                            appendImportLog('后端队列繁忙，本文件正在排队等待拆解…', 'current');
+                        }
+                        const _queueSubText = document.getElementById('importSubLoadingText');
+                        if (_queueSubText) {
+                            _queueSubText.textContent = `已在后端队列等待 ${Math.round((Date.now() - identity.queuedSince) / 1000)} 秒，前面的文件处理完即自动开始…`;
+                        }
+                    } else if (identity.backendQueued) {
+                        identity.backendQueued = false;
+                    }
                     if (task.progress !== undefined) {
                         document.getElementById('importProgressBar').style.width = `${task.progress}%`;
+                        // 进度（或阶段日志）有变化 → 说明后端仍在推进，刷新静默计时。
+                        if (task.progress !== identity.lastProgress) {
+                            identity.lastProgress = task.progress;
+                            identity.lastProgressAt = Date.now();
+                        }
                     }
 
                     if (task.steps) {
@@ -2968,6 +3394,8 @@
                     
                     if (task.log && task.log !== lastLog) {
                         lastLog = task.log;
+                        // 阶段日志变化（如「第 N/M 段」）同样代表后端在推进，刷新静默计时。
+                        identity.lastProgressAt = Date.now();
                         appendImportLog(task.log, 'current');
                         document.getElementById('importLoadingText').textContent = task.log;
                         
@@ -2998,73 +3426,7 @@
                     }
                     
                     if (task.status === 'completed') {
-                        console.log('[队列] PDF/Word 任务 completed，开始处理完成回调', { identity, appendMode: window.__currentParseAppendMode });
-                        if (!finishDocumentPoll(identity)) {
-                            console.warn('[队列] ⚠️ finishDocumentPoll 返回 false，generation 可能已过期，但仍尝试推进队列');
-                            // 不 return——即使 generation 过期也尝试推进队列，避免卡死
-                        }
-                        let appendMode = window.__currentParseAppendMode;
-                        const sourceFile = window.__currentParseSourceFile;
-                        const isWordTask = task.document_type === 'docx';
-                        const documentLabel = isWordTask ? 'Word' : 'PDF';
-                        try {
-                            if (appendMode) {
-                                const res = appendParsedQuestions(task.data || [], sourceFile);
-                                appendImportLog(`【${sourceFile}】${documentLabel} 拆解完成，新增 ${res.count} 道题（累计 ${parsedQuestionsData.length} 道）。`, 'success');
-                            } else {
-                                replaceParsedQuestions(task.data || []);
-                                appendImportLog(`${documentLabel} 试卷分析并拆解成功！共分析出 ${parsedQuestionsData.length} 道数学题。`, 'success');
-                            }
-                            if (isWordTask && task.diagnostics) {
-                                const report = task.diagnostics;
-                                const converted = (report.omml_converted || 0) + (report.mtef_converted || 0);
-                                const reviewCount = report.review_required || 0;
-                                appendImportLog(`Word 提取报告：${converted} 个公式已转换，${report.images_extracted || 0} 张图片已保留，${reviewCount} 处需人工核对。`, reviewCount > 0 ? 'warning' : 'info');
-                                const structuralMathType = report.mtef_structural_converted || 0;
-                                const annotatedMathType = report.mtef_annotation_converted || 0;
-                                const compatibleMathType = report.mtef_compatibility_converted || 0;
-                                if (structuralMathType || annotatedMathType || compatibleMathType) {
-                                    appendImportLog(`MathType 明细：${structuralMathType} 个按公式结构转换，${annotatedMathType} 个使用内嵌 LaTeX，${compatibleMathType} 个使用有限文本兼容。`, compatibleMathType > 0 ? 'warning' : 'info');
-                                }
-                                const restoredNumbers = report.numbering_converted || 0;
-                                const restoredFormatting = (report.superscripts_converted || 0)
-                                    + (report.subscripts_converted || 0)
-                                    + (report.underlines_converted || 0)
-                                    + (report.text_styles_converted || 0);
-                                if (restoredNumbers || restoredFormatting) {
-                                    appendImportLog(`Word 排版语义：已恢复 ${restoredNumbers} 个自动编号、${restoredFormatting} 处上下标/下划线/强调格式。`, 'info');
-                                }
-                                const lockedMath = report.math_locks_created || 0;
-                                if (lockedMath) {
-                                    appendImportLog(`公式保真校验：${report.math_locks_restored || 0}/${lockedMath} 个公式已按 Word 原文恢复，拆卷模型未直接改写最终公式。`, 'info');
-                                }
-                                if (reviewCount > 0 && !appendMode) {
-                                    showToast(`Word 中有 ${reviewCount} 处公式、字符、图片或表格需人工核对，已保留提示标记。`, 'warning');
-                                }
-                            }
-
-                            if (appendMode) {
-                                renderParsedQuestionsAppend(window.__currentParseStartIndex || 0);
-                            } else {
-                                renderParsedQuestionsList(parsedQuestionsData);
-                            }
-
-                            document.getElementById('importLoadingState').classList.add('hidden');
-                            document.getElementById('parsedQuestionsWrapper').classList.remove('hidden');
-
-                            runBtn.disabled = false;
-                            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
-                        } catch (renderErr) {
-                            console.error('[队列] ❌ 渲染过程异常（仍尝试推进队列）:', renderErr);
-                            appendImportLog(`渲染异常: ${renderErr.message}（队列将继续推进）`, 'error');
-                            // 即使渲染异常也不卡队列
-                        }
-                        // ★★★ 关键：无论前面是否异常，都要推进队列 ★★★
-                        console.log('[队列] 准备推进队列: appendMode=', appendMode, 'typeof advanceQueueAfterParse=', typeof advanceQueueAfterParse);
-                        if (appendMode) {
-                            console.log('[队列] ✅ 调用 advanceQueueAfterParse(true) 推进到下一文件');
-                            if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
-                        }
+                        handleParseTaskCompleted(task, taskId, identity);
                     } else if (task.status === 'cancelled') {
                         if (!finishDocumentPoll(identity)) return;
                         document.getElementById('importLoadingState').classList.add('hidden');
@@ -3073,27 +3435,36 @@
                     } else if (task.status === 'error') {
                         if (!finishDocumentPoll(identity)) return;
                         appendImportLog(`分析失败: ${task.error || '未知错误'}`, 'error');
-                        
-                        const loadingIcon = document.querySelector('#importLoadingState .fa-spinner');
-                        if (loadingIcon) {
-                            loadingIcon.classList.remove('fa-spinner', 'animate-spin');
-                            loadingIcon.classList.add('fa-circle-exclamation', 'text-red-500');
-                        }
-                        const documentLabel = task.document_type === 'docx' ? 'Word' : 'PDF';
-                        document.getElementById('importLoadingText').textContent = `${documentLabel} 试卷分析中断！`;
 
-                        const loadingState = document.getElementById('importLoadingState');
-                        let resetBtn = document.getElementById('resetImportBtn');
-                        if (!resetBtn) {
-                            resetBtn = document.createElement('button');
-                            resetBtn.id = 'resetImportBtn';
-                            resetBtn.className = 'mt-4 px-6 py-2.5 rounded-xl bg-gradient-to-r from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700 text-white font-bold text-xs shadow-lg transition-all active:scale-95 flex items-center space-x-2';
-                            resetBtn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i><span>重置并重新开始</span>';
-                            resetBtn.onclick = resetImportState;
-                            loadingState.appendChild(resetBtn);
+                        const documentLabel = task.document_type === 'docx' ? 'Word' : 'PDF';
+                        const hasExistingResults = Array.isArray(parsedQuestionsData) && parsedQuestionsData.length > 0;
+
+                        if (hasExistingResults) {
+                            // 已有拆解结果时：把 loading 状态完全收起，避免遮挡题目审查区；
+                            // 改为在结果区顶部显示一条可关闭的紧凑错误提示。
+                            document.getElementById('importLoadingState').classList.add('hidden');
+                            showParsedCompactError(`${documentLabel} 拆解中断：${task.error || '未知错误'}。当前已有 ${parsedQuestionsData.length} 道题可审查，失败文件可在左侧队列中重试。`);
+                        } else {
+                            const loadingIcon = document.querySelector('#importLoadingState .fa-spinner');
+                            if (loadingIcon) {
+                                loadingIcon.classList.remove('fa-spinner', 'animate-spin');
+                                loadingIcon.classList.add('fa-circle-exclamation', 'text-red-500');
+                            }
+                            document.getElementById('importLoadingText').textContent = `${documentLabel} 试卷分析中断！`;
+
+                            const loadingState = document.getElementById('importLoadingState');
+                            let resetBtn = document.getElementById('resetImportBtn');
+                            if (!resetBtn) {
+                                resetBtn = document.createElement('button');
+                                resetBtn.id = 'resetImportBtn';
+                                resetBtn.className = 'mt-4 px-6 py-2.5 rounded-xl bg-gradient-to-r from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700 text-white font-bold text-xs shadow-lg transition-all active:scale-95 flex items-center space-x-2';
+                                resetBtn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i><span>重置并重新开始</span>';
+                                resetBtn.onclick = resetImportState;
+                                loadingState.appendChild(resetBtn);
+                            }
+                            resetBtn.classList.remove('hidden');
                         }
-                        resetBtn.classList.remove('hidden');
-                        
+
                         runBtn.disabled = false;
                         runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
                         showToast(`${documentLabel} 拆解分析失败: ${task.error || '未知错误'}`, 'error');
@@ -3231,9 +3602,10 @@
             beginDocumentImportTask();
             // 清空步骤进度条
             resetImportSteps();
-            // 隐藏加载状态和结果视图
+            // 隐藏加载状态、结果视图和紧凑错误提示
             document.getElementById('importLoadingState').classList.add('hidden');
             document.getElementById('parsedQuestionsWrapper').classList.add('hidden');
+            dismissParsedCompactError();
 
             // 显示占位视图
             document.getElementById('importPlaceholder').classList.remove('hidden');
@@ -3603,14 +3975,32 @@
             const header = document.createElement('div');
             header.className = 'flex items-center justify-between gap-2 mt-5 mb-2 px-3 py-2 rounded-xl bg-brand-50/80 border border-brand-200/80 sticky top-0 z-10 backdrop-blur-sm';
             header.dataset.groupHeader = groupIndex;
+            // label 加 data-group-header-label：后续新文件追加时，用 refreshAllFileGroupHeaders
+            // 把所有已有分组的分母统一刷成最新 total，避免出现"1/1、2/2、3/3"这种自欺欺人的标号。
             header.innerHTML = `
                 <div class="flex items-center space-x-2 min-w-0">
                     <i class="fa-solid fa-file-lines text-brand-600 text-sm shrink-0"></i>
-                    <span class="text-[11px] font-bold text-brand-800 truncate" title="${window.MathBankSafe.escapeAttribute(group.name)}">文件 ${groupIndex + 1}/${total}：${window.MathBankSafe.escapeText(group.name)}</span>
+                    <span class="text-[11px] font-bold text-brand-800 truncate file-group-label" data-group-header-label="${groupIndex}" title="${window.MathBankSafe.escapeAttribute(group.name)}">文件 ${groupIndex + 1}/${total}：${window.MathBankSafe.escapeText(group.name)}</span>
                 </div>
                 <span data-group-visible class="text-[10px] font-bold text-brand-600 bg-white/70 border border-brand-100 rounded-full px-2 py-0.5 shrink-0">${group.count} 题</span>
             `;
             container.appendChild(header);
+        }
+
+        // 新增文件后，刷新所有分组头 label 的"X/Y"分母为最新总数。
+        function refreshAllFileGroupHeaders() {
+            const container = document.getElementById('parsedCardsContainer');
+            if (!container) return;
+            const total = parsedFileGroups.length;
+            container.querySelectorAll('[data-group-header-label]').forEach((label) => {
+                const gi = parseInt(label.dataset.groupHeaderLabel, 10);
+                if (isNaN(gi)) return;
+                const grp = parsedFileGroups[gi];
+                if (!grp) return;
+                const name = grp.name || '';
+                label.textContent = `文件 ${gi + 1}/${total}：${name}`;
+                label.title = name;
+            });
         }
 
         function renderParsedQuestionsList(questions) {
@@ -3806,6 +4196,25 @@
             updateChapters();
             updateKnowledge();
         }
+
+        // 当异步加载的 categoryTree 到位后，刷新所有已渲染拆解卡片的学段/章节/小节下拉
+        function refreshParsedCardsCategoryLinkage() {
+            const tree = (typeof categoryTree !== 'undefined' && categoryTree) || window.categoryTree;
+            if (!tree || !Object.keys(tree).length) return;
+            const container = document.getElementById('parsedCardsContainer');
+            if (!container) return;
+            container.querySelectorAll('[id^="parsed-card-"]').forEach(card => {
+                const idxStr = card.id.replace('parsed-card-', '');
+                const idx = parseInt(idxStr, 10);
+                if (!isNaN(idx) && parsedQuestionsData[idx]) {
+                    setupCardCategoryLinkage(card, parsedQuestionsData[idx]);
+                }
+            });
+        }
+
+        document.addEventListener('categorytreeupdated', () => {
+            refreshParsedCardsCategoryLinkage();
+        });
 
         // 初始化拆解卡片的多标签输入 (知识点 / 解题方法)
         function setupCardTagInput(card, field, initialValue) {
@@ -4204,8 +4613,8 @@
             const difficulty = card.querySelector('.card-difficulty').value;
             const source = card.querySelector('.card-source').value.trim();
             
-            const category_compulsory = card.querySelector('.card-compulsory').value;
-            const category_chapter = card.querySelector('.card-chapter').value;
+            let category_compulsory = card.querySelector('.card-compulsory').value;
+            let category_chapter = card.querySelector('.card-chapter').value;
             const category_knowledge = card.querySelector('.card-knowledge').value;
 
             const knowledgeListEl = card.querySelector('.card-knowledge-tags-input');
@@ -4221,26 +4630,11 @@
                 showToast(`第 ${index + 1} 题的题干内容不能为空！`, 'warning');
                 return Promise.reject(new Error('Content empty'));
             }
+            // 学段 / 章节缺失不拦截导入：自动归入「未分类」后继续保存，稍后可在题库内手动调整
             if (!category_compulsory || !category_chapter) {
-                showToast(`请选择第 ${index + 1} 题的学段与所属章节！`, 'warning');
-                
-                // Auto-scroll to the missing classification select inside this specific parsed card!
-                const compSelect = card.querySelector('.card-compulsory');
-                const chapSelect = card.querySelector('.card-chapter');
-                const targetSelect = !category_compulsory ? compSelect : chapSelect;
-                
-                if (targetSelect) {
-                    targetSelect.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    targetSelect.classList.remove('border-slate-200');
-                    targetSelect.classList.add('ring-2', 'ring-red-400', 'border-red-400');
-                    setTimeout(() => {
-                        targetSelect.classList.remove('ring-2', 'ring-red-400', 'border-red-400');
-                        targetSelect.classList.add('border-slate-200');
-                    }, 2500);
-                    targetSelect.focus();
-                }
-                
-                return Promise.reject(new Error('Curriculum empty'));
+                category_compulsory = category_compulsory || '未分类';
+                category_chapter = category_chapter || '未分类';
+                showToast(`第 ${index + 1} 题学段/章节缺失，已自动归入「未分类」`, 'info');
             }
 
             const saveBtn = card.querySelector('.card-save-btn');
@@ -4588,6 +4982,24 @@
                 btn.classList.toggle('hover:bg-slate-100', !active);
             });
             applyReviewFilter();
+        }
+
+        // 在结果审查区顶部显示一条紧凑的可关闭错误提示（替代占满屏的大 loading 状态）
+        function showParsedCompactError(message) {
+            const banner = document.getElementById('parsedCompactErrorBanner');
+            const text = document.getElementById('parsedCompactErrorText');
+            if (!banner || !text) return;
+            text.textContent = message;
+            banner.classList.remove('hidden');
+            banner.classList.add('flex');
+        }
+
+        // 关闭结果审查区顶部的紧凑错误提示
+        function dismissParsedCompactError() {
+            const banner = document.getElementById('parsedCompactErrorBanner');
+            if (!banner) return;
+            banner.classList.add('hidden');
+            banner.classList.remove('flex');
         }
 
         function saveAllParsedQuestions() {

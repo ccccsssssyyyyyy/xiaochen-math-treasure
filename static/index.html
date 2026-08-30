@@ -1718,20 +1718,20 @@
     <div id="latexImportModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="latexImportModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
         <div class="glass-modal rounded-2xl w-[95vw] h-[95vh] max-w-none flex flex-col transform scale-95 transition-transform duration-300 overflow-hidden">
             <!-- Modal Header -->
-            <div class="flex justify-between items-center border-b border-slate-200/50 px-6 py-4 shrink-0">
-                <h3 id="latexImportModalTitle" class="font-bold text-lg text-slate-800 flex items-center space-x-2">
-                    <i class="fa-solid fa-file-import text-brand-600"></i>
+            <div class="flex justify-between items-center border-b border-slate-200/50 px-5 py-2.5 shrink-0">
+                <h3 id="latexImportModalTitle" class="font-bold text-base text-slate-800 flex items-center space-x-2">
+                    <i class="fa-solid fa-file-import text-brand-600 text-sm"></i>
                     <span>LaTeX 试卷智能拆解导入与配图自动关联</span>
                 </h3>
-                <button type="button" data-modal-close onclick="closeImportModal()" aria-label="关闭试卷智能拆解弹窗" class="glass-btn w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all">
-                    <i class="fa-solid fa-xmark text-lg"></i>
+                <button type="button" data-modal-close onclick="closeImportModal()" aria-label="关闭试卷智能拆解弹窗" class="glass-btn w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 transition-all">
+                    <i class="fa-solid fa-xmark text-sm"></i>
                 </button>
             </div>
 
             <!-- Modal Content (Split Pane) -->
             <div id="latexImportModalContent" class="flex-1 flex overflow-hidden">
                 <!-- Left Pane: Inputs (LaTeX and Images) -->
-                <div id="importInputPane" class="w-5/12 border-r border-slate-200 p-6 overflow-y-auto space-y-4 bg-white/50 flex flex-col">
+                <div id="importInputPane" class="w-[320px] shrink-0 border-r border-slate-200 p-4 overflow-y-auto space-y-3 bg-white/50 flex flex-col">
                     <!-- Step 1: Title -->
                     <div id="importTitleGroup" class="space-y-1.5 shrink-0">
                         <label class="block text-xs font-bold text-slate-500">第一步：试卷标题（作为题目来源，可空）</label>
@@ -1829,7 +1829,7 @@
                 </div>
 
                 <!-- Right Pane: AI Review Lists -->
-                <div class="w-7/12 p-6 overflow-y-auto space-y-4 flex flex-col bg-slate-100/50 relative" id="importReviewPane">
+                <div class="flex-1 p-4 overflow-hidden space-y-3 flex flex-col bg-slate-100/50 relative min-w-0" id="importReviewPane">
                     <!-- Default state / Placeholder -->
                     <div id="importPlaceholder" class="flex-1 flex flex-col items-center justify-center text-center space-y-3 p-12">
                         <div class="h-16 w-16 bg-white border border-slate-200 rounded-2xl shadow-sm flex items-center justify-center text-brand-600 text-2xl">
@@ -1843,52 +1843,54 @@
                         </div>
                     </div>
 
-                    <!-- Loading / Skeleton state -->
-                    <div id="importLoadingState" role="status" aria-live="polite" class="flex-1 flex flex-col items-center justify-center text-center space-y-4 hidden p-12">
-                        <div class="h-16 w-16 bg-white border border-brand-200/80 rounded-2xl shadow-sm flex items-center justify-center text-brand-600 text-2xl mb-1">
-                            <i class="fa-solid fa-circle-notch fa-spin text-brand-600 text-3xl inline-block"></i>
-                        </div>
-                        <div class="space-y-1.5 w-full max-w-xs flex flex-col items-center">
-                            <h4 class="font-bold text-slate-700 text-sm" id="importLoadingText">正在整理插图映射并预备上传...</h4>
-                            <!-- Progress bar -->
-                            <div class="w-full bg-slate-200 rounded-full h-1.5 mt-2 hidden" id="importProgressBarContainer">
-                                <div class="bg-brand-600 h-1.5 rounded-full transition-all duration-300" style="width: 0%" id="importProgressBar"></div>
+                        <!-- Loading / Skeleton state: 顶部横向进度带 + 可折叠日志，不再占满主区域，避免遮挡题目列表 -->
+                        <div id="importLoadingState" role="status" aria-live="polite" class="shrink-0 hidden bg-slate-50/70 border-b border-slate-200/60 px-4 py-2 space-y-1.5">
+                            <div class="flex items-center gap-2.5">
+                                <i class="fa-solid fa-circle-notch fa-spin text-brand-600 text-base shrink-0"></i>
+                                <h4 id="importLoadingText" class="text-xs font-bold text-slate-700 flex-1 truncate">正在整理插图映射并预备上传...</h4>
+                                <div class="w-24 bg-slate-200 rounded-full h-1.5 shrink-0 hidden" id="importProgressBarContainer">
+                                    <div class="bg-brand-600 h-1.5 rounded-full transition-all duration-300" style="width: 0%" id="importProgressBar"></div>
+                                </div>
+                                <button id="toggleImportLogsBtn" onclick="toggleImportLogs()" type="button" class="shrink-0 text-[10px] font-bold text-slate-500 hover:text-brand-600 px-2 py-0.5 rounded-md border border-slate-200 bg-white transition-colors">查看日志</button>
+                                <button id="btnCancelImport" onclick="cancelCurrentImportTask()" class="shrink-0 px-2.5 py-0.5 rounded-lg border border-slate-300 hover:border-red-300 bg-white hover:bg-red-50/80 text-slate-600 hover:text-red-600 font-bold text-[10px] transition-all active:scale-95 flex items-center space-x-1 cursor-pointer" title="点击或按键盘 ESC 键可安全中止当前任务">
+                                    <i class="fa-solid fa-ban text-[10px] text-red-500"></i>
+                                    <span>中止拆分 (ESC)</span>
+                                </button>
                             </div>
-                            <!-- 拆卷步骤进度条：实时显示拆解进行到哪一步，出错时高亮失败步骤 -->
-                            <div id="importStepsContainer" class="w-full max-w-xs mt-3 hidden" aria-label="拆卷步骤进度"></div>
-                            <p class="text-xs text-slate-500 max-w-xs leading-relaxed mt-1" id="importSubLoadingText">
+                            <!-- 拆卷步骤进度条（横向走廊）：实时显示拆解进行到哪一步，出错时高亮失败步骤 -->
+                            <div id="importStepsContainer" class="hidden flex items-start" aria-label="拆卷步骤进度"></div>
+                            <p class="text-[10px] text-slate-500 hidden" id="importSubLoadingText">
                                 正在探测 PDF 试卷格式并准备提取...
                             </p>
+                            <!-- 可折叠日志控制台 -->
+                            <div class="hidden bg-white rounded-lg p-2 text-left font-mono text-[10px] text-slate-600 overflow-y-auto h-20 select-none shadow-inner border border-slate-200" id="importLogsConsole" role="log" aria-live="polite" aria-label="试卷拆解进度日志">
+                                <div>[SYSTEM] 准备就绪，等待上传图片...</div>
+                            </div>
                         </div>
-                        <!-- Beautiful interactive logs console -->
-                        <div class="w-full max-w-md bg-slate-50 rounded-xl p-3 text-left font-mono text-[10px] text-slate-600 overflow-y-auto h-24 select-none shadow-inner border border-slate-200" id="importLogsConsole" role="log" aria-live="polite" aria-label="试卷拆解进度日志">
-                            <div>[SYSTEM] 准备就绪，等待上传图片...</div>
-                        </div>
-                        <!-- Cancel action button -->
-                        <div class="flex items-center space-x-2 pt-1" id="cancelImportActionContainer">
-                            <button id="btnCancelImport" onclick="cancelCurrentImportTask()" class="px-4 py-1.5 rounded-xl border border-slate-300 hover:border-red-300 bg-white hover:bg-red-50/80 text-slate-600 hover:text-red-600 font-bold text-xs transition-all shadow-sm active:scale-95 flex items-center space-x-1.5 cursor-pointer" title="点击或按键盘 ESC 键可安全中止当前任务">
-                                <i class="fa-solid fa-ban text-xs text-red-500"></i>
-                                <span>中止拆分 (ESC)</span>
-                            </button>
-                        </div>
-                    </div>
 
                     <!-- Parsed Questions List Container -->
                     <div id="parsedQuestionsWrapper" class="flex-1 flex flex-col space-y-4 hidden min-h-0">
+                        <!-- 紧凑错误提示条：当某文件拆解失败但已有结果时显示，不占用大片空间 -->
+                        <div id="parsedCompactErrorBanner" class="hidden shrink-0 items-start gap-2 p-2.5 rounded-xl bg-rose-50/90 border border-rose-200/80 text-rose-700 text-[11px] font-semibold">
+                            <i class="fa-solid fa-circle-exclamation mt-0.5"></i>
+                            <span class="flex-1" id="parsedCompactErrorText"></span>
+                            <button type="button" onclick="dismissParsedCompactError()" class="shrink-0 text-[10px] font-bold text-rose-600 hover:text-rose-800 px-1.5 py-0.5 rounded hover:bg-rose-100 transition-colors">关闭</button>
+                        </div>
+
                         <!-- Top actions bar -->
-                        <div class="flex flex-wrap items-center justify-between gap-3 shrink-0 bg-white/70 backdrop-blur-sm p-3.5 border border-white/50 rounded-xl shadow-sm">
-                            <div class="flex items-center space-x-3.5">
-                                <div class="flex items-center space-x-2">
+                        <div class="flex flex-wrap items-center justify-between gap-2 shrink-0 bg-white/70 backdrop-blur-sm p-2 border border-white/50 rounded-xl shadow-sm">
+                            <div class="flex items-center space-x-2.5">
+                                <div class="flex items-center space-x-1.5">
                                     <span class="text-xs font-bold text-slate-700">拆解结果审查</span>
-                                    <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-brand-50 text-brand-600 border border-brand-100" id="parsedCountBadge">共 0 题</span>
+                                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand-50 text-brand-600 border border-brand-100" id="parsedCountBadge">共 0 题</span>
                                 </div>
-                                <div class="flex items-center space-x-1 border border-slate-200 rounded-lg bg-slate-50 p-0.5 shrink-0" id="reviewFilterBar">
-                                    <button type="button" data-filter="unimported" onclick="setReviewFilter('unimported')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors bg-brand-600 text-white">未导入 <span id="filterCountUnimported" class="opacity-60">0</span></button>
-                                    <button type="button" data-filter="imported" onclick="setReviewFilter('imported')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">已导入 <span id="filterCountImported" class="opacity-60">0</span></button>
-                                    <button type="button" data-filter="all" onclick="setReviewFilter('all')" class="review-filter-btn px-2.5 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">全部 <span id="filterCountAll" class="opacity-60">0</span></button>
+                                <div class="flex items-center space-x-0.5 border border-slate-200 rounded-lg bg-slate-50 p-0.5 shrink-0" id="reviewFilterBar">
+                                    <button type="button" data-filter="unimported" onclick="setReviewFilter('unimported')" class="review-filter-btn px-2 py-1 rounded-md text-[10px] font-bold transition-colors bg-brand-600 text-white">未导入 <span id="filterCountUnimported" class="opacity-60">0</span></button>
+                                    <button type="button" data-filter="imported" onclick="setReviewFilter('imported')" class="review-filter-btn px-2 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">已导入 <span id="filterCountImported" class="opacity-60">0</span></button>
+                                    <button type="button" data-filter="all" onclick="setReviewFilter('all')" class="review-filter-btn px-2 py-1 rounded-md text-[10px] font-bold transition-colors text-slate-500 hover:bg-slate-100">全部 <span id="filterCountAll" class="opacity-60">0</span></button>
                                 </div>
-                                <div class="flex items-center space-x-3 border-l pl-3.5 border-slate-200" id="batchSelectActions">
-                                    <label class="flex items-center space-x-1.5 cursor-pointer text-[10px] font-semibold text-slate-500 hover:text-brand-600 transition-colors select-none">
+                                <div class="flex items-center space-x-2 border-l pl-2.5 border-slate-200" id="batchSelectActions">
+                                    <label class="flex items-center space-x-1 cursor-pointer text-[10px] font-semibold text-slate-500 hover:text-brand-600 transition-colors select-none">
                                         <input type="checkbox" id="selectAllCheckbox" class="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 transition-colors" checked onchange="toggleSelectAllParsed(this.checked)">
                                         <span>全选</span>
                                     </label>
@@ -1899,18 +1901,18 @@
                                     <span class="text-[10px] font-bold text-slate-400 bg-slate-100/80 px-1.5 py-0.5 rounded border border-slate-200" id="selectedCountBadge">已选 0 / 0 题</span>
                                 </div>
                             </div>
-                            <div class="flex items-center space-x-2.5">
-                                <button onclick="confirmClearAllParsed()" class="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs border border-rose-200 shadow-sm transition-all active:scale-95">
-                                    <i class="fa-solid fa-trash-can text-[10px]"></i>
-                                    <span>一键清除</span>
+                            <div class="flex items-center space-x-2">
+                                <button onclick="confirmClearAllParsed()" class="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-[10px] border border-rose-200 shadow-sm transition-all active:scale-95" title="清空所有拆解结果">
+                                    <i class="fa-solid fa-trash-can text-[9px]"></i>
+                                    <span>清除</span>
                                 </button>
-                                <button onclick="clearAllParsedSources()" class="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs border border-slate-200 shadow-sm transition-all active:scale-95">
-                                    <i class="fa-solid fa-eraser text-[10px]"></i>
-                                    <span>一键清除标题</span>
+                                <button onclick="clearAllParsedSources()" class="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-[10px] border border-slate-200 shadow-sm transition-all active:scale-95" title="清空题目来源">
+                                    <i class="fa-solid fa-eraser text-[9px]"></i>
+                                    <span>清来源</span>
                                 </button>
-                                <button onclick="saveAllParsedQuestions()" id="saveAllParsedBtn" class="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-brand-600/80 hover:bg-brand-600 text-white font-bold text-xs backdrop-blur-sm border border-brand-500/20 shadow-sm transition-all">
-                                    <i class="fa-solid fa-cloud-arrow-up"></i>
-                                    <span id="saveAllParsedBtnText">导入选中题目</span>
+                                <button onclick="saveAllParsedQuestions()" id="saveAllParsedBtn" class="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-brand-600/80 hover:bg-brand-600 text-white font-bold text-[10px] backdrop-blur-sm border border-brand-500/20 shadow-sm transition-all">
+                                    <i class="fa-solid fa-cloud-arrow-up text-[9px]"></i>
+                                    <span id="saveAllParsedBtnText">导入选中</span>
                                 </button>
                             </div>
                         </div>
@@ -1922,7 +1924,7 @@
                                 <!-- 目录项动态注入 -->
                             </div>
                             <!-- 右侧卡片列表（可滚动） -->
-                            <div class="flex-1 h-full min-h-0 overflow-y-auto space-y-4 pr-1.5 custom-scrollbar pb-6" id="parsedCardsContainer">
+                            <div class="flex-1 h-full min-h-0 overflow-y-auto space-y-3 pr-1.5 custom-scrollbar pb-4" id="parsedCardsContainer">
                                 <!-- Injected Card details -->
                             </div>
                         </div>
@@ -1943,10 +1945,10 @@
     </div>
 
     <!-- MAIN APP JAVASCRIPT -->
-    <script src="/static/js/api.js?v=1.0.1"></script>
+    <script src="/static/js/api.js?v=1.0.2"></script>
     <script src="/static/js/editor.js?v=1.0.1"></script>
     <script src="/static/js/ocr.js?v=1.0.1"></script>
-    <script src="/static/js/import.js?v=1.0.2"></script>
+    <script src="/static/js/import.js?v=1.0.5"></script>
     <script src="/static/js/paper.js?v=1.0.1"></script>
     
     <!-- PDF PAGE VIEWER & MANUAL CROP LIGHTBOX MODAL - Apple Glass Style -->
@@ -1959,7 +1961,15 @@
                     <span>原卷页面预览与手动插图裁剪（可放大看清公式）</span>
                 </h3>
                 <div class="flex items-center space-x-3">
-                    <span class="text-xs text-slate-400 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200" id="pdfCropPageIndicator">第 1 / 1 页</span>
+                    <div class="flex items-center space-x-1.5 bg-slate-100 border border-slate-200 rounded-lg px-1.5 py-1">
+                        <button type="button" onclick="cropPrevPage()" aria-label="上一页" class="w-7 h-7 flex items-center justify-center rounded-md bg-white hover:bg-slate-200 text-slate-500 transition-colors">
+                            <i class="fa-solid fa-chevron-left text-[10px]"></i>
+                        </button>
+                        <span class="text-xs text-slate-500 font-bold min-w-[58px] text-center" id="pdfCropPageIndicator">第 1 / 1 页</span>
+                        <button type="button" onclick="cropNextPage()" aria-label="下一页" class="w-7 h-7 flex items-center justify-center rounded-md bg-white hover:bg-slate-200 text-slate-500 transition-colors">
+                            <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                        </button>
+                    </div>
                     <button type="button" data-modal-close onclick="closePdfCropModal()" aria-label="关闭 PDF 裁剪弹窗" class="glass-btn w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all">
                         <i class="fa-solid fa-xmark text-lg"></i>
                     </button>
@@ -2016,6 +2026,27 @@
                                 <i class="fa-solid fa-crop-simple mr-1.5"></i>
                                 <span>确认截取配图</span>
                             </button>
+                            <button id="pdfCropOcrBtn" onclick="submitPdfCropCoordinates(true)" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled title="截取后调用 OCR 把该区域识别为 LaTeX，可补全跨页/缺失的题干或解析">
+                                <i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i>
+                                <span>截取并识别为 LaTeX</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- OCR 识别结果面板（仅「截取并识别为 LaTeX」时显示，可先修正再插入） -->
+                    <div id="pdfCropOcrPanel" class="hidden p-4 bg-slate-900 border-t border-slate-800 shrink-0 space-y-2.5">
+                        <div class="flex items-center justify-between">
+                            <span class="text-[10px] font-bold text-slate-300 flex items-center space-x-1.5">
+                                <i class="fa-solid fa-wand-magic-sparkles text-brand-500"></i>
+                                <span>OCR 识别结果（建议先核对修正，再插入）</span>
+                            </span>
+                            <button onclick="closePdfCropOcrPanel()" class="text-[10px] font-bold text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded hover:bg-slate-800 transition-colors">收起</button>
+                        </div>
+                        <textarea id="pdfCropOcrText" rows="5" class="w-full p-2.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-100 font-mono text-[11px] outline-none focus:border-brand-500 resize-none custom-scrollbar" placeholder="识别结果将显示在这里，可直接修改后再插入..."></textarea>
+                        <div class="flex items-center justify-end space-x-2">
+                            <span class="text-[10px] text-slate-500 mr-auto">插入到第 <span id="pdfCropOcrTargetIndex" class="font-bold text-slate-300">-</span> 题</span>
+                            <button onclick="insertPdfCropOcrResult('content')" class="px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold text-[11px] transition-all active:scale-95">插入到题干</button>
+                            <button onclick="insertPdfCropOcrResult('answer')" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] transition-all active:scale-95">插入到解析</button>
                         </div>
                     </div>
                 </div>
