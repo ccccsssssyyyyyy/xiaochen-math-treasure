@@ -4041,6 +4041,14 @@ def ai_parse_paper(
                 "以下配图未能确定所属题目：" + "、".join(unassigned_images[:8])
             )
                     
+        # 字段对齐：AI 拆解输出 compulsory/chapter，而前端审查卡片绑定 category_compulsory/category_chapter。
+        # 这里做桥接（不额外消耗 token），使审查页能正确回填学段与章节。
+        for q in parsed_questions:
+            if not q.get("category_compulsory") and q.get("compulsory"):
+                q["category_compulsory"] = q["compulsory"]
+            if not q.get("category_chapter") and q.get("chapter"):
+                q["category_chapter"] = q["chapter"]
+
         return {
             "status": "success",
             "questions": parsed_questions,
@@ -4884,6 +4892,16 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
             q["content"] = normalize_fillin_macro(q.get("content", ""))
             q["content"] = _strip_leading_question_number(q["content"])
             q["content"] = normalize_choice_options_to_latex(q["content"])
+
+    # 0.5 字段对齐：AI 整卷拆解输出的分类字段为 compulsory/chapter（对应提示词要求），
+    # 而前端审查卡片绑定的是 category_compulsory/category_chapter。
+    # 这里做桥接（不额外消耗 token），使审查页能正确回填学段与章节。
+    # 仅当目标字段缺失时才用源字段补全，避免覆盖模型已直接输出的 category_* 字段。
+    for q in parsed_questions:
+        if not q.get("category_compulsory") and q.get("compulsory"):
+            q["category_compulsory"] = q["compulsory"]
+        if not q.get("category_chapter") and q.get("chapter"):
+            q["category_chapter"] = q["chapter"]
 
     # 1. 搜集该 PDF 任务在 tmp 文件夹中生成的所有物理裁剪图片，按生成时间（mtime）进行排序
     task_crop_urls = []
