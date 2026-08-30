@@ -5,18 +5,32 @@
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-# 题号起始边界：覆盖 LaTeX 枚举题号、exam 类 \question、Word/PDF 识别出的
-# 「1.」「（1）」「(1)」以及带编号的 markdown 标题。
-_QUESTION_START = re.compile(
+# 大题起始边界（优先切分点）：覆盖 LaTeX 枚举题号、exam 类 \question、
+# Word/PDF 识别出的「1.」「1、」「一、」以及带编号的 markdown 标题。
+#
+# 刻意不包含（1）/(1)/1) 这类小问号：一道解答题通常含多个小问，若把小问
+# 也当作切分边界，(1) 与 (2) 会被拆到不同块，AI 只看到「(1) 求 C 的方程」
+# 就当成一道完整题输出，造成跨页/跨块题目被切碎。小问号仅在单个大题自身
+# 超过 max_chars 时才由 _MINOR_QUESTION_START 降级使用。
+_MAJOR_QUESTION_START = re.compile(
     r"(?m)^[ \t]*(?:"
-    r"(?:\d{1,3}[\.、）)][ \t])"          # 1. 或 1、 或 1)
-    r"|(?:（\d{1,3}）)"                      # （1）
+    r"(?:\d{1,3}[.、](?=[ \t]|$))"             # 1. 或 1、（后接空白/行尾，避开 3.14）
+    r"|(?:[一二三四五六七八九十]{1,3}[、.])"      # 一、 二.
+    r"|(?:\\item\b)"                            # \item（LaTeX enumerate）
+    r"|(?:\\question\b)"                        # \question（exam 文档类）
+    r"|(?:#{1,6}[ \t]+\d)"                      # markdown 标题带编号，如 ## 1.
+    r")"
+)
+
+# 小问起始边界（降级切分点）：仅当某个大题段落自身超过 max_chars 时才使用，
+# 默认让同一大题的 (1)(2) 留在同一块内。
+_MINOR_QUESTION_START = re.compile(
+    r"(?m)^[ \t]*(?:"
+    r"(?:（\d{1,3}）)"                      # （1）
     r"|(?:\(\d{1,3}\))"                      # (1)
-    r"|(?:\\item\b)"                         # \item（LaTeX enumerate）
-    r"|(?:\\question\b)"                     # \question（exam 文档类）
-    r"|(?:#{1,6}[ \t]+\d)"                   # markdown 标题带编号，如 ## 1.
+    r"|(?:\d{1,3}[）)])"                     # 1)
     r")"
 )
 
@@ -26,6 +40,16 @@ DEFAULT_MAX_CHARS = 28000
 DEFAULT_HARD_MAX = 80000
 # 单块最小字符，避免把文档切成过多碎块。
 DEFAULT_MIN_CHARS = 1200
+
+
+def _spans_by_pattern(text: str, pattern) -> List[Tuple[int, int]]:
+    """按正则匹配位置把 text 切成 (start, end) 区间，首尾完整覆盖、不丢字符。"""
+    boundaries = [m.start() for m in pattern.finditer(text)]
+    if not boundaries:
+        return []
+    starts = [0] + boundaries
+    ends = boundaries + [len(text)]
+    return list(zip(starts, ends))
 
 
 def _split_by_paragraphs(text: str, max_chars: int, hard_max: int) -> List[str]:
@@ -59,7 +83,14 @@ def split_markdown_into_question_chunks(
 ) -> List[str]:
     """将整篇试卷文本按题号边界切分为多块。
 
-    - 每块以题号起始边界开头，绝不在题目中间切断（除非单题本身超 hard_max 降级硬切）。
+    切分优先级（保证同一道大题尽量完整，避免跨页/跨块题目被切碎）：
+
+    1. 一级切分使用大题边界（``1.`` / ``一、`` / ``\\item`` / ``\\question``）；
+       仅当整卷没有大题号（例如纯解答题集合）时才退回小问边界。
+    2. 二级切分：某个大题段落自身超过 ``max_chars`` 时，才允许在它的小问
+       边界 ``(1)``/``（1）``/``1)`` 处细分；仍切不动则按段落硬切降级。
+
+    所有路径都保证 ``"".join(chunks) == text``（不丢题、不串题、不重复）。
     - 返回空文本时返回 []；文本本身短于 max_chars 时返回 [text]。
     """
     if not text or not text.strip():
@@ -67,29 +98,39 @@ def split_markdown_into_question_chunks(
     if len(text) <= max_chars:
         return [text]
 
-    boundaries = [m.start() for m in _QUESTION_START.finditer(text)]
-    if not boundaries:
-        # 没识别到题号：退化为按段落切分
+    # 一级：大题边界优先，其次小问边界
+    spans = _spans_by_pattern(text, _MAJOR_QUESTION_START)
+    used_major = bool(spans)
+    if not spans:
+        spans = _spans_by_pattern(text, _MINOR_QUESTION_START)
+    if not spans:
+        # 两种题号都没识别到：退化为按段落切分
         return _split_by_paragraphs(text, max_chars, hard_max)
 
-    # 段起点：[0] + 各边界；段终点：各边界 + 文末
-    seg_starts = [0] + boundaries
-    seg_ends = boundaries + [len(text)]
+    # 二级：单个大题段落自身超限时才在其小问边界处细分
+    refined: List[str] = []
+    for s, e in spans:
+        seg = text[s:e]
+        if len(seg) <= max_chars:
+            refined.append(seg)
+            continue
+        sub = _spans_by_pattern(seg, _MINOR_QUESTION_START) if used_major else []
+        if len(sub) > 1:
+            refined.extend([seg[a:b] for a, b in sub])
+        else:
+            # 小问也切不动：按段落硬切降级
+            refined.extend(_split_by_paragraphs(seg, max_chars, hard_max))
 
+    # 贪心打包：相邻小段合并到 <= max_chars，拼接保持无损
     chunks: List[str] = []
     buf = ""
-    for s, e in zip(seg_starts, seg_ends):
-        seg = text[s:e]
-        if not seg.strip():
-            continue
-        # 单段本身超硬上限：按段落硬切后并入（首段可能含前言，一并处理）
-        if len(seg) > hard_max:
+    for seg in refined:
+        if len(seg) > max_chars:
             if buf:
                 chunks.append(buf)
                 buf = ""
-            chunks.extend(_split_by_paragraphs(seg, max_chars, hard_max))
+            chunks.append(seg)
             continue
-        # 加入本段会超限且已有缓冲：先 flush
         if buf and len(buf) + len(seg) > max_chars:
             chunks.append(buf)
             buf = seg
@@ -99,8 +140,9 @@ def split_markdown_into_question_chunks(
     if buf:
         chunks.append(buf)
 
-    # 过滤空块；若块过小（< min_chars）且与下一块合并仍不超限则合并，减少碎片
-    chunks = [c for c in chunks if c.strip()]
+    # 只丢弃空串（保留纯空白段，确保拼接严格等于原文）
+    chunks = [c for c in chunks if c]
+    # 碎片合并：过小的块与后续块合并仍不超限则合并，减少 LLM 调用次数
     merged: List[str] = []
     for c in chunks:
         if merged and len(merged[-1]) < min_chars and len(merged[-1]) + len(c) <= max_chars:

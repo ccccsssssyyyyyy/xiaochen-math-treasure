@@ -37,7 +37,10 @@ W_NS = {
     "o": "urn:schemas-microsoft-com:office:office",
 }
 
-MAX_ARCHIVE_FILES = 5_000
+# 仅统计“真正会被处理”的条目数（详见 _is_guard_excluded）：MathType 的 OLE
+# 嵌入与 WMF 预览缩略图会随公式数量爆炸式增长，却不被单独解析为资源，
+# 不应计入 zip-bomb 护栏。该上限已同步放宽，覆盖公式密集的超长试卷/教辅。
+MAX_ARCHIVE_FILES = 20_000
 MAX_ARCHIVE_UNCOMPRESSED = 200 * 1024 * 1024
 MAX_ARCHIVE_MEMBER = 50 * 1024 * 1024
 MAX_DOCUMENT_XML = 25 * 1024 * 1024
@@ -108,9 +111,28 @@ def _local_tag(elem) -> str:
     return tag.split("}", 1)[1] if "}" in tag else tag
 
 
+# 这些条目不计入 zip-bomb 的“条目数”护栏：它们随公式数量线性膨胀，
+# 却属于 MathType/Office 的内部嵌入与预览，我们并不作为独立资源解析。
+# 注意：仅影响计数口径，实际提取阶段仍会按需读取这些文件。
+_GUARD_EXCLUDED_PREFIXES = ("word/embeddings/",)
+_GUARD_EXCLUDED_SUFFIXES = (".wmf",)
+
+
+def _is_guard_excluded(name: str) -> bool:
+    low = name.lower()
+    if low.startswith(_GUARD_EXCLUDED_PREFIXES):
+        return True
+    if low.endswith(_GUARD_EXCLUDED_SUFFIXES):
+        return True
+    return False
+
+
 def _validate_archive(z: zipfile.ZipFile) -> None:
     infos = z.infolist()
-    if len(infos) > MAX_ARCHIVE_FILES:
+    # 仅对“真正会被处理”的条目计 zip-bomb 护栏，避免 MathType 密集型试卷
+    # （每个公式产生 oleObject*.bin + 同名 .wmf 预览）被误判为压缩包异常。
+    processable = [info for info in infos if not _is_guard_excluded(info.filename)]
+    if len(processable) > MAX_ARCHIVE_FILES:
         raise ValueError(f"Word 压缩包文件数量异常（超过 {MAX_ARCHIVE_FILES} 个）")
     total_size = 0
     for info in infos:
@@ -972,3 +994,90 @@ def extract_docx_markdown(
             "image_paths": list(diagnostics.get("asset_paths", [])),
             "diagnostics": diagnostics,
         }
+
+
+# ---------------------------------------------------------------------------
+# Word 图片链接短占位符（Plan A：降低拆题 token 开销）
+#
+# 抽取出的 Markdown 里，每张插图都是形如 `![](url)` 的长链接。模型既看不到图
+# （HTTP 层不会把 `![]()` 转成 base64 图片），又被系统提示强制「100% 保留并写
+# 入 referenced_images」，于是链接在输入与输出里双向计费、纯属死重。
+# 这里在喂给模型前把链接替换成 `[[IMGn]]` 短占位符并建立映射，拆题完成后再还原。
+# ---------------------------------------------------------------------------
+
+_DOCX_IMG_LINK_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_DOCX_IMG_TOKEN_RE = re.compile(r"\[\[IMG(\d+)\]\]")
+
+
+def compress_docx_image_links(markdown: str):
+    """把 Markdown 中的图片链接替换为 ``[[IMGn]]`` 短占位符。
+
+    返回 ``(compressed_markdown, mapping)``，``mapping`` 为 ``{n: {"alt":..., "url":...}}``，
+    用于拆题后把占位符还原为真实图片链接。无图片时 mapping 为空字典，调用方应跳过还原。
+    """
+    mapping: Dict[int, Dict[str, str]] = {}
+    counter = [0]
+
+    def _sub(m: "re.Match") -> str:
+        counter[0] += 1
+        n = counter[0]
+        mapping[n] = {"alt": m.group(1) or "", "url": m.group(2) or ""}
+        return f"[[IMG{n}]]"
+
+    compressed = _DOCX_IMG_LINK_RE.sub(_sub, markdown or "")
+    return compressed, mapping
+
+
+def decompress_docx_image_links_in_questions(questions: list, mapping: dict) -> list:
+    """把题目 JSON 里的 ``[[IMGn]]`` 占位符还原为真实图片链接（就地修改）。
+
+    - ``content`` 中的 ``[[IMGn]]`` → ``![alt](url)``
+    - ``referenced_images`` 中形如 ``[[IMGn]]`` 的元素 → 真实 ``url``
+    返回 warning 字符串列表（占位符丢失/模型改写时提示人工核对）。
+    """
+    warnings: list = []
+    if not mapping:
+        return warnings
+
+    def _restore_text(text):
+        if not isinstance(text, str):
+            return text
+
+        def _r(mm: "re.Match") -> str:
+            n = int(mm.group(1))
+            info = mapping.get(n)
+            if not info:
+                return mm.group(0)
+            return f"![{info['alt']}]({info['url']})"
+
+        return _DOCX_IMG_TOKEN_RE.sub(_r, text)
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        if "content" in q:
+            q["content"] = _restore_text(q.get("content"))
+        refs = q.get("referenced_images")
+        if isinstance(refs, list):
+            new_refs = []
+            for r in refs:
+                if isinstance(r, str):
+                    m = _DOCX_IMG_TOKEN_RE.fullmatch(r.strip())
+                    if m:
+                        info = mapping.get(int(m.group(1)))
+                        new_refs.append(info["url"] if info else r)
+                        continue
+                new_refs.append(r)
+            q["referenced_images"] = new_refs
+
+    leftover = set()
+    for q in questions:
+        content = q.get("content", "") if isinstance(q, dict) else ""
+        for mm in _DOCX_IMG_TOKEN_RE.finditer(content or ""):
+            if int(mm.group(1)) not in mapping:
+                leftover.add(int(mm.group(1)))
+    if leftover:
+        warnings.append(
+            f"有 {len(leftover)} 个图片占位符未能还原（模型可能改写或丢失），请核对插图归属。"
+        )
+    return warnings

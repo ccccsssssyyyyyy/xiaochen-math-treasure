@@ -78,10 +78,16 @@ def _next_math_span(source: str, cursor: int) -> tuple[int, int] | None:
     return start, end
 
 
-def lock_visible_math(value: str, scope: str) -> tuple[str, list[ContentLock]]:
-    """Wrap common balanced TeX math forms while keeping formulas visible."""
+def lock_visible_math(value: str, scope: str = "DOCX") -> tuple[str, list[ContentLock]]:
+    """Wrap common balanced TeX math forms while keeping formulas visible.
+
+    The lock id is intentionally compact (``M1``, ``M2``, …) instead of a long
+    scoped id: the same formula is echoed back by the model as ``[[M1]]`` in the
+    output, so shortening the id directly cuts both input and output tokens
+    (Word/DOCX is the only path that locks math; PDF does not, which is one
+    reason Word used to cost more tokens).
+    """
     source = str(value or "")
-    safe_scope = re.sub(r"[^A-Za-z0-9_-]", "", str(scope or "DOCX"))[:48] or "DOCX"
     parts: list[str] = []
     locks: list[ContentLock] = []
     cursor = 0
@@ -100,7 +106,7 @@ def lock_visible_math(value: str, scope: str) -> tuple[str, list[ContentLock]]:
             continue
 
         formula_index += 1
-        lock_id = f"MBM_{safe_scope}_{formula_index:04d}"
+        lock_id = f"M{formula_index}"
         parts.append(source[cursor:start])
         parts.append(f'<{_LOCK_TAG} id="{lock_id}">{original}</{_LOCK_TAG}>')
         locks.append(ContentLock(lock_id=lock_id, original=original))
