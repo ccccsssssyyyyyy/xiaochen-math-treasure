@@ -1325,6 +1325,16 @@
                     populateCategoryDropdowns();
                     populateFilterDropdowns();
                     if (typeof loadTagFilterOptions === 'function') loadTagFilterOptions();
+                    // 通知拆解结果审查等异步渲染的模块重新填充分类下拉。
+                    // 双重保护：① 非 DOM 环境（单测沙箱等）跳过派发；② 任一监听器内部抛错也在此隔离。
+                    // 否则异常会冒泡进 .catch，误触发自动重试与「加载失败」提示，并跳过下方静默重载。
+                    if (typeof document !== 'undefined' && typeof CustomEvent === 'function') {
+                        try {
+                            document.dispatchEvent(new CustomEvent('categorytreeupdated', { detail: { categoryTree: data } }));
+                        } catch (evtErr) {
+                            console.warn('[categorytreeupdated] 监听器执行异常，已忽略:', evtErr);
+                        }
+                    }
                     
                     // Most callers only need fresh dropdown data. Reloading the
                     // editor is an explicit settings/curriculum operation because
