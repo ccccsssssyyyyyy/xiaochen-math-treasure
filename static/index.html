@@ -540,7 +540,7 @@
                             
                             <!-- Content OCR Dropzone -->
                             <div id="contentOcrDropZone" tabindex="0" class="border-2 border-dashed border-slate-200 hover:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 bg-white rounded-xl p-5 text-center cursor-pointer transition-all duration-300 relative overflow-hidden flex flex-col items-center justify-center min-h-[120px]">
-                                <input type="file" id="contentOcrFileInput" accept="image/*" class="hidden">
+                                <input type="file" id="contentOcrFileInput" accept="image/*" multiple class="hidden">
                                 <!-- Placeholder view -->
                                 <div id="contentOcrPlaceholder" class="space-y-1.5 flex flex-col items-center">
                                     <i class="fa-solid fa-crop-simple text-slate-300 text-3xl mb-0.5 animate-pulse"></i>
@@ -556,6 +556,13 @@
                                         <span>正在解析......</span>
                                     </div>
                                 </div>
+                            </div>
+
+                            <!-- 多图合并开关：替换=以首张覆盖当前题干，追加=拼接到当前题干末尾（与 PDF 裁切 OCR 共用此偏好，首次选择后记住） -->
+                            <div class="flex items-center gap-1 justify-end mt-2" title="多次截图合并：替换=以首张覆盖当前题干，追加=拼接到当前题干末尾（与 PDF 裁切 OCR 共用此偏好，首次选择后记住）">
+                                <span class="text-[10px] text-slate-500">多图合并</span>
+                                <button id="contentOcrModeReplace" type="button" onclick="window.setOcrMode('content','replace'); if(window.refreshContentOcrModeUI) window.refreshContentOcrModeUI();" class="px-2 py-1 rounded text-[10px] font-bold bg-brand-600 text-white transition-colors">替换</button>
+                                <button id="contentOcrModeAppend" type="button" onclick="window.setOcrMode('content','append'); if(window.refreshContentOcrModeUI) window.refreshContentOcrModeUI();" class="px-2 py-1 rounded text-[10px] font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-colors">追加</button>
                             </div>
 
                             <!-- Content OCR Loading -->

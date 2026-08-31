@@ -12,7 +12,7 @@
                 }
             };
             
-            setupDragDropListeners(illDropZone, (file) => uploadIllustration(file));
+            setupDragDropListeners(illDropZone, (files) => Array.from(files).forEach(f => uploadIllustration(f)));
             setupPasteListener(illDropZone, (file) => uploadIllustration(file));
             setupPasteListener(document.getElementById('editContent'), (file) => uploadIllustration(file));
 
@@ -29,7 +29,7 @@
                 }
             };
             
-            setupDragDropListeners(ocrDropZone, (file) => runOcr(file));
+            setupDragDropListeners(ocrDropZone, (files) => Array.from(files).forEach(f => runOcr(f)));
             setupPasteListener(document.getElementById('ocrDropZone'), (file) => runOcr(file));
 
             // Setup Question Content OCR file input and Drop Zone
@@ -39,13 +39,16 @@
             contentOcrDropZone.onclick = () => contentOcrFileInput.click();
             
             contentOcrFileInput.onchange = () => {
-                if (contentOcrFileInput.files.length > 0) {
-                    runContentOcr(contentOcrFileInput.files[0]);
-                    contentOcrFileInput.value = ''; // Reset so same file can be uploaded again
+                const cf = contentOcrFileInput.files;
+                if (cf && cf.length > 1) {
+                    runContentOcrBatch(Array.from(cf));
+                } else if (cf && cf.length === 1) {
+                    runContentOcr(cf[0]);
                 }
+                contentOcrFileInput.value = ''; // Reset so same file can be uploaded again
             };
-            
-            setupDragDropListeners(contentOcrDropZone, (file) => runContentOcr(file));
+
+            setupDragDropListeners(contentOcrDropZone, (files) => runContentOcrBatch(files));
             setupPasteListener(contentOcrDropZone, (file) => runContentOcr(file));
 
             // Setup Image Answer Drag and Drop
@@ -64,7 +67,7 @@
                     }
                 };
                 
-                setupDragDropListeners(imageAnswerDropZone, (file) => uploadAnswerImage(file));
+                setupDragDropListeners(imageAnswerDropZone, (files) => Array.from(files).forEach(f => uploadAnswerImage(f)));
                 setupPasteListener(imageAnswerDropZone, (file) => uploadAnswerImage(file));
             }
 
@@ -177,6 +180,9 @@
                 });
                 applyInheritanceToSource();
             })();
+
+            // 初始化「多图合并」开关 UI（与 PDF 裁切 OCR 共用 content 偏好）
+            refreshContentOcrModeUI();
         }
         function setupDragDropListeners(zone, onFileReceived) {
             ['dragenter', 'dragover'].forEach(eventName => {
@@ -196,10 +202,8 @@
             zone.addEventListener('drop', (e) => {
                 const dt = e.dataTransfer;
                 const files = dt.files;
-                if (files.length > 0) {
-                    for (let i = 0; i < files.length; i++) {
-                        onFileReceived(files[i]);
-                    }
+                if (files && files.length > 0) {
+                    onFileReceived(Array.from(files));
                 }
             }, false);
         }
@@ -773,7 +777,7 @@
         window.applyInheritanceToSource = applyInheritanceToSource;
 
         // 2.2 OCR Question Content screenshot handler
-        function runContentOcr(file) {
+        function runContentOcr(file, opts) {
             if (!file.type.startsWith('image/')) {
                 showToast('请上传有效的图片格式！', 'error');
                 return;
@@ -819,7 +823,7 @@
             formData.append('file', file);
             formData.append('engine', engine);
             
-            fetch('/api/ocr', {
+            return fetch('/api/ocr', {
                 method: 'POST',
                 body: formData,
                 signal: signal
@@ -848,28 +852,13 @@
                     }
                     
                     // 2. Automatically load results into the persistent content editor
-                    loadToContentEditor('ocr');
+                    const _isAppend = !!(opts && opts.isAppend);
+                    loadToContentEditor('ocr', _isAppend);
 
-                    // 来源继承 / 首次自动设卷名（AI 分类后会再覆盖一次以确保继承优先）
-                    (function applySourceOnOcr() {
-                        const srcEl = document.getElementById('editSource');
-                        if (!srcEl) return;
-                        if (_getUseSourceDefault() && _getSourceDefault()) {
-                            applyInheritanceToSource(); // 后续题目：直接继承
-                        } else if (!srcEl.value.trim()) {
-                            const cand = detectSourceCandidate(cleanLatex, file && file.name);
-                            if (cand) {
-                                srcEl.value = cand;
-                                _setUseSourceDefault(true);
-                                _setSourceDefault(cand);
-                                const chk = document.getElementById('editSourceDefault');
-                                if (chk) chk.checked = true;
-                            }
-                        }
-                    })();
-
-                    // 3. 题干写入后自动触发 AI 分类并填充表单（无弹窗）
-                    autoClassifyFromContent();
+                    // 多图批处理时跳过单次收尾（统一在 runContentOcrBatch 末尾 finalize 一次）
+                    if (!(opts && opts.skipFinalize)) {
+                        finalizeContentOcr(file);
+                    }
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -888,6 +877,54 @@
                 showToast('题干 OCR 识别出错: ' + err, 'error');
             });
         }
+
+        // 单张 OCR 成功后的收尾：来源继承/首次自动设卷名 + 仅做一次 AI 分类
+        function finalizeContentOcr(firstFile) {
+            const srcEl = document.getElementById('editSource');
+            if (srcEl) {
+                if (_getUseSourceDefault() && _getSourceDefault()) {
+                    applyInheritanceToSource(); // 后续题目：直接继承
+                } else if (!srcEl.value.trim()) {
+                    // 从已合并的题干全文 + 首张文件名推测卷名
+                    const combined = document.getElementById('editContent').value || '';
+                    const cand = detectSourceCandidate(combined, firstFile && firstFile.name);
+                    if (cand) {
+                        srcEl.value = cand;
+                        _setUseSourceDefault(true);
+                        _setSourceDefault(cand);
+                        const chk = document.getElementById('editSourceDefault');
+                        if (chk) chk.checked = true;
+                    }
+                }
+            }
+            autoClassifyFromContent();
+        }
+
+        // 多张截图合并：依次 OCR 写入，全部完成后再统一 finalize（仅一次分类 + 来源识别）
+        async function runContentOcrBatch(files) {
+            const arr = Array.isArray(files) ? files : Array.from(files || []);
+            if (!arr.length) return;
+            const mode = (typeof window.getOcrMode === 'function') ? window.getOcrMode('content') : 'replace';
+            for (let i = 0; i < arr.length; i++) {
+                // 多图批量时一律追加到题干，避免中途弹 confirm；单图(仅一张)仍按开关决定
+                const isAppend = (mode === 'append') || (i > 0) || (arr.length > 1);
+                await runContentOcr(arr[i], { isAppend: isAppend, skipFinalize: true });
+            }
+            finalizeContentOcr(arr[0]);
+        }
+
+        // 同步内容 OCR 拖拽区的「多图合并」开关 UI（与 PDF 裁切 OCR 共用 content 偏好）
+        function refreshContentOcrModeUI() {
+            const mode = (typeof window.getOcrMode === 'function') ? window.getOcrMode('content') : 'replace';
+            const rep = document.getElementById('contentOcrModeReplace');
+            const app = document.getElementById('contentOcrModeAppend');
+            const onCls = 'px-2 py-1 rounded text-[10px] font-bold transition-colors bg-brand-600 text-white';
+            const offCls = 'px-2 py-1 rounded text-[10px] font-bold transition-colors bg-slate-200 text-slate-700 hover:bg-slate-300';
+            if (rep) rep.className = (mode === 'replace') ? onCls : offCls;
+            if (app) app.className = (mode === 'append') ? onCls : offCls;
+        }
+        window.refreshContentOcrModeUI = refreshContentOcrModeUI;
+        window.runContentOcrBatch = runContentOcrBatch;
 
         // 题干 OCR 成功后自动触发 AI 分类并填充录入表单（无弹窗，覆盖式填充，用户可手改）
         function autoClassifyFromContent() {

@@ -1727,6 +1727,8 @@
             if (mode !== 'replace' && mode !== 'append') return;
             try { localStorage.setItem(OCR_MODE_KEY_PREFIX + target, mode); } catch (e) { /* localStorage 不可用时忽略 */ }
             refreshOcrModeUI(target);
+            // 同步刷新单题 OCR 拖拽区的合并开关（同样复用 content 偏好）
+            try { if (typeof window.refreshContentOcrModeUI === 'function') window.refreshContentOcrModeUI(); } catch (e) {}
         }
         function refreshOcrModeUI(target) {
             const mode = getOcrMode(target);
@@ -1788,6 +1790,7 @@
         window.closePdfCropOcrPanel = closePdfCropOcrPanel;
         window.insertPdfCropOcrResult = insertPdfCropOcrResult;
         window.setOcrMode = setOcrMode;
+        window.getOcrMode = getOcrMode;
         refreshAllOcrModeUI();
 
         function performOrphanedTempCropsCleanup() {
