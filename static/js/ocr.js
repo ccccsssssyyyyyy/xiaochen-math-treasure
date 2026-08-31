@@ -900,17 +900,37 @@
             autoClassifyFromContent();
         }
 
+        // 内容 OCR 队列：顺序消费，避免连续粘贴时后一张 abort 前一张
+        let contentOcrQueue = [];
+        let isContentOcrProcessing = false;
+
         // 多张截图合并：依次 OCR 写入，全部完成后再统一 finalize（仅一次分类 + 来源识别）
         async function runContentOcrBatch(files) {
             const arr = Array.isArray(files) ? files : Array.from(files || []);
             if (!arr.length) return;
-            const mode = (typeof window.getOcrMode === 'function') ? window.getOcrMode('content') : 'replace';
-            for (let i = 0; i < arr.length; i++) {
-                // 多图批量时一律追加到题干，避免中途弹 confirm；单图(仅一张)仍按开关决定
-                const isAppend = (mode === 'append') || (i > 0) || (arr.length > 1);
-                await runContentOcr(arr[i], { isAppend: isAppend, skipFinalize: true });
+            contentOcrQueue.push(...arr);
+            if (isContentOcrProcessing) return;
+            isContentOcrProcessing = true;
+            try {
+                await processContentOcrQueue();
+            } finally {
+                isContentOcrProcessing = false;
             }
-            finalizeContentOcr(arr[0]);
+        }
+
+        async function processContentOcrQueue() {
+            const mode = (typeof window.getOcrMode === 'function') ? window.getOcrMode('content') : 'replace';
+            let firstFile = null;
+            let firstInRound = true;
+            while (contentOcrQueue.length > 0) {
+                const file = contentOcrQueue.shift();
+                if (!firstFile) firstFile = file;
+                // 替换模式下本轮首张覆盖旧内容，其余追加；追加模式下全部追加
+                const isAppend = (mode === 'append') || !firstInRound;
+                await runContentOcr(file, { isAppend: isAppend, skipFinalize: true });
+                firstInRound = false;
+            }
+            finalizeContentOcr(firstFile);
         }
 
         // 同步内容 OCR 拖拽区的「多图合并」开关 UI（与 PDF 裁切 OCR 共用 content 偏好）
