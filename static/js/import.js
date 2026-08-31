@@ -206,6 +206,9 @@
                 document.getElementById('editRelatedQuestionNum').value = '';
                 document.getElementById('editReview').dispatchEvent(new Event('input')); // Hide review preview
                 loadAssociatedQuestionsInList(null); // Reset associated questions panel
+
+                // 新建/清空后自动继承「当前卷名（默认来源）」
+                if (window.applyInheritanceToSource) window.applyInheritanceToSource();
                 
                 document.getElementById('aiOutputBox').classList.add('hidden');
                 document.getElementById('ocrOutputBox').classList.add('hidden');
@@ -324,6 +327,9 @@
             // Reload list styling selection
             loadQuestions();
             
+            // 新建后自动继承「当前卷名（默认来源）」
+            if (window.applyInheritanceToSource) window.applyInheritanceToSource();
+
             showToast('开始录入新数学题！');
 
             // Reset the original state directly from the DOM!

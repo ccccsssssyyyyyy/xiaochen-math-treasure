@@ -157,6 +157,26 @@
                     e.preventDefault();
                 }
             });
+
+            // 初始化「沿用为后续默认来源」勾选与来源继承
+            (function initSourceDefault() {
+                const src = document.getElementById('editSource');
+                const chk = document.getElementById('editSourceDefault');
+                if (!src || !chk) return;
+                chk.checked = _getUseSourceDefault();
+                src.addEventListener('input', function () {
+                    if (chk.checked) _setSourceDefault(src.value.trim());
+                });
+                chk.addEventListener('change', function () {
+                    if (chk.checked) {
+                        _setUseSourceDefault(true);
+                        _setSourceDefault(src.value.trim());
+                    } else {
+                        _setUseSourceDefault(false);
+                    }
+                });
+                applyInheritanceToSource();
+            })();
         }
         function setupDragDropListeners(zone, onFileReceived) {
             ['dragenter', 'dragover'].forEach(eventName => {
@@ -684,6 +704,74 @@
             });
         }
 
+        // ===== 单题录入「当前卷名（默认来源）」会话级继承 =====
+        // 勾选「沿用为后续默认来源」后，当前来源即成为默认卷名，之后每道单题
+        // （OCR 成功 / 新建题目）自动继承；AI 识别来源、文件名、OCR 卷头任一命中
+        // 也可在首次录题时自动设为默认卷名。
+        const SOURCE_DEFAULT_KEY = 'mathbank_source_default';
+        const SOURCE_USE_KEY = 'mathbank_source_use_default';
+
+        function _getSourceDefault() {
+            try { return localStorage.getItem(SOURCE_DEFAULT_KEY) || ''; } catch (e) { return ''; }
+        }
+        function _getUseSourceDefault() {
+            try { return localStorage.getItem(SOURCE_USE_KEY) === '1'; } catch (e) { return false; }
+        }
+        function _setSourceDefault(val) {
+            try {
+                if (val) localStorage.setItem(SOURCE_DEFAULT_KEY, val);
+                else localStorage.removeItem(SOURCE_DEFAULT_KEY);
+            } catch (e) {}
+        }
+        function _setUseSourceDefault(flag) {
+            try {
+                if (flag) localStorage.setItem(SOURCE_USE_KEY, '1');
+                else localStorage.removeItem(SOURCE_USE_KEY);
+            } catch (e) {}
+        }
+
+        // 把默认卷名应用到「来源」输入框（继承）
+        function applyInheritanceToSource() {
+            const src = document.getElementById('editSource');
+            const chk = document.getElementById('editSourceDefault');
+            if (!src) return;
+            if (_getUseSourceDefault()) {
+                const def = _getSourceDefault();
+                if (def) src.value = def;
+                if (chk) chk.checked = true;
+            }
+        }
+
+        // 从 OCR 文本 / 文件名 推测卷名候选
+        function detectSourceCandidate(text, fileName) {
+            if (text) {
+                const lines = text.split(/\r?\n/).map(function (s) { return s.trim(); })
+                    .filter(function (s) { return s.length > 0; }).slice(0, 3);
+                const headRe = /(学校|中学|学院|大学|附属|届|学年|学期|期中|期末|月考|模拟|联考|真题|试卷|考试|调研|测验|诊断|三模|二模|一模|统考)/;
+                const bracketRe = /[（(]([^（）()]{4,40})[)）]/;
+                const notQuestionRe = /(已知|求|证明|下列|如图|计算|若|设|解|选择|填空)/;
+                for (let i = 0; i < lines.length; i++) {
+                    const ln = lines[i];
+                    const bm = ln.match(bracketRe);
+                    if (bm && !notQuestionRe.test(bm[1])) return bm[1];
+                    if (ln.length <= 40 && headRe.test(ln) && !/[=＝]/.test(ln) && !/[?？]$/.test(ln)) {
+                        return ln;
+                    }
+                }
+            }
+            if (fileName) {
+                let n = String(fileName).replace(/\.[^.]+$/, '');
+                n = n.replace(/^(微信图片|image|img|screenshot|截图|未命名|微信|qqimg|mmexport|weixin)/i, '');
+                n = n.replace(/[_\s]?\d{8,}|[_\s]?\d{6,}/g, '');
+                n = n.trim();
+                if (n.length >= 3 && n.length <= 40) return n;
+            }
+            return '';
+        }
+
+        window.detectSourceCandidate = detectSourceCandidate;
+        window.applyInheritanceToSource = applyInheritanceToSource;
+
         // 2.2 OCR Question Content screenshot handler
         function runContentOcr(file) {
             if (!file.type.startsWith('image/')) {
@@ -761,6 +849,25 @@
                     
                     // 2. Automatically load results into the persistent content editor
                     loadToContentEditor('ocr');
+
+                    // 来源继承 / 首次自动设卷名（AI 分类后会再覆盖一次以确保继承优先）
+                    (function applySourceOnOcr() {
+                        const srcEl = document.getElementById('editSource');
+                        if (!srcEl) return;
+                        if (_getUseSourceDefault() && _getSourceDefault()) {
+                            applyInheritanceToSource(); // 后续题目：直接继承
+                        } else if (!srcEl.value.trim()) {
+                            const cand = detectSourceCandidate(cleanLatex, file && file.name);
+                            if (cand) {
+                                srcEl.value = cand;
+                                _setUseSourceDefault(true);
+                                _setSourceDefault(cand);
+                                const chk = document.getElementById('editSourceDefault');
+                                if (chk) chk.checked = true;
+                            }
+                        }
+                    })();
+
                     // 3. 题干写入后自动触发 AI 分类并填充表单（无弹窗）
                     autoClassifyFromContent();
                 } else {
@@ -795,6 +902,17 @@
                     if (data.status === 'success') {
                         if (typeof window.applyClassifyResultToEditor === 'function') {
                             window.applyClassifyResultToEditor(data);
+                        }
+                        // 来源继承优先于 AI 单次识别；AI 来源也可首次自动设卷名
+                        const srcEl = document.getElementById('editSource');
+                        if (_getUseSourceDefault() && _getSourceDefault()) {
+                            if (srcEl) srcEl.value = _getSourceDefault();
+                        } else if (data.source && srcEl && !srcEl.value.trim()) {
+                            srcEl.value = data.source;
+                            _setUseSourceDefault(true);
+                            _setSourceDefault(data.source);
+                            const chk = document.getElementById('editSourceDefault');
+                            if (chk) chk.checked = true;
                         }
                     } else {
                         showToast(data.message || 'AI 自动分类失败，请手动填写分类', 'info');
