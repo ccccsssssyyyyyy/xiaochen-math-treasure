@@ -107,7 +107,7 @@
                         },
                         {
                             element: document.getElementById('contentOcrDropZone'),
-                            handler: (file) => runContentOcr(file)
+                            handler: (file) => runContentOcrBatch([file])
                         },
                         {
                             element: document.getElementById('ocrDropZone'),
@@ -1103,16 +1103,8 @@
                         textarea.value = contentToImport;
                     }
                 } else {
-                    if (textarea.value.trim()) {
-                        const replace = confirm('题干编辑框中已有内容，点击"确定"将覆盖替换，点击"取消"将追加在后面。');
-                        if (replace) {
-                            textarea.value = contentToImport;
-                        } else {
-                            textarea.value += '\n' + contentToImport;
-                        }
-                    } else {
-                        textarea.value = contentToImport;
-                    }
+                    // 替换模式：直接覆盖（与「多图合并」开关语义一致，不再二次确认）
+                    textarea.value = contentToImport;
                 }
                 // Refresh previews
                 textarea.dispatchEvent(new Event('input'));
@@ -1125,12 +1117,8 @@
                 console.log('[OCR split] writing answer: textarea-found=' + !!answerTextarea + ', existingLength=' + (answerTextarea ? answerTextarea.value.length : 'N/A') + ', answerPartLength=' + answerPart.length);
                 if (answerTextarea) {
                     if (answerTextarea.value.trim()) {
-                        const replaceAns = confirm('答案编辑框中已有内容，点击"确定"将覆盖替换，点击"取消"将追加在后面。');
-                        if (replaceAns) {
-                            answerTextarea.value = answerPart;
-                        } else {
-                            answerTextarea.value += '\n\n' + answerPart;
-                        }
+                        // 多图合并：答案累加，不再二次确认
+                        answerTextarea.value += '\n\n' + answerPart;
                     } else {
                         answerTextarea.value = answerPart;
                     }
