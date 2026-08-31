@@ -1993,8 +1993,22 @@ let bankQuestionsRetryTimer = null;
             editQType.addEventListener('change', renderEditorPaperMeta);
             editDifficulty.addEventListener('change', renderEditorPaperMeta);
             editSource.addEventListener('input', renderEditorPaperMeta);
+            // 失焦时实时归一来源（后端落库仍会再次归一，前端仅作预览对齐）
+            editSource.addEventListener('blur', function () {
+                const v = editSource.value.trim();
+                if (!v) return;
+                const nv = normalizeSource(v);
+                if (nv !== editSource.value) editSource.value = nv;
+            });
             if (editTags) editTags.addEventListener('input', renderEditorPaperMeta);
-            
+
+            // 拉取来源归一映射表（单一事实源，后端 mathbank.source_normalize.CANONICAL_MAP），
+            // 供 normalizeSource 做 Tier1 精确查表，使前端预览与后端落库完全一致。
+            fetch('/api/source-canonical-map')
+                .then(function (r) { return r.json(); })
+                .then(function (data) { SOURCE_CANONICAL_MAP = data; })
+                .catch(function () { SOURCE_CANONICAL_MAP = null; });
+
             // Initial render of meta badges
             renderEditorPaperMeta();
         }
@@ -2479,6 +2493,50 @@ let bankQuestionsRetryTimer = null;
                 if (m.index === optionRe.lastIndex) optionRe.lastIndex++;
             }
             return found;
+        }
+
+        // 来源归一映射表（Tier1 精确查表），单一事实源来自后端 /api/source-canonical-map，
+        // 初始化时拉取一次。未加载前 normalizeSource 退化为 Tier2 结构兜底，不影响落库正确性。
+        var SOURCE_CANONICAL_MAP = null;
+
+        // 来源自动归一（前端预览；后端落库时仍会再次归一，两者共用同一映射表，预览与存储一致）。
+        // Tier1 精确别名表（来自后端） -> Tier2 结构兜底（去噪声/分隔符/罗马数字/别名）。
+        function normalizeSource(raw) {
+            if (raw === null || raw === undefined) return '未知';
+            var s = String(raw).trim();
+            if (!s) return '未知';
+
+            // Tier 1: 精确别名表（与后端 mathbank.source_normalize.CANONICAL_MAP 一致）
+            if (SOURCE_CANONICAL_MAP && Object.prototype.hasOwnProperty.call(SOURCE_CANONICAL_MAP, s)) {
+                return SOURCE_CANONICAL_MAP[s];
+            }
+
+            // Tier 2: 结构兜底（best-effort，针对全新输入）
+            // 学校别名
+            s = s.replace(/成外/g, '成都外国语学校');
+
+            // 文件名噪声尾缀
+            var NOISE = ['数学试题', '数学试卷', '试题', '试卷', '（原卷版）', '(原卷版)', '（解析版）', '(解析版)', '（全国通用）', '(全国通用)', '（理科）', '(理科)', '（文科）', '(文科)', '解析版', '原卷版', '（1）', '(1)', '（2）', '(2)', '（3）', '(3)', '（5月份）', '(5月份)', '（10月份）', '(10月份)', '（六）', '(六)'];
+            for (var i = 0; i < NOISE.length; i++) {
+                s = s.split(NOISE[i]).join('');
+            }
+
+            // 卷种罗马数字：全国I卷 / 新课标I卷 / 新高考I卷 -> Ⅰ（捕获组前置，不用后行断言）
+            s = s.replace(/(全国|新课标|新高考)I卷/g, '$1Ⅰ卷');
+            s = s.replace(/(全国|新课标|新高考)II卷/g, '$1Ⅱ卷');
+            s = s.replace(/(全国|新课标|新高考)III卷/g, '$1Ⅲ卷');
+
+            // 分隔符归一：变体 -> '·'，再规范为 ' · ' 并折叠空白
+            s = s.split('・').join('·').split('•').join('·').split('|').join('·');
+            s = s.split('·').join(' · ');
+            s = s.replace(/\s+/g, ' ').trim();
+
+            // 兜底清理后仍可能命中精确表（如剥离尾缀后恰好是已录入的规范写法）
+            if (SOURCE_CANONICAL_MAP && Object.prototype.hasOwnProperty.call(SOURCE_CANONICAL_MAP, s)) {
+                return SOURCE_CANONICAL_MAP[s];
+            }
+
+            return s || '未知';
         }
 
         function normalizeChoiceOptions(text) {

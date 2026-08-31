@@ -22,7 +22,7 @@
 
 - **原作者**：[JudgePeach](https://github.com/JudgePeach)，全部底层能力（FastAPI、PDF/Word/LaTeX 拆卷、A4 排版、AI 工作流等）均源自该仓库，特此致谢。
 - **协议**：沿用 **GNU AGPLv3**，保留原 LICENSE 与版权声明。依 AGPLv3，任何分发（含联网服务）都须提供完整源码——本仓库即满足。
-- **与原项目关系**：保留核心架构与协议，在其上做"个人备课"向的二次开发（见[相比原项目的变动](#相比原项目的变动)）。后续可通过 `upstream` 远程跟踪上游更新。
+- **与原项目关系**：保留核心架构与协议，在其上做"个人备课"向的二次开发（见[相比原项目的变动](#相比原项目的变动)）。本派生作为独立仓库维护，**不再跟踪上游更新**，后续通过新建自有远程发布。
 
 > 原项目：<https://github.com/JudgePeach/math-question-bank>
 
@@ -30,7 +30,7 @@
 
 ## 相比原项目的变动
 
-以下为本派生版新增 / 修改的能力（其余继承自原项目），已用 `git diff origin/main` 核对全部本地提交：
+以下为本派生版新增 / 修改的能力（其余继承自原项目），已用 `git diff` 核对全部本地提交（本派生领先上游，均为本地提交、未推送）：
 
 **导入与拆解**
 
@@ -47,6 +47,12 @@
 - 难度枚举统一：抽出 `DIFFICULTY_VALUES` 作全链路唯一事实来源（易错 / 常规 / 挑战 / 强基四档），新增 `normalize_difficulty()`，AI 不再把常规题误判为易错。
 - 题目多标签 + 题库多选筛选：新增 `knowledge_list` / `solve_method` 两列，AI 打标 + 手改；题库支持知识点 / 解题方法搜索式多选筛选。
 - 关联章节多章节归属：一道题可归多个章节，录入 / 导入 / 分类 UI 均已支持。
+
+**题目来源治理**
+
+- 来源命名规整：新增 `mathbank/source_normalize.py`（`CANONICAL_MAP` + `normalize_source()`），把题库里 67 种混乱写法（裸写式高考真题、原始文件名、学校别名等）归一到统一模板（校内考试 `{学段} · {考试类型} · {学校} · {学年}` / 高考真题 `{年份} · {卷种} · 高考真题` / 专题汇编 `高考 · 专题汇编 · {专题}`），全库 995 题去重来源 67→60 种、空值清零。
+- 落库实时钩子：后端 `create_question` / `update_question` / AI·OCR 导入 / PDF·DOCX 拆卷五处写 `source` 前自动 `normalize_source()`；新增 `GET /api/source-canonical-map` 把映射表吐给前端。
+- 前端预览对齐：单题录入 `editSource` 失焦即实时归一，OCR 自动继承来源也归一，预览值 = 存储值，从源头杜绝再次混乱。
 
 **AI 成本优化**
 
@@ -315,6 +321,7 @@ python3 -m scripts.restore <快照.zip> --apply --yes  # 实际恢复（须先�
 │   ├── paper_chunking.py       # 超长文档分块拆题（本派生新增）
 │   ├── free_model_routing.py   # 免费模型自动路由（本派生新增）
 │   ├── latex_normalize.py      # 选择题选项归一化（本派生新增）
+│   ├── source_normalize.py     # 题目来源命名归一化（本派生新增）
 │   └── resources/
 │       ├── curriculums/        # A/B/S/H 四套共享 JSON 大纲
 │       └── tag_vocabulary.json # 知识点/解题方法受控词表（本派生新增）

@@ -83,12 +83,13 @@
                 }
             });
 
-            // Global smart clipboard paste routing for images/screenshots (Euclidean distance matching to closest visible DropZone)
+            // Global smart clipboard paste routing for images/screenshots.
+            // 方案 E：焦点感知 + 答案区 tab 定向，避免答案截图误入题干 OCR。
             window.addEventListener('paste', (e) => {
                 const items = (e.clipboardData || e.originalEvent.clipboardData).items;
                 let hasImage = false;
                 let imageFile = null;
-                
+
                 for (let index in items) {
                     const item = items[index];
                     if (item.kind === 'file' && item.type.startsWith('image/')) {
@@ -97,68 +98,100 @@
                         break;
                     }
                 }
-                
-                if (hasImage && imageFile) {
-                    // Define all potential target zones with their corresponding elements and handlers
-                    const targets = [
-                        {
-                            element: document.getElementById('illustrationDropZone'),
-                            handler: (file) => uploadIllustration(file)
-                        },
-                        {
-                            element: document.getElementById('contentOcrDropZone'),
-                            handler: (file) => runContentOcrBatch([file])
-                        },
-                        {
-                            element: document.getElementById('ocrDropZone'),
-                            handler: (file) => runOcr(file)
-                        },
-                        {
-                            element: document.getElementById('imageAnswerDropZone'),
-                            handler: (file) => uploadAnswerImage(file)
-                        }
-                    ];
-                    
-                    // Filter to only get elements that are actually visible on screen
-                    const visibleTargets = targets.filter(t => {
-                        return t.element && t.element.offsetParent !== null;
-                    });
-                    
-                    if (visibleTargets.length > 0) {
-                        // Calculate coordinates of the center of the viewport
-                        const viewCenterX = window.innerWidth / 2;
-                        const viewCenterY = window.innerHeight / 2;
-                        
-                        let bestTarget = null;
-                        let minDistance = Infinity;
-                        
-                        visibleTargets.forEach(t => {
-                            const rect = t.element.getBoundingClientRect();
-                            const centerX = rect.left + rect.width / 2;
-                            const centerY = rect.top + rect.height / 2;
-                            
-                            // Euclidean distance to viewport center
-                            const dx = centerX - viewCenterX;
-                            const dy = centerY - viewCenterY;
-                            const dist = Math.sqrt(dx * dx + dy * dy);
-                            
-                            if (dist < minDistance) {
-                                minDistance = dist;
-                                bestTarget = t;
-                            }
-                        });
-                        
-                        if (bestTarget) {
-                            bestTarget.handler(imageFile);
-                            e.preventDefault();
-                            return;
-                        }
-                    }
-                    
-                    // Fallback to upload as illustration if no targets are visible
-                    uploadIllustration(imageFile);
+
+                if (!(hasImage && imageFile)) return;
+
+                const editAnswerMarkdown = document.getElementById('editAnswerMarkdown');
+                const activeEl = document.activeElement;
+
+                // E-1: 焦点在答案文本框 → 按当前光标位置内联插入图片解答
+                if (editAnswerMarkdown && activeEl === editAnswerMarkdown) {
+                    uploadAnswerImage(imageFile, true);
                     e.preventDefault();
+                    return;
                 }
+
+                // E-3: 焦点不在文本框时，若答案区的某个 tab 处于激活，则定向到对应答案区 drop zone
+                const tabOcr = document.getElementById('tabContent-ocr');
+                const tabImage = document.getElementById('tabContent-image');
+                const ocrTabActive = !!(tabOcr && tabOcr.offsetParent !== null);
+                const imageTabActive = !!(tabImage && tabImage.offsetParent !== null);
+
+                if (imageTabActive) {
+                    const zone = document.getElementById('imageAnswerDropZone');
+                    if (zone && zone.offsetParent !== null) {
+                        uploadAnswerImage(imageFile, false);
+                        e.preventDefault();
+                        return;
+                    }
+                } else if (ocrTabActive) {
+                    const zone = document.getElementById('ocrDropZone');
+                    if (zone && zone.offsetParent !== null) {
+                        runOcr(imageFile);
+                        e.preventDefault();
+                        return;
+                    }
+                }
+
+                // 兜底：按「离视口中心最近的可见 drop zone」路由（原题干 OCR / 插图行为）
+                const targets = [
+                    {
+                        element: document.getElementById('illustrationDropZone'),
+                        handler: (file) => uploadIllustration(file)
+                    },
+                    {
+                        element: document.getElementById('contentOcrDropZone'),
+                        handler: (file) => runContentOcrBatch([file])
+                    },
+                    {
+                        element: document.getElementById('ocrDropZone'),
+                        handler: (file) => runOcr(file)
+                    },
+                    {
+                        element: document.getElementById('imageAnswerDropZone'),
+                        handler: (file) => uploadAnswerImage(file)
+                    }
+                ];
+
+                // Filter to only get elements that are actually visible on screen
+                const visibleTargets = targets.filter(t => {
+                    return t.element && t.element.offsetParent !== null;
+                });
+
+                if (visibleTargets.length > 0) {
+                    // Calculate coordinates of the center of the viewport
+                    const viewCenterX = window.innerWidth / 2;
+                    const viewCenterY = window.innerHeight / 2;
+
+                    let bestTarget = null;
+                    let minDistance = Infinity;
+
+                    visibleTargets.forEach(t => {
+                        const rect = t.element.getBoundingClientRect();
+                        const centerX = rect.left + rect.width / 2;
+                        const centerY = rect.top + rect.height / 2;
+
+                        // Euclidean distance to viewport center
+                        const dx = centerX - viewCenterX;
+                        const dy = centerY - viewCenterY;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+
+                        if (dist < minDistance) {
+                            minDistance = dist;
+                            bestTarget = t;
+                        }
+                    });
+
+                    if (bestTarget) {
+                        bestTarget.handler(imageFile);
+                        e.preventDefault();
+                        return;
+                    }
+                }
+
+                // Fallback to upload as illustration if no targets are visible
+                uploadIllustration(imageFile);
+                e.preventDefault();
             });
 
             // 初始化「沿用为后续默认来源」勾选与来源继承
@@ -491,18 +524,26 @@
         }
 
         // 1.5 Image Answer (No OCR) handler
-        function uploadAnswerImage(file) {
+        // atCaret=true 表示来自答案文本框内的光标插入（内联），false 表示来自 drop zone / tab 定向（追加到末尾）
+        function uploadAnswerImage(file, atCaret) {
             if (!file.type.startsWith('image/')) {
                 showToast('请上传有效的图片格式！', 'error');
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('file', file);
             const editorSession = EditorState.snapshot();
-            
+
+            // 上传是异步的，先在上传前锁定答案文本框的光标位置，避免上传期间焦点漂移导致插入错位
+            let caretPos = null;
+            if (atCaret) {
+                const ta = document.getElementById('editAnswerMarkdown');
+                if (ta) caretPos = ta.selectionStart;
+            }
+
             showToast('正在上传图片解答...', 'info');
-            
+
             fetch('/api/upload', {
                 method: 'POST',
                 body: formData
@@ -512,7 +553,7 @@
                 if (!EditorState.isCurrent(editorSession)) return;
                 if (data.status === 'success') {
                     showToast('图片解答上传成功！');
-                    insertAnswerImageTag(data.file_path);
+                    insertAnswerImageTag(data.file_path, caretPos);
                 } else {
                     showToast(data.message, 'error');
                 }
@@ -523,24 +564,41 @@
             });
         }
 
-        function insertAnswerImageTag(filePath) {
+        // caretPos 为数字时按该光标位置插入（内联）；为 null/undefined 时追加到文末
+        function insertAnswerImageTag(filePath, caretPos) {
             const textarea = document.getElementById('editAnswerMarkdown');
-            const markdownTag = `\n\n![图片解答](${filePath})\n\n`;
-            
-            const startPos = textarea.selectionStart;
-            const endPos = textarea.selectionEnd;
             const originalVal = textarea.value;
-            
+
+            let startPos, endPos;
+            if (typeof caretPos === 'number' && caretPos >= 0 && caretPos <= originalVal.length) {
+                startPos = endPos = caretPos;       // 内联：用上传前锁定的光标位置
+            } else {
+                startPos = endPos = originalVal.length;  // 追加：落到文末
+            }
+
+            let markdownTag;
+            if (startPos >= originalVal.length) {
+                // 追加到末尾：与原有行为一致，图文之间保留空行分隔
+                markdownTag = `\n\n![图片解答](${filePath})\n\n`;
+            } else {
+                // 内联插入到文字中间：用空格包裹，不强制换行，避免破坏段落
+                const beforeChar = originalVal.charAt(startPos - 1);
+                const afterChar = originalVal.charAt(startPos);
+                const pre = (beforeChar && !/\s/.test(beforeChar)) ? ' ' : '';
+                const post = (afterChar && !/\s/.test(afterChar)) ? ' ' : '';
+                markdownTag = `${pre}![图片解答](${filePath})${post}`;
+            }
+
             textarea.value = originalVal.substring(0, startPos) + markdownTag + originalVal.substring(endPos);
-            
+
             // Dispatch input event to refresh preview
             textarea.dispatchEvent(new Event('input'));
             textarea.focus();
-            
+
             // Put cursor right after inserted image
             const newCursorPos = startPos + markdownTag.length;
             textarea.setSelectionRange(newCursorPos, newCursorPos);
-            
+
             // Sync answer images array & badges
             syncAnswerImagesFromMarkdown();
         }
@@ -990,7 +1048,7 @@
                         if (_getUseSourceDefault() && _getSourceDefault()) {
                             if (srcEl) srcEl.value = _getSourceDefault();
                         } else if (data.source && srcEl && !srcEl.value.trim()) {
-                            srcEl.value = data.source;
+                            srcEl.value = (typeof normalizeSource === 'function') ? normalizeSource(data.source) : data.source;
                             _setUseSourceDefault(true);
                             _setSourceDefault(data.source);
                             const chk = document.getElementById('editSourceDefault');

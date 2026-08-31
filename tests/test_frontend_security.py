@@ -312,7 +312,7 @@ def test_editor_bound_uploads_and_tikz_requests_reject_old_sessions_in_real_js()
     ocr_source = _read(STATIC_JS_DIR / "ocr.js")
     content_upload_start = ocr_source.index("function uploadIllustration(file)")
     content_upload_end = ocr_source.index("function insertImageTag", content_upload_start)
-    answer_upload_start = ocr_source.index("function uploadAnswerImage(file)")
+    answer_upload_start = ocr_source.index("function uploadAnswerImage(file")
     answer_upload_end = ocr_source.index("function insertAnswerImageTag", answer_upload_start)
     upload_source = (
         ocr_source[content_upload_start:content_upload_end]

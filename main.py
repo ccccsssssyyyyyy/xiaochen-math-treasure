@@ -103,6 +103,7 @@ from mathbank.question_types import (
     normalize_ai_question_form,
 )
 from mathbank.latex_normalize import normalize_choice_options_to_latex
+from mathbank.source_normalize import normalize_source
 import shutil
 from mathbank.pdf_inspector_helper import (
     is_pdf_inspector_available,
@@ -915,7 +916,7 @@ def ocr_formula(
                     latex_content = ocr_via_provider(
                         temp_filepath,
                         ocr_provider,
-                        include_illustration_box=True,
+                        include_illustration_box=False,
                     )
                     confidence = 0.99
                     provider = (
@@ -945,49 +946,17 @@ def ocr_formula(
             # 选择题选项统一为 choices 网格环境（单题 OCR 亦适用，避免内联选项进入编辑器）
             latex_content = normalize_choice_options_to_latex(latex_content)
 
-        # ----------------- 双阶段多模态识图与高级 TikZ 绘图模型联动 -----------------
+        # ----------------- OCR 插图标记清洗（自动 TikZ 重画已按产品设计关闭） -----------------
+        # 前端 TikZ 绘图入口已隐藏，OCR 不再请求模型输出 ILLUSTRATION_BOX 标记
+        # （include_illustration_box=False）。此处仅做兜底清洗，擦除任何可能由
+        # 模型幻觉产生的残留标记，避免乱入题干文本。后端 /api/render_tikz、
+        # /api/ai/draw_tikz_from_image 等接口保留不动，便于日后恢复前端入口。
         tikz_code_from_high_model = None
         tikz_image_path = None
-        
+
         if latex_content:
             import re
-            # 提取可能由默认模型标注的示意图 Bounding Box 标记
-            box_match = re.search(r"\[ILLUSTRATION_BOX:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]", latex_content, re.IGNORECASE)
-            if box_match:
-                # 第一步先确保擦除标记，防止乱入题干文本框
-                latex_content = re.sub(r"\[ILLUSTRATION_BOX:.*?\]", "", latex_content).strip()
-                
-                if not skip_tikz:
-                    try:
-                        # 不再执行物理分割裁剪，直接将整张原始题目截图发送给高级视觉绘图模型进行图形分析与重画
-                        prefer_draw = os.getenv("PREFER_DRAW_MODEL", "Qwen/Qwen3-VL-32B-Instruct")
-                        print(f"[Illustration Draw] 检测到插图标记，直接将整张原图送往高级模型 {prefer_draw} 进行 TikZ 解析绘图...")
-                        
-                        tikz_code_from_high_model = draw_tikz_via_high_model(
-                            temp_filepath, # 传入整图
-                            prefer_draw,
-                            latex_content=latex_content
-                        )
-                    except Exception as draw_err:
-                        print(f"[Illustration Draw Fail] 高级多模态模型整图分析绘图失败: {str(draw_err)}")
-                else:
-                    print("[Illustration Draw] 检测到插图标记，但由于已勾选跳过，故未调用高级绘图模型进行 TikZ 绘制")
-            else:
-                # 剔除可能存在的由于大模型幻觉或者部分输出造成的残缺标记
-                latex_content = re.sub(r"\[ILLUSTRATION_BOX:.*?\]", "", latex_content).strip()
-
-        # 如果高级模型成功生成了 TikZ 代码，我们在后台自动进行编译预览，并格式化追加到 latex 文本中！
-        if tikz_code_from_high_model:
-            try:
-                print(f"[Illustration Draw] 高级绘图模型成功输出 TikZ 源码！正在开始编译为预览图...")
-                compiled_path = compile_tikz_to_png(tikz_code_from_high_model)
-                if compiled_path:
-                    tikz_image_path = compiled_path
-                    # 自动在题干文本的尾部追加 Markdown 插图引用
-                    latex_content += f"\n\n![]({compiled_path})"
-                    print(f"[Illustration Draw] 编译成功: {compiled_path}")
-            except Exception as compile_err:
-                print(f"[Illustration Draw] 编译高级模型生成的 TikZ 失败: {str(compile_err)}")
+            latex_content = re.sub(r"\[ILLUSTRATION_BOX:.*?\]", "", latex_content).strip()
 
         # 将 temp_filepath 置为 None，避免在 finally 块中被删除
         saved_filepath = temp_filepath
@@ -2369,6 +2338,9 @@ def create_question(
         # 选择题选项统一为 choices 网格环境（双保险：AI 即便输出内联 A./B./C./D. 也归一化）
         content = normalize_choice_options_to_latex(content)
 
+        # 来源自动归一（与一次性批量归一、拆卷导入共用同一映射表）
+        source = normalize_source(source)
+
         # Validate json array format
         parsed_img_paths = json.loads(image_paths) if image_paths else []
         
@@ -2529,6 +2501,9 @@ def update_question(
         content = normalize_fillin_macro(content)
         # 选择题选项统一为 choices 网格环境（双保险：AI 即便输出内联 A./B./C./D. 也归一化）
         content = normalize_choice_options_to_latex(content)
+
+        # 来源自动归一（与一次性批量归一、拆卷导入共用同一映射表）
+        source = normalize_source(source)
 
         parsed_img_paths = json.loads(image_paths) if image_paths else []
         
@@ -3342,11 +3317,8 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
         # 难度（唯一事实来源：mathbank.curriculums.DIFFICULTY_VALUES）
         difficulty = normalize_difficulty(result.get("difficulty", ""))
 
-        # 来源：清洗分隔符（· • 、 ， 等）与多余空白
-        source = (result.get("source") or "").strip()
-        for sep in ["·", "•", "・", "、", "，", ",", "。"]:
-            source = source.replace(sep, "")
-        source = re.sub(r"\s+", "", source)
+        # 来源：自动归一（与一次性批量归一、手动保存共用同一映射表）
+        source = normalize_source(result.get("source"))
 
         # 学段 / 章节：校验必须存在于 curriculum，否则回退到第一个可用学段/章节
         # 兼容模型可能输出的旧字段名 category_compulsory / category_chapter
@@ -3983,7 +3955,7 @@ def ai_parse_paper(
                 content_str = re.sub(r'^[\s、\.．]+', '', content_str)
                 q["content"] = content_str
                 
-            q["source"] = (extracted_source or paper_title).strip()
+            q["source"] = normalize_source(extracted_source or paper_title)
             
             # Clean up double-escaped literal \n in fields
             for field in ["content", "answer_markdown"]:
@@ -4079,6 +4051,15 @@ def get_sources(db: Session = Depends(get_db)):
     # Sort alphabetically (case-insensitive)
     sources.sort(key=str.lower)
     return sources
+
+@app.get("/api/source-canonical-map")
+def get_source_canonical_map():
+    """吐出来源归一映射表，供前端 preview 精确对齐后端落库结果。
+
+    单一事实源为 mathbank.source_normalize.CANONICAL_MAP；前端初始化时拉取一次，
+    在 normalizeSource 中作为 Tier1 精确查表，保证预览值与存储值完全一致、且无重复定义。
+    """
+    return CANONICAL_MAP
 
 @app.post("/api/shutdown")
 def shutdown_server():
@@ -4948,7 +4929,7 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
 
     # 4. 对每个题目卡片进行字段修补、占位符替换与资源晋升准备
     for q in parsed_questions:
-        q["source"] = (q.get("source") or paper_title).strip()
+        q["source"] = normalize_source(q.get("source") or paper_title)
 
         # 规范化 AI 自动打标的知识点 / 解题方法多标签（受控词表映射 + 去重）
         q["knowledge_list"] = normalize_tag_list(q.get("knowledge_list"), field="knowledge_list")
