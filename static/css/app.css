@@ -57,9 +57,9 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
 
     /* Question / answer panel tints (default violet + soft green) */
-    --question-panel-bg: #F5F3FF;
+    --question-panel-bg: #FAF8FF;
     --question-panel-border: #7C3AED;
-    --answer-panel-bg: #EAF3DE;
+    --answer-panel-bg: #F5FBEF;
     --answer-panel-border: #3B6D11;
 }
 
@@ -74,7 +74,7 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 154, 52, 18;
     --brand-rgb: 234, 88, 12;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-    --question-panel-bg: #FFF7ED;
+    --question-panel-bg: #FFFAF3;
     --question-panel-border: #EA580C;
 }
 
@@ -88,7 +88,7 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 55, 48, 163;
     --brand-rgb: 79, 70, 229;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-    --question-panel-bg: #EEF2FF;
+    --question-panel-bg: #F7F8FF;
     --question-panel-border: #4F46E5;
 }
 
@@ -102,7 +102,7 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 17, 94, 89;
     --brand-rgb: 13, 148, 136;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-    --question-panel-bg: #F0FDFA;
+    --question-panel-bg: #F6FDFC;
     --question-panel-border: #0D9488;
 }
 
@@ -116,7 +116,7 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 30, 64, 175;
     --brand-rgb: 37, 99, 235;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-    --question-panel-bg: #EFF6FF;
+    --question-panel-bg: #F7FAFF;
     --question-panel-border: #2563EB;
 }
 
