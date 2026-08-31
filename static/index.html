@@ -564,6 +564,11 @@
                                 <button id="contentOcrModeReplace" type="button" onclick="window.setOcrMode('content','replace'); if(window.refreshContentOcrModeUI) window.refreshContentOcrModeUI();" class="px-2 py-1 rounded text-[10px] font-bold bg-brand-600 text-white transition-colors">替换</button>
                                 <button id="contentOcrModeAppend" type="button" onclick="window.setOcrMode('content','append'); if(window.refreshContentOcrModeUI) window.refreshContentOcrModeUI();" class="px-2 py-1 rounded text-[10px] font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-colors">追加</button>
                             </div>
+                            <!-- 当已识别出答案后，后续图片默认进答案栏；勾选此项可临时让下一张图进题干 -->
+                            <div class="flex items-center justify-end gap-1 mt-1" title="答案识别后，后续图默认追加到答案栏；临时需要下一张进题干时勾选，识别后自动取消">
+                                <input id="contentOcrForceQuestion" type="checkbox" class="h-3 w-3 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer">
+                                <label for="contentOcrForceQuestion" class="text-[10px] text-slate-500 cursor-pointer select-none">下一张进题干</label>
+                            </div>
 
                             <!-- Content OCR Loading -->
                             <div id="contentOcrLoadingIndicator" role="status" aria-live="polite" class="hidden glass-card rounded-xl p-4 text-center space-y-2">

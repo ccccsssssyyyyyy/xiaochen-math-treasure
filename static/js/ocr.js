@@ -181,6 +181,16 @@
                 applyInheritanceToSource();
             })();
 
+            // 初始化「下一张进题干」临时覆盖 checkbox
+            (function initForceQuestionCheckbox() {
+                const chk = document.getElementById('contentOcrForceQuestion');
+                if (!chk) return;
+                chk.checked = contentOcrForceNextToQuestion;
+                chk.addEventListener('change', function () {
+                    contentOcrForceNextToQuestion = chk.checked;
+                });
+            })();
+
             // 初始化「多图合并」开关 UI（与 PDF 裁切 OCR 共用 content 偏好）
             refreshContentOcrModeUI();
         }
@@ -853,7 +863,8 @@
                     
                     // 2. Automatically load results into the persistent content editor
                     const _isAppend = !!(opts && opts.isAppend);
-                    loadToContentEditor('ocr', _isAppend);
+                    const _forceAnswer = !!(opts && opts.forceAnswer);
+                    loadToContentEditor('ocr', _isAppend, _forceAnswer);
 
                     // 多图批处理时跳过单次收尾（统一在 runContentOcrBatch 末尾 finalize 一次）
                     if (!(opts && opts.skipFinalize)) {
@@ -903,6 +914,8 @@
         // 内容 OCR 队列：顺序消费，避免连续粘贴时后一张 abort 前一张
         let contentOcrQueue = [];
         let isContentOcrProcessing = false;
+        // 答案识别后，临时强制下一张图进题干（checkbox 状态）
+        let contentOcrForceNextToQuestion = false;
 
         // 多张截图合并：依次 OCR 写入，全部完成后再统一 finalize（仅一次分类 + 来源识别）
         async function runContentOcrBatch(files) {
@@ -922,12 +935,24 @@
             const mode = (typeof window.getOcrMode === 'function') ? window.getOcrMode('content') : 'replace';
             let firstFile = null;
             let firstInRound = true;
+            let hasAnswerStarted = false;
             while (contentOcrQueue.length > 0) {
                 const file = contentOcrQueue.shift();
                 if (!firstFile) firstFile = file;
                 // 替换模式下本轮首张覆盖旧内容，其余追加；追加模式下全部追加
                 const isAppend = (mode === 'append') || !firstInRound;
-                await runContentOcr(file, { isAppend: isAppend, skipFinalize: true });
+                // 一旦本轮已识别出答案，后续图片默认进答案栏；用户可勾选「下一张进题干」临时覆盖
+                const forceAnswer = hasAnswerStarted && !contentOcrForceNextToQuestion;
+                await runContentOcr(file, { isAppend: isAppend, skipFinalize: true, forceAnswer: forceAnswer });
+                // 识别完成后检查答案栏是否有内容
+                const answerTextarea = document.getElementById('editAnswerMarkdown');
+                hasAnswerStarted = hasAnswerStarted || !!(answerTextarea && answerTextarea.value.trim());
+                // 使用了「下一张进题干」覆盖后自动复位
+                if (contentOcrForceNextToQuestion) {
+                    contentOcrForceNextToQuestion = false;
+                    const chk = document.getElementById('contentOcrForceQuestion');
+                    if (chk) chk.checked = false;
+                }
                 firstInRound = false;
             }
             finalizeContentOcr(firstFile);
@@ -1075,7 +1100,7 @@
         }
             
         // Load content OCR result into the persistent editor textarea
-        function loadToContentEditor(source, isAppend = false) {
+        function loadToContentEditor(source, isAppend = false, forceAnswer = false) {
             const textarea = document.getElementById('editContent');
             let contentToImport = '';
             let answerPart = '';
@@ -1085,7 +1110,7 @@
                         
                 if (source === 'ocr') {
                 const rawOcrText = document.getElementById('contentOcrResultText').textContent;
-                console.log('[OCR split] loadToContentEditor called with source=ocr, rawText length=' + rawOcrText.length + ', preview: ' + JSON.stringify(rawOcrText.slice(0, 60)));
+                console.log('[OCR split] loadToContentEditor called with source=ocr, rawText length=' + rawOcrText.length + ', preview: ' + JSON.stringify(rawOcrText.slice(0, 60)) + ', forceAnswer=' + forceAnswer);
                 const _split = splitOcrTextByAnswerMarker(rawOcrText);
                 contentToImport = _split.question;
                 answerPart = _split.answer;
@@ -1093,16 +1118,18 @@
                 console.log('[OCR split] result: didSplit=' + didSplit + ', question.length=' + contentToImport.length + ', answer.length=' + answerPart.length);
 
                 // 1. Auto-detect if it's a choice question with options A, B, C, D (question part only)
-                const hasA = /[\s,，、]*\bA(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
-                const hasB = /[\s,，、]*\bB(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
-                const hasC = /[\s,，、]*\bC(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
-                const hasD = /[\s,，、]*\bD(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
+                if (!forceAnswer) {
+                    const hasA = /[\s,，、]*\bA(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
+                    const hasB = /[\s,，、]*\bB(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
+                    const hasC = /[\s,，、]*\bC(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
+                    const hasD = /[\s,，、]*\bD(?:[\.\s、，．]+|\b|\))/i.test(contentToImport);
 
-                if (hasA && hasB && hasC && hasD) {
-                    const editQType = document.getElementById('editQType');
-                    if (editQType) {
-                        editQType.value = 'single_choice';
-                        editQType.dispatchEvent(new Event('change'));
+                    if (hasA && hasB && hasC && hasD) {
+                        const editQType = document.getElementById('editQType');
+                        if (editQType) {
+                            editQType.value = 'single_choice';
+                            editQType.dispatchEvent(new Event('change'));
+                        }
                     }
                 }
 
@@ -1110,8 +1137,31 @@
                 contentToImport = formatQuestionContent(contentToImport);
             }
             
-            if (!contentToImport.trim() && !didSplit) {
+            if (!contentToImport.trim() && !answerPart.trim()) {
                 showToast('导入内容为空！', 'error');
+                return;
+            }
+            
+            // 强制路由到答案栏（答案识别后，后续图片默认进答案栏）
+            if (forceAnswer) {
+                const answerTextarea = document.getElementById('editAnswerMarkdown');
+                if (answerTextarea) {
+                    let fullAnswer = '';
+                    if (contentToImport.trim() && answerPart.trim()) {
+                        fullAnswer = contentToImport.trim() + '\n' + answerPart.trim();
+                    } else {
+                        fullAnswer = contentToImport.trim() || answerPart.trim();
+                    }
+                    if (answerTextarea.value.trim()) {
+                        answerTextarea.value += '\n\n' + fullAnswer;
+                    } else {
+                        answerTextarea.value = fullAnswer;
+                    }
+                    answerTextarea.dispatchEvent(new Event('input'));
+                    answerTextarea.classList.add('ring-2', 'ring-emerald-400', 'ring-offset-2');
+                    setTimeout(() => answerTextarea.classList.remove('ring-2', 'ring-emerald-400', 'ring-offset-2'), 1200);
+                    showToast('已追加至答案栏');
+                }
                 return;
             }
             
