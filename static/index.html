@@ -18,7 +18,12 @@
     <script>
         // Prevent theme and workspace flash
         (function() {
-            const savedTheme = localStorage.getItem('theme-color') || 'coral';
+            let savedTheme = localStorage.getItem('theme-color') || 'coral';
+            const validThemes = ['coral', 'indigo', 'teal', 'sky'];
+            if (!validThemes.includes(savedTheme)) {
+                savedTheme = 'coral';
+                localStorage.setItem('theme-color', 'coral');
+            }
             const savedDarkMode = localStorage.getItem('dark-mode') === 'true';
             document.documentElement.classList.add(`theme-${savedTheme}`);
             if (savedDarkMode) {
@@ -146,16 +151,6 @@
                             <span class="w-2.5 h-2.5 rounded-full bg-[#0d9488] shrink-0"></span>
                             <span>青碧</span>
                             <i class="fa-solid fa-check text-[9px] text-brand-600 dark:text-brand-500 ml-auto hidden" id="check-teal"></i>
-                        </button>
-                        <button onclick="selectTheme('fuchsia')" class="glass-dropdown-item w-full px-3.5 py-2 text-xs text-left flex items-center space-x-2 rounded-xl">
-                            <span class="w-2.5 h-2.5 rounded-full bg-[#d946ef] shrink-0"></span>
-                            <span>洋红</span>
-                            <i class="fa-solid fa-check text-[9px] text-brand-600 dark:text-brand-500 ml-auto hidden" id="check-fuchsia"></i>
-                        </button>
-                        <button onclick="selectTheme('navy')" class="glass-dropdown-item w-full px-3.5 py-2 text-xs text-left flex items-center space-x-2 rounded-xl">
-                            <span class="w-2.5 h-2.5 rounded-full bg-[#475569] shrink-0"></span>
-                            <span>藏青</span>
-                            <i class="fa-solid fa-check text-[9px] text-brand-600 dark:text-brand-500 ml-auto hidden" id="check-navy"></i>
                         </button>
                         <button onclick="selectTheme('sky')" class="glass-dropdown-item w-full px-3.5 py-2 text-xs text-left flex items-center space-x-2 rounded-xl">
                             <span class="w-2.5 h-2.5 rounded-full bg-[#2563eb] shrink-0"></span>
@@ -602,8 +597,8 @@
                     </div>
 
                     <!-- Persistent Textarea & Preview -->
-                    <div class="border-t border-slate-100 pt-5 space-y-3" style="border-left:4px solid #BA7517; background:#FAEEDA; border-radius:12px; padding:18px 16px 16px 18px;">
-                        <div class="flex justify-between items-center" style="position:sticky; top:0; z-index:5; background:#FAEEDA; padding-bottom:4px;">
+                    <div class="border-t border-slate-100 pt-5 space-y-3" style="border-left:4px solid var(--question-panel-border); background:var(--question-panel-bg); border-radius:12px; padding:18px 16px 16px 18px;">
+                        <div class="flex justify-between items-center" style="position:sticky; top:0; z-index:5; background:var(--question-panel-bg); padding-bottom:4px;">
                             <label class="block text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center space-x-1.5">
                                 <span class="bg-brand-50 text-brand-700 border border-brand-200 rounded-md px-2 py-0.5 text-[11px] font-medium">终审题干</span>
                                 <span>题干编辑框 (核准录入)</span>
@@ -652,8 +647,8 @@
                 </div>
 
                 <!-- 3. Answer & Solution -->
-                <div id="answerExplanationPanel" class="border border-slate-200 p-5 rounded-2xl space-y-4" style="border-left:4px solid #0F6E56; background:#E1F5EE;">
-                    <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2" style="position:sticky; top:0; z-index:5; background:#E1F5EE; padding-bottom:4px;">
+                <div id="answerExplanationPanel" class="border border-slate-200 p-5 rounded-2xl space-y-4" style="border-left:4px solid var(--answer-panel-border); background:var(--answer-panel-bg);">
+                    <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2" style="position:sticky; top:0; z-index:5; background:var(--answer-panel-bg); padding-bottom:4px;">
                         <i class="fa-solid fa-list-check text-slate-400"></i>
                         <span>解析录入</span>
                     </h3>

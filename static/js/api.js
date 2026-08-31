@@ -1909,7 +1909,11 @@
 
         // Global Theme Color and Dark Mode Management
         window.changeTheme = function(themeName, save = true) {
-            const themes = ['theme-coral', 'theme-indigo', 'theme-teal', 'theme-fuchsia', 'theme-navy', 'theme-sky'];
+            const validThemes = ['coral', 'indigo', 'teal', 'sky'];
+            if (!validThemes.includes(themeName)) {
+                themeName = 'coral';
+            }
+            const themes = ['theme-coral', 'theme-indigo', 'theme-teal', 'theme-sky'];
             
             // Remove all themes from document root and body
             themes.forEach(t => {
@@ -1930,8 +1934,6 @@
                     'coral': '#ea580c',
                     'indigo': '#4f46e5',
                     'teal': '#0d9488',
-                    'fuchsia': '#d946ef',
-                    'navy': '#475569',
                     'sky': '#2563eb'
                 };
                 dot.style.backgroundColor = colorMap[themeName] || '#0f172a';
@@ -1939,7 +1941,7 @@
             }
             
             // Update check marks
-            const themesOnly = ['coral', 'indigo', 'teal', 'fuchsia', 'navy', 'sky'];
+            const themesOnly = ['coral', 'indigo', 'teal', 'sky'];
             themesOnly.forEach(t => {
                 const check = document.getElementById(`check-${t}`);
                 if (check) {
@@ -2176,8 +2178,6 @@
                 'coral': '珊瑚橘',
                 'indigo': '靛青',
                 'teal': '青碧',
-                'fuchsia': '洋红',
-                'navy': '藏青',
                 'sky': '天空'
             };
             return names[themeName] || themeName;
@@ -2194,9 +2194,14 @@
         }
 
         function initTheme() {
-            const savedTheme = localStorage.getItem('theme-color') || 'coral';
+            let savedTheme = localStorage.getItem('theme-color') || 'coral';
+            const validThemes = ['coral', 'indigo', 'teal', 'sky'];
+            if (!validThemes.includes(savedTheme)) {
+                savedTheme = 'coral';
+                localStorage.setItem('theme-color', 'coral');
+            }
             const savedDarkMode = localStorage.getItem('dark-mode') === 'true';
-            
+
             // Apply saved theme color without triggering toast
             window.changeTheme(savedTheme, false);
             

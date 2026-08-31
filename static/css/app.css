@@ -55,6 +55,12 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 76, 29, 149;
     --brand-rgb: 124, 58, 237;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+
+    /* Question / answer panel tints (default violet + soft green) */
+    --question-panel-bg: #F5F3FF;
+    --question-panel-border: #7C3AED;
+    --answer-panel-bg: #EAF3DE;
+    --answer-panel-border: #3B6D11;
 }
 
 /* Theme Classes definitions */
@@ -68,6 +74,8 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 154, 52, 18;
     --brand-rgb: 234, 88, 12;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+    --question-panel-bg: #FFF7ED;
+    --question-panel-border: #EA580C;
 }
 
 .theme-indigo {
@@ -80,6 +88,8 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 55, 48, 163;
     --brand-rgb: 79, 70, 229;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+    --question-panel-bg: #EEF2FF;
+    --question-panel-border: #4F46E5;
 }
 
 .theme-teal {
@@ -92,30 +102,8 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 17, 94, 89;
     --brand-rgb: 13, 148, 136;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-}
-
-.theme-fuchsia {
-    --brand-50-rgb: 253, 244, 255;
-    --brand-100-rgb: 250, 232, 255;
-    --brand-200-rgb: 245, 208, 254;
-    --brand-500-rgb: 232, 121, 249;
-    --brand-600-rgb: 217, 70, 239;
-    --brand-700-rgb: 176, 38, 201;
-    --brand-900-rgb: 134, 25, 143;
-    --brand-rgb: 217, 70, 239;
-    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
-}
-
-.theme-navy {
-    --brand-50-rgb: 248, 250, 252;
-    --brand-100-rgb: 241, 245, 249;
-    --brand-200-rgb: 226, 232, 240;
-    --brand-500-rgb: 100, 116, 139;
-    --brand-600-rgb: 71, 85, 105;
-    --brand-700-rgb: 51, 65, 85;
-    --brand-900-rgb: 30, 41, 59;
-    --brand-rgb: 71, 85, 105;
-    --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+    --question-panel-bg: #F0FDFA;
+    --question-panel-border: #0D9488;
 }
 
 .theme-sky {
@@ -128,6 +116,8 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 30, 64, 175;
     --brand-rgb: 37, 99, 235;
     --apple-shadow-glow: 0 0 20px rgba(var(--brand-rgb), 0.15);
+    --question-panel-bg: #EFF6FF;
+    --question-panel-border: #2563EB;
 }
 
 /* Elegant Dark Mode Definition */
@@ -155,6 +145,12 @@ html.init-ws-paper #toggleSidebarBtn { display: none !important; }
     --brand-900-rgb: 30, 41, 59;     /* slate-800 */
     --brand-rgb: 100, 116, 139;     /* slate-500 */
     --apple-shadow-glow: 0 0 20px rgba(255, 255, 255, 0.02);
+
+    /* Dark mode question / answer panels - desaturated so they don't glow */
+    --question-panel-bg: rgba(30, 41, 59, 0.6);
+    --question-panel-border: rgba(148, 163, 184, 0.5);
+    --answer-panel-bg: rgba(20, 45, 30, 0.55);
+    --answer-panel-border: rgba(120, 160, 100, 0.5);
 }
 
 /* 1. Global Forms Dark Mode Overrides & Contrast Enhancement */
