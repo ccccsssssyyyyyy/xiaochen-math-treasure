@@ -103,7 +103,8 @@ from mathbank.question_types import (
     normalize_ai_question_form,
 )
 from mathbank.latex_normalize import normalize_choice_options_to_latex
-from mathbank.source_normalize import normalize_source
+from mathbank.choice_recovery import recover_missing_choices
+from mathbank.source_normalize import normalize_source, CANONICAL_MAP
 import shutil
 from mathbank.pdf_inspector_helper import (
     is_pdf_inspector_available,
@@ -2187,21 +2188,26 @@ def _normalize_question_content(content: str) -> str:
 def _strip_leading_question_number(content: str) -> str:
     """剥离套卷导入时残留的原卷题号（仅去除题干最开头的顺序编号，避免组卷时与系统编号叠加）。
 
-    处理范围：阿拉伯数字 / 中文数字开头的 "16." "（16）" "16、" "16、"、以及 "(1)" 等纯序号前缀。
-    刻意不处理：题干内部的小问序号（如 "(1) 求..." 出现在句中时）、以及题号后紧跟的实质内容。
+    处理范围：阿拉伯数字 / 中文数字开头的 "16." "（16）" "16、" "16、"、"(1)"、
+    "第1题"、全角句点 "16．" 等纯序号前缀。
+
+    刻意不处理：题干内部的小问序号（如 "(1) 求..." 出现在句中时）、
+    以及 "3.14""1.5万" 这类小数开头的实质内容（用 (?!\\d) 保护）。
     """
     if not content or not isinstance(content, str):
         return content
     import re as _re
     # 仅当题号处于字符串最开头时才剥离；只命中无歧义的大题编号，
-    # 不命中题干自然开头的小问序号（如 "(1) 求..."）或"12 名学生"这类内容
+    # 不命中题干自然开头的小问序号（如 "(1) 求..."）或"12 名学生"这类内容。
+    # (?!\d) 保护小数：避免 "3.14 的值" 被误删成 "14 的值"。
     cleaned = _re.sub(
         r"^\s*"
         r"(?:"
-        r"\(?\d{1,3}\)?[\.、\)]|"          # 16.  16)  16、  (16)
-        r"[一二三四五六七八九十百]{1,3}[\.、]|"  # 一. 二、
-        r"\([一二三四五六七八九十]+\)|"       # （一）
-        r"[①②③④⑤⑥⑦⑧⑨⑩]+\s?"             # ①②③
+        r"第\s*\d{1,3}\s*题|"                       # 第1题 / 第 12 题
+        r"\(?\d{1,3}[\)）]?[\.、．\)）](?!\d)|"      # 16. 16) 16、 16．（16）
+        r"[一二三四五六七八九十百]{1,3}[\.、．](?!\d)|"  # 一. 二、 三．
+        r"[\(（][一二三四五六七八九十]+[\)）]|"        # （一）
+        r"[①②③④⑤⑥⑦⑧⑨⑩]+\s?"                   # ①②③
         r")\s*",
         "",
         content,
@@ -3812,6 +3818,19 @@ def parse_paper_text_internal(
         formula_lock=formula_lock,
     )
 
+    # 选项回溯补回：小参数模型拆题时常保留题干却丢弃 A/B/C/D 选项，
+    # 此处用原文做确定性兜底（零 token），只补不覆盖，匹配不足则静默跳过。
+    try:
+        recovered = recover_missing_choices(parsed_questions, latex_content)
+        if recovered:
+            print(
+                f"[Choice Recovery] 已从原文回溯补回 {recovered} 道选择题的选项。",
+                flush=True,
+            )
+    except Exception as recovery_error:
+        # 兜底逻辑失败不得影响主流程
+        print(f"[Choice Recovery] 跳过（{type(recovery_error).__name__}: {recovery_error}）")
+
     # 强制进行静默净化：若未勾选自动生成答案，则对于没有带有 [EXTRACTED_ORIGINAL] 的解析和解答，将其强行抹平为空。
     for q in parsed_questions:
         ans = q.get("answer_markdown", "")
@@ -3888,6 +3907,11 @@ def ai_parse_paper(
                 raise ValueError(f"AI 返回的第 {index} 题缺少有效题干，已停止导入以避免静默漏题。")
             if not isinstance(question.get("referenced_images"), list):
                 question["referenced_images"] = []
+            # 与 PDF 拆卷链路一致：题号由后处理剥离（提示词不再承担该职责，
+            # 以免模型把 A./B./C./D. 选项也当成编号误删）。
+            question["content"] = _strip_leading_question_number(
+                normalize_choice_options_to_latex(question["content"])
+            )
 
         lock_report = restore_visible_math(parsed_questions, math_locks, strict=False)
         tex_diagnostics.update(lock_report)

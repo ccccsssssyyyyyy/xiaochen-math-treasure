@@ -72,6 +72,20 @@ def _has_math_formula_loss(
     return False
 
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_OPT_RE = re.compile(r"(?:^|\n)\s*[A-D][.．、]")
+_QNUM_RE = re.compile(r"(?:^|\n)\s*\d+\.")
+
+
+def _is_usable_text(text: str) -> bool:
+    """判断 PyMuPDF 抽出的文本是否足以作为原生文本使用（而非乱码空页）。"""
+    text = (text or "").strip()
+    if len(text) < 30:
+        return False
+    # 至少具备一个"像题目"的特征：中文、选项标号、或题号，避免把乱码页当有效文本。
+    return bool(_CJK_RE.search(text) or _OPT_RE.search(text) or _QNUM_RE.search(text))
+
+
 
 def _page_marker(page_index: int) -> str:
     """生成不会强制中断跨页题目的来源页标记。"""
@@ -188,16 +202,30 @@ def inspect_and_extract_pdf(
             for raw_page in raw_pages:
                 page_index = int(getattr(raw_page, "page"))
                 markdown = str(getattr(raw_page, "markdown", "") or "").strip()
+                ocr_reason = getattr(raw_page, "ocr_reason", None)
                 # pdf-inspector 的逐页结论是首要依据；短标题页不能仅因字符少就被误送 OCR。
                 needs_ocr = bool(getattr(raw_page, "needs_ocr", False)) or not markdown
                 if not needs_ocr and markdown:
                     if _has_math_formula_loss(markdown, page_index, tmp_path):
                         needs_ocr = True
+                # 方案 A：pdf-inspector 抽空却标 needs_ocr 时，逐页回退 PyMuPDF。
+                # 文本层往往仍在（仅 pdf-inspector 解不开字体），回退可保住题干与选项，
+                # 避免整页误送视觉 OCR 后由小模型把选项整批丢光。
+                source = "pdf-inspector"
+                if needs_ocr and not markdown:
+                    fitz_pages = _extract_fitz_pages(file_bytes, [page_index])
+                    if fitz_pages:
+                        fb_text = str(fitz_pages[0].get("markdown") or "").strip()
+                        if _is_usable_text(fb_text):
+                            markdown = fb_text
+                            needs_ocr = False
+                            source = "pymupdf-fallback"
                 pages.append({
                     "page_index": page_index,
                     "markdown": markdown,
                     "needs_ocr": needs_ocr,
-                    "source": "pdf-inspector",
+                    "source": source,
+                    "ocr_reason": ocr_reason,
                 })
 
             if pages:

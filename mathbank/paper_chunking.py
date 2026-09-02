@@ -16,7 +16,10 @@ from typing import Any, Dict, List, Optional, Tuple
 # 超过 max_chars 时才由 _MINOR_QUESTION_START 降级使用。
 _MAJOR_QUESTION_START = re.compile(
     r"(?m)^[ \t]*(?:"
-    r"(?:\d{1,3}[.、](?=[ \t]|$))"             # 1. 或 1、（后接空白/行尾，避开 3.14）
+    # 1. 或 1、——后接空白/行尾，或紧跟非数字（避开 3.14、1.5万）。
+    # 必须允许「1.复数」这类无空格写法：PDF 原生文本抽出来的题号就是紧凑格式，
+    # 若要求题号后必须有空白，整卷会切不开、退化成段落硬切。
+    r"(?:\d{1,3}[.、](?![0-9]))"
     r"|(?:[一二三四五六七八九十]{1,3}[、.])"      # 一、 二.
     r"|(?:\\item\b)"                            # \item（LaTeX enumerate）
     r"|(?:\\question\b)"                        # \question（exam 文档类）
