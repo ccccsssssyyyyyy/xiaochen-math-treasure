@@ -181,22 +181,38 @@ def build_paper_selection_prompts(
     return system_prompt, user_content
 
 
-def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False, formula_lock: bool = True) -> str:
-    curriculum_text = build_curriculum_text(curriculum)
-    
+def build_answer_rule(generate_answers_bool: bool) -> str:
+    """答案提取/生成规则（完整提示与多块解析的精简提示**必须共用同一份措辞**）。
+
+    早期实现里精简提示完全不带答案规则，导致第 2..N 块的模型按默认人设把解析
+    全部写出来，落库前又被「未勾选自动生成 → 清空无 [EXTRACTED_ORIGINAL] 标记的
+    解析」整段抹掉——既白烧输出 token，又抬高撞上 max_output_tokens 截断而漏题的概率。
+
+    generate_answers_bool=False 时额外明确「标记 → 答案 → 解析」的顺序，是为了消除
+    与第 6 条「客观题必须在 answer_markdown 第一行输出答案」的冲突：模型若只输出
+    答案字母而漏掉标记，原卷自带的客观题答案同样会被静默清空。
+    """
     if generate_answers_bool:
-        answer_rule = (
+        return (
             "【答案提取与生成规则】:\n"
             "- 若原试卷自带答案，请完整提取并在 `answer_markdown` 开头标明 `[EXTRACTED_ORIGINAL]`。\n"
             "- 若原试卷缺答案，请自动推导生成标准解答步骤填入 `answer_markdown`。"
         )
-    else:
-        answer_rule = (
-            "【答案提取规则（严禁主动生成）】:\n"
-            "- 仅提取原试卷中明确自带的原版参考答案与解析，并在 `answer_markdown` 开头标明 `[EXTRACTED_ORIGINAL]`。\n"
-            "- 若原试卷无答案，必须将 `answer_markdown` 设为空字符串 \"\"，绝对不要现场推导或编造答案！"
-        )
+    return (
+        "【答案提取规则（严禁主动生成，违反即整段作废）】:\n"
+        "- 仅提取原试卷中明确自带的原版参考答案与解析，并在 `answer_markdown` 开头标明 `[EXTRACTED_ORIGINAL]`。\n"
+        "- 若原试卷无答案，必须将 `answer_markdown` 设为空字符串 \"\"，绝对不要现场推导或编造答案！\n"
+        "- 自行推导的解析会在落库前被系统整段清空：写出来只会白白消耗输出长度，"
+        "还可能挤掉后面的题目，等于既浪费 token 又丢题。\n"
+        "- 顺序固定为「`[EXTRACTED_ORIGINAL]` 标记 → 答案（客观题写选项字母或数值）→ 解析」，"
+        "标记必须在最前面。原卷自带的客观题答案同样属于「原卷自带答案」，照常提取并加标记，不得丢弃。"
+    )
 
+
+def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False, formula_lock: bool = True) -> str:
+    curriculum_text = build_curriculum_text(curriculum)
+    answer_rule = build_answer_rule(generate_answers_bool)
+    
     # 公式协议分支：
     #  - DOCX / TeX 路径在调用 parse 前已用 lock_visible_math 将公式锁定为
     #    <mathbank-math id="M1"> 标记，模型须输出 [[M1]] 占位符，服务端再还原；
@@ -277,9 +293,22 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
     return system_instructions
 
 
-def build_import_parse_system_prompt(curriculum: dict) -> str:
-    """Prompt for pasted and uploaded single-file TeX paper parsing."""
-    return build_pdf_parse_system_prompt(curriculum, generate_answers_bool=False) + (
+def build_import_parse_system_prompt(
+    curriculum: dict,
+    generate_answers_bool: bool = False,
+    separated_mode: bool = False,
+) -> str:
+    """Prompt for pasted and uploaded single-file TeX paper parsing.
+
+    generate_answers_bool 必须由前端「自动生成 AI 解答」开关传入：此前这里硬编码
+    False，导致该路径下勾选开关也完全不生效（模型从没被要求生成解析）。
+    separated_mode 由后端 detect_separated_mode 自动判定（题目与解析分离结构）。
+    """
+    return build_pdf_parse_system_prompt(
+        curriculum,
+        generate_answers_bool=generate_answers_bool,
+        separated_mode=separated_mode,
+    ) + (
         "\n【单文件 TeX 源码专项规则】:\n"
         "1. 输入已由本地预处理器提取 document 正文并清除普通注释；不得把 documentclass、usepackage、页眉页脚或宏定义上下文当成题目。\n"
         "2. 识别 question/problem/exercise/enumerate/item、parts/subparts/part、choices/choice/CorrectChoice、tasks/task 等常见结构。每个顶层题目只输出一次，小问必须保留在所属大题内。\n"

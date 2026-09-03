@@ -18,7 +18,7 @@ from sqlalchemy.engine import Engine
 from mathbank.paths import SCHEMA_SNAPSHOT_DIR
 
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 REQUIRED_TABLES = {"questions", "question_curriculums", "papers", "paper_questions"}
 
 
@@ -100,6 +100,32 @@ def _rebuild_relationship_tables(engine: Engine) -> dict[str, int]:
         try:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             transaction_started = True
+
+            # v3: content_fingerprint 列 + 存量回填（查重性能优化 1+2）。
+            # 与关系表重建在同一事务内完成，原子提交或回滚。
+            _cols = [
+                r[1]
+                for r in connection.exec_driver_sql(
+                    "PRAGMA table_info(questions)"
+                ).fetchall()
+            ]
+            if "content_fingerprint" not in _cols:
+                connection.exec_driver_sql(
+                    "ALTER TABLE questions ADD COLUMN content_fingerprint VARCHAR"
+                )
+            _rows = connection.exec_driver_sql(
+                "SELECT id, content FROM questions "
+                "WHERE content_fingerprint IS NULL OR content_fingerprint = ''"
+            ).fetchall()
+            if _rows:
+                from mathbank.database import normalize_question_content
+                for _qid, _qcontent in _rows:
+                    _fp = normalize_question_content(_qcontent or "")
+                    connection.exec_driver_sql(
+                        "UPDATE questions SET content_fingerprint = ? WHERE id = ?",
+                        (_fp, _qid),
+                    )
+
             before_curriculums = int(
                 connection.exec_driver_sql("SELECT COUNT(*) FROM question_curriculums").scalar_one()
             )

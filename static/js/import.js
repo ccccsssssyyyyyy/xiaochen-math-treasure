@@ -2831,10 +2831,6 @@
                 docxFormData.append('file', window.currentDocxFile);
                 docxFormData.append('generate_answers', generateAnswers ? "true" : "false");
 
-                const separatedModeEl = document.getElementById('importSeparatedMode');
-                const separatedMode = separatedModeEl ? separatedModeEl.checked : false;
-                docxFormData.append('separated_mode', separatedMode ? "true" : "false");
-
                 fetch('/api/upload/docx-task', {
                     method: 'POST',
                     headers: {
@@ -2907,10 +2903,6 @@
                 const pdfFormData = new FormData();
                 pdfFormData.append('file', window.currentPdfFile);
                 pdfFormData.append('generate_answers', generateAnswers ? "true" : "false");
-
-                const separatedModeEl = document.getElementById('importSeparatedMode');
-                const separatedMode = separatedModeEl ? separatedModeEl.checked : false;
-                pdfFormData.append('separated_mode', separatedMode ? "true" : "false");
 
                 const pdfPageRangeInput = document.getElementById('pdfPageRange');
                 const pageRange = pdfPageRangeInput ? pdfPageRangeInput.value.trim() : '';
@@ -3360,6 +3352,24 @@
                 });
         };
 
+        function renderSeparatedDetectBadge(isSeparated, identity) {
+            const badge = document.getElementById('separatedDetectBadge');
+            const text = document.getElementById('separatedDetectText');
+            if (!badge || !text) return;
+            if (!identity._separatedLogged) {
+                identity._separatedLogged = true;
+                const label = isSeparated ? '题目与解析分离' : '常规结构（题解同处）';
+                appendImportLog(`AI 已自动识别：${label}`, 'current');
+            }
+            if (isSeparated) {
+                badge.className = 'flex items-center gap-1.5 text-[10px] font-bold text-amber-700';
+                text.textContent = 'AI 自动识别：题目与解析分离';
+            } else {
+                badge.className = 'flex items-center gap-1.5 text-[10px] font-bold text-slate-500';
+                text.textContent = 'AI 自动识别：常规结构';
+            }
+        }
+
         function pollPdfTaskStatus(taskId, generation) {
             if (!isCurrentDocumentImportTask(generation)) return;
             let lastLog = '';
@@ -3439,6 +3449,11 @@
 
                     if (task.steps) {
                         renderImportSteps(task.steps);
+                    }
+
+                    // AI 自动识别「题目与解析分离」标记渲染（替代原手动开关）
+                    if (task.detected_separated !== undefined && task.detected_separated !== null) {
+                        renderSeparatedDetectBadge(task.detected_separated, identity);
                     }
                     
                     if (task.log && task.log !== lastLog) {
@@ -5051,6 +5066,41 @@
             banner.classList.remove('flex');
         }
 
+        // 限并发执行任务数组（taskFns: () => Promise），结果按原顺序返回到 out[]
+        function runLimited(taskFns, limit) {
+            const out = new Array(taskFns.length);
+            let cursor = 0;
+            const workers = Array.from({ length: Math.min(limit, taskFns.length) }, () => {
+                const step = () => {
+                    if (cursor >= taskFns.length) return Promise.resolve();
+                    const myIndex = cursor++;
+                    return Promise.resolve()
+                        .then(() => taskFns[myIndex]())
+                        .then(r => { out[myIndex] = r; })
+                        .then(step);
+                };
+                return step();
+            });
+            return Promise.all(workers).then(() => out);
+        }
+
+        // 单题导入：对瞬时写库冲突（后端 400「保存题目失败」）自动重试；
+        // 前端校验类错误（题干空/卡片缺失）不重试。最多重试 maxRetries 次，指数退避。
+        function saveParsedQuestionWithRetry(index, maxRetries) {
+            const attempt = (n) => saveParsedQuestion(index).then(
+                res => res,
+                err => {
+                    if (err && (err.message === 'Content empty' || err.message === 'Card element not found')) {
+                        return Promise.reject(err);
+                    }
+                    if (n <= 1) return Promise.reject(err);
+                    const delay = 250 * (maxRetries - n + 1);
+                    return new Promise(r => setTimeout(r, delay)).then(() => attempt(n - 1));
+                }
+            );
+            return attempt(maxRetries);
+        }
+
         function saveAllParsedQuestions() {
             const selectedIndices = getCheckedUnsavedIndices();
             const batchGeneration = parsedQuestionsGeneration;
@@ -5111,8 +5161,13 @@
 
             showToast(`正在批量导入 ${selectedIndices.length} 道勾选题目，请稍候...`);
 
-            const promises = selectedIndices.map(idx =>
-                saveParsedQuestion(idx)
+            // 方案C：最多 3 路并发写入 + 单题失败自动重试，
+            // 配合后端 get_db 全局锁，从根上消除导入时偶发丢题的并发冲突。
+            const MAX_CONCURRENCY = 3;
+            const MAX_RETRIES = 3;
+
+            const tasks = selectedIndices.map(idx => () =>
+                saveParsedQuestionWithRetry(idx, MAX_RETRIES)
                     .then(
                         res => {
                             // 每完成一题（成功/重复/后端失败）都推进计数
@@ -5130,7 +5185,7 @@
                     )
             );
 
-            Promise.all(promises)
+            runLimited(tasks, MAX_CONCURRENCY)
                 .then(results => {
                     if (batchGeneration !== parsedQuestionsGeneration) {
                         return;

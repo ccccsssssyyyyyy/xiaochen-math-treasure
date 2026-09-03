@@ -1787,11 +1787,10 @@
                         </div>
                     </div>
 
-                    <div data-queue-collapse="1" class="flex items-start space-x-3 p-3 bg-amber-50/70 border border-amber-200/70 rounded-xl shrink-0">
-                        <input type="checkbox" id="importSeparatedMode" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500 cursor-pointer mt-0.5">
+                    <div data-queue-collapse="1" class="flex items-start space-x-3 p-3 bg-slate-50/70 border border-slate-200/60 rounded-xl shrink-0">
                         <div class="flex-1">
-                            <label for="importSeparatedMode" class="block text-xs font-bold text-amber-800 cursor-pointer">题目与解析分离（题在前、解析在后）</label>
-                            <span class="text-[10px] text-amber-700/80 block leading-normal mt-0.5">适用于前半部分是全部题干、后半部分按题号排列解析的文档。开启后 AI 会按题号锚点把每段解析精确配对到对应题目；缺失解析的题目会标记「[缺解析]」。</span>
+                            <span class="block text-xs font-bold text-slate-500 cursor-default">题目与解析分离</span>
+                            <span class="text-[10px] text-slate-400 block leading-normal mt-0.5">已改为 AI 自动识别：系统拆题前会判断文档是否为「题干在前、解析在后」结构，无需手动勾选。</span>
                         </div>
                     </div>
 
@@ -1874,6 +1873,11 @@
                             <p class="text-[10px] text-slate-500 hidden" id="importSubLoadingText">
                                 正在探测 PDF 试卷格式并准备提取...
                             </p>
+                            <!-- AI 自动识别「题目与解析分离」标记（替代原手动开关） -->
+                            <div id="separatedDetectBadge" class="hidden items-center gap-1.5 text-[10px] font-bold">
+                                <i class="fa-solid fa-magnifying-glass"></i>
+                                <span id="separatedDetectText"></span>
+                            </div>
                             <!-- 可折叠日志控制台 -->
                             <div class="hidden bg-white rounded-lg p-2 text-left font-mono text-[10px] text-slate-600 overflow-y-auto h-20 select-none shadow-inner border border-slate-200" id="importLogsConsole" role="log" aria-live="polite" aria-label="试卷拆解进度日志">
                                 <div>[SYSTEM] 准备就绪，等待上传图片...</div>

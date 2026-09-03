@@ -1,6 +1,7 @@
 import datetime
 import sqlite3
 import json
+import re
 from pathlib import Path
 from sqlalchemy import (
     CheckConstraint,
@@ -15,7 +16,7 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool
 from sqlalchemy.orm import declarative_base, sessionmaker
 from mathbank.paths import DATABASE_FILE, sqlite_url
 
@@ -25,11 +26,13 @@ SQLALCHEMY_DATABASE_URL = sqlite_url(DATABASE_FILE)
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    # 使用 StaticPool：SQLite 是文件数据库，不需要连接池。
-    # 默认 QueuePool (size=5 + overflow=10) 在批量入库+轮询并发时容易耗尽，
-    # 导致 "QueuePool limit reached" 超时错误。StaticPool 维持单一长连接，
-    # 由 SQLite 自身的文件锁保证并发安全，适合 FastAPI 多线程场景。
-    poolclass=StaticPool,
+    # 改用 QueuePool 多连接：每个线程/请求获取独立连接，彻底避免单连接被多线程
+    # 交替使用造成的 sqlite3 InterfaceError；SQLite 文件锁 + busy_timeout(5000)
+    # 自行串行化写操作。pool 容量放大以容纳批量导入与轮询并发，避免耗尽。
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -91,11 +94,34 @@ def _safe_json_list(value):
         return []
 
 
+def normalize_question_content(content: str) -> str:
+    """将题干归一化为查重指纹：去题号前缀、去所有空白、简化 LaTeX 等价差异。
+
+    这是查重指纹的唯一权威实现。入库前查重（create_question）与迁移回填
+    共用同一份逻辑，避免多处各写一份导致指纹不一致。
+    """
+    if not content or not isinstance(content, str):
+        return ""
+    text = content
+    # 去掉开头的题号（如 "1." "（1）" "一、" "1、" 等）
+    text = re.sub(r"^\s*[\d一二三四五六七八九十]+[\.、\)）\s]+", "", text)
+    text = re.sub(r"^\s*\([\d]+\)\s*", "", text)
+    # 去掉所有空白（含中文全角空格）
+    text = re.sub(r"\s+", "", text)
+    # 简化常见 LaTeX 等价写法差异
+    text = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
+    text = re.sub(r"\\times|\\cdot", "*", text)
+    text = text.replace("\\", "")
+    text = text.lower()
+    return text
+
+
 class Question(Base):
     __tablename__ = "questions"
 
     id = Column(Integer, primary_key=True, index=True)
     content = Column(Text, nullable=False)  # 题干 (LaTeX + markdown)
+    content_fingerprint = Column(String, nullable=True)  # 查重归一化指纹（normalize_question_content 结果）
     question_type = Column(String(50), default="single_choice", index=True)  # single_choice, multi_choice, fill_in_blank, detailed_answer
     category_compulsory = Column(String(100), default="", index=True)  # 必修/选修/选择性必修
     category_chapter = Column(String(100), default="", index=True)  # 章节

@@ -30,7 +30,19 @@ from sqlalchemy import or_, text
 from sqlalchemy import or_, text
 from dotenv import load_dotenv
 
-from mathbank.database import Question, QuestionCurriculum, Paper, PaperQuestion, engine, get_db, init_db
+from mathbank.database import (
+    Question,
+    QuestionCurriculum,
+    Paper,
+    PaperQuestion,
+    engine,
+    get_db,
+    init_db,
+    normalize_question_content,
+)
+
+# 查重指纹的唯一权威实现位于 mathbank.database，此处仅保留兼容性别名
+_normalize_question_content = normalize_question_content
 from mathbank.paper_helper import build_latex_document, build_answer_sheet_latex, compile_tex_to_pdf, create_tex_zip_package, create_full_bundle_zip_package, collect_referenced_images, build_restricted_tex_environment
 from mathbank.word_export_helper import build_word_document, create_word_bundle_zip
 from mathbank.sync_helper import export_database_to_files
@@ -90,6 +102,7 @@ from mathbank.prompts import (
     COMMON_OCR_PROMPT,
     ILLUSTRATION_BOX_PROMPT,
     build_ai_solve_prompts,
+    build_answer_rule,
     build_classification_system_prompt,
     build_import_parse_system_prompt,
     build_latex_error_explanation_prompts,
@@ -140,8 +153,11 @@ from mathbank.asset_security import (
 )
 
 # Load environment variables
-load_dotenv(ENV_FILE)
-harden_private_path(ENV_FILE)
+try:
+    load_dotenv(ENV_FILE)
+    harden_private_path(ENV_FILE)
+except Exception as e:
+    print(f"[WARN] 无法加载/加固 .env 文件（{e}）；将使用已存在的环境变量或默认值继续。")
 
 # Unique server instance ID generated per process launch/restart
 SERVER_INSTANCE_ID = str(uuid.uuid4())
@@ -2166,25 +2182,6 @@ def normalize_fillin_macro(text: str) -> str:
     return text
 
 
-def _normalize_question_content(content: str) -> str:
-    """将题干归一化为查重指纹：去题号前缀、去所有空白、简化 LaTeX 等价差异。"""
-    if not content or not isinstance(content, str):
-        return ""
-    import re as _re
-    text = content
-    # 去掉开头的题号（如 "1." "（1）" "一、" "1、" 等）
-    text = _re.sub(r"^\s*[\d一二三四五六七八九十]+[\.、\)）\s]+", "", text)
-    text = _re.sub(r"^\s*\([\d]+\)\s*", "", text)
-    # 去掉所有空白（含中文全角空格）
-    text = _re.sub(r"\s+", "", text)
-    # 简化常见 LaTeX 等价写法差异
-    text = _re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
-    text = _re.sub(r"\\times|\\cdot", "*", text)
-    text = text.replace("\\", "")
-    text = text.lower()
-    return text
-
-
 def _strip_leading_question_number(content: str) -> str:
     """剥离套卷导入时残留的原卷题号（仅去除题干最开头的顺序编号，避免组卷时与系统编号叠加）。
 
@@ -2378,6 +2375,7 @@ def create_question(
 
         db_question = Question(
             content=content,
+            content_fingerprint=_normalize_question_content(content),
             question_type=question_type,
             category_compulsory=category_compulsory,
             category_chapter=category_chapter,
@@ -2408,7 +2406,7 @@ def create_question(
                 else:
                     db_question.association_group_id = g2
 
-        # ---- 入库前查重：按 content 归一化指纹 + difflib 相似度 ----
+        # ---- 入库前查重：指纹预存 + 精确短路 + 轻量预筛（1+2 优化）----
         force_bool = force.lower() in ("true", "1", "yes")
         if not force_bool:
             norm_content = _normalize_question_content(content)
@@ -2416,23 +2414,31 @@ def create_question(
             dup_sim = 0.0
             if norm_content:
                 import difflib
-                # 仅与同题型题目比对，降低误报；库大时限制扫描窗口
-                cand_qs = db.query(Question).filter(
+                # 仅取 (id, 预存指纹)，不加载全文；扫描同题型全部候选，
+                # 不再 limit(4000)，彻底消除「超 4000 题漏查」隐患。
+                cands = db.query(Question.id, Question.content_fingerprint).filter(
                     Question.question_type == question_type
-                ).limit(4000).all()
+                ).all()
                 best_sim = 0.0
-                best_match = None
-                for cq in cand_qs:
-                    cnorm = _normalize_question_content(cq.content or "")
-                    if not cnorm:
+                best_match_id = None
+                for cid, cfp in cands:
+                    if not cfp:
                         continue
-                    sim = difflib.SequenceMatcher(None, norm_content, cnorm).ratio()
+                    # 精确相等短路：归一化指纹完全一致即判重，跳过 O(n²) 深比
+                    if cfp == norm_content:
+                        best_sim = 1.0
+                        best_match_id = cid
+                        break
+                    # 轻量预筛：长度差异超过 50% 不可能是 0.92 近似重复
+                    if abs(len(cfp) - len(norm_content)) * 2 > len(cfp) + len(norm_content):
+                        continue
+                    sim = difflib.SequenceMatcher(None, norm_content, cfp).ratio()
                     if sim > best_sim:
                         best_sim = sim
-                        best_match = cq
+                        best_match_id = cid
                 DUP_THRESHOLD = 0.92
-                if best_match and best_sim >= DUP_THRESHOLD:
-                    dup_hit = best_match
+                if best_match_id is not None and best_sim >= DUP_THRESHOLD:
+                    dup_hit = db.query(Question).filter(Question.id == best_match_id).first()
                     dup_sim = best_sim
             if dup_hit is not None:
                 return {
@@ -2536,6 +2542,7 @@ def update_question(
         norm_solve_method = normalize_tag_list(solve_method, field="solve_method")
 
         db_question.content = content
+        db_question.content_fingerprint = _normalize_question_content(content)
         db_question.question_type = question_type
         db_question.category_compulsory = category_compulsory
         db_question.category_chapter = category_chapter
@@ -3588,7 +3595,7 @@ def _parse_single_chunk(user_content, decision, system_instructions, max_output_
 CHUNK_CONTEXT_CHARS = 800
 
 
-def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lock: bool = True) -> str:
+def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lock: bool = True, generate_answers_bool: bool = False) -> str:
     """多块拆题时，除首块外后续块使用的精简系统提示（Plan C）。
 
     完整系统提示约 3.7K 字，多块文档每块重复发送浪费明显。后续块改用本精简版，
@@ -3596,6 +3603,9 @@ def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lo
     整体下降约 75% 系统提示 token，同时不影响首块质量。
     formula_lock 必须与首块一致：DOCX/TeX 锁定路径用 True（保留 [[Mn]] 协议），
     PDF 未锁定路径用 False（要求用 $...$ 主动包裹，禁止 [[Mn]]）。
+    generate_answers_bool 必须与首块一致：精简提示若不带答案规则，后续块的模型会
+    按默认教研专家人设把解析全部写出来，落库前又被「未勾选生成 → 清空无
+    [EXTRACTED_ORIGINAL] 标记的解析」整段抹掉，白烧输出 token 且易撞截断漏题。
     """
     base = (
         "你是资深高中数学教研专家。正在解析一份多段试卷的其中一段（首段已给出完整规则，"
@@ -3630,6 +3640,8 @@ def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lo
         "是否是上一道题的延续（例如上一段末尾停在「（1）」、本段开头是「（2）」，说明它们同属一道大题）。"
         "严禁把上文片段中的任何内容输出成题目，也严禁据此凭空补全；只有 `<本段正文>` 内的内容才是你要解析的题目。\n"
     )
+    # 答案规则必须与首块（完整提示）共用同一措辞，否则后续块会「生成了又被清空」。
+    base = base + build_answer_rule(generate_answers_bool) + "\n"
     if extra_system_note:
         base = base + extra_system_note
     return base
@@ -3739,7 +3751,9 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
 
     print(f"[Parse Chunking] 文档较长，已切分为 {total} 段逐段解析。")
     # Plan C：首块用完整系统提示；后续块改用精简提示，避免每块重复 ~3.7K 字系统提示。
-    condensed_system = _build_condensed_parse_system_prompt(extra_system_note, formula_lock)
+    condensed_system = _build_condensed_parse_system_prompt(
+        extra_system_note, formula_lock, generate_answers_bool
+    )
     all_questions = []
     for idx, chunk in enumerate(chunks):
         # 跨页/跨块兜底：把上一段末尾作为「上文片段」附上，让模型能判断本段开头
@@ -3778,6 +3792,42 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
     if not all_questions:
         raise Exception("所有分块均解析失败，无法拆解试卷。")
     return dedupe_questions(all_questions)
+
+
+# ---------------------------------------------------------------------------
+# 分离式文档自动识别（零 token 成本）
+# 旧版靠前端「题目与解析分离」开关手动指定；现改为后端在拆题前对提取文本跑一次
+# 本地启发式，自动判断是否「题干区在前、解析区在后」结构，从而去掉该按钮。
+# ---------------------------------------------------------------------------
+_ANSWER_ZONE_ANCHORS = re.compile(
+    r"(参考答案|答案与解析|答案解析|答案与评分标准|参考答案与评分细则|"
+    r"试题解析|详解与答案|参考答案及解析|答案部分|解答部分|"
+    r"【答案】|【解析】|参\s*考\s*答\s*案|解\s*析)",
+    re.MULTILINE,
+)
+_INLINE_ANSWER = re.compile(r"(【答案】|【解析】|解\s*[：:]|答案\s*[：:]|证明\s*[：:])")
+
+
+def detect_separated_mode(text: str) -> bool:
+    """本地启发式判断文档是否为「题干在前、解析在后」的分离结构。
+
+    零 token 成本：仅在拆题前对后端已提取出的文本跑一次正则。
+    命中条件：答案区锚点明显靠后（>=60% 位置）、前半段几乎无锚点、
+    且每题内联答案占比低（避免把「边讲边练」误判为分离）。
+    """
+    t = text or ""
+    n = max(1, len(t))
+    hits = [(m.start() / n, m.group(0)) for m in _ANSWER_ZONE_ANCHORS.finditer(t)]
+    if not hits:
+        return False
+    last_pos = max(p for p, _ in hits)
+    head_hits = sum(1 for p, _ in hits if p < 0.55)
+    inline = len(_INLINE_ANSWER.findall(t))
+    q_count = len(
+        re.findall(r"(?m)^\s*(?:\\item\s+)?(?:\d{1,3}|[一二三四五六七八九十]+)[．.、]", t)
+    )
+    inline_ratio = (inline / q_count) if q_count else 0.0
+    return last_pos >= 0.6 and head_hits <= 2 and inline_ratio < 1.2
 
 
 def parse_paper_text_internal(
@@ -3890,10 +3940,14 @@ def ai_parse_paper(
         if not paper_title.strip() and tex_result["title"]:
             paper_title = tex_result["title"]
 
-        system_instructions = build_import_parse_system_prompt(get_current_curriculum())
+        # 自动识别「题目与解析分离」结构（零 token），与 PDF/DOCX 路径保持一致。
+        detected_separated = detect_separated_mode(model_source)
+        system_instructions = build_import_parse_system_prompt(
+            get_current_curriculum(), generate_answers_bool, separated_mode=detected_separated
+        )
 
         parsed_questions = _parse_chunks_to_questions(
-            model_source, decision, system_instructions, generate_answers_bool, False,
+            model_source, decision, system_instructions, generate_answers_bool, detected_separated,
             formula_lock=True,
         )
         # 回退后更新实际使用的模型名（供 eval_decision 准确上报）
@@ -5033,7 +5087,6 @@ def run_pdf_parsing_task(
     generate_answers: bool = False,
     page_range: str = None,
     pdf_strategy: str = "native_preferred",
-    separated_mode: bool = False,
 ):
     """PDF parsing with bounded OCR concurrency and cooperative cancellation."""
 
@@ -5264,10 +5317,14 @@ def run_pdf_parsing_task(
                 log=f"正在调用大模型拆解题目（第 {done}/{total} 段）...",
             )
 
+        # 自动识别「题目与解析分离」结构（零 token），替代原手动开关。
+        detected_separated = detect_separated_mode(full_latex_content)
+        DOCUMENT_TASKS.update(task_id, detected_separated=detected_separated)
+
         parsed_questions = parse_paper_text_internal(
             full_latex_content,
             generate_answers,
-            separated_mode=separated_mode,
+            separated_mode=detected_separated,
             progress_callback=_report_pdf_split_progress,
             formula_lock=False,
         )
@@ -5379,11 +5436,9 @@ def upload_pdf_task(
     generate_answers: str = Form("false"),
     page_range: Optional[str] = Form(None),
     pdf_strategy: str = Form("native_preferred"),
-    separated_mode: str = Form("false")
 ):
     try:
         generate_answers_bool = generate_answers.lower() in ("true", "1", "yes")
-        separated_mode_bool = separated_mode.lower() in ("true", "1", "yes")
         
         # 验证文件扩展名
         filename = file.filename or ""
@@ -5427,7 +5482,6 @@ def upload_pdf_task(
                 generate_answers_bool,
                 page_range,
                 pdf_strategy,
-                separated_mode_bool,
             )
         except TaskQueueFull as exc:
             DOCUMENT_TASKS.remove(task_id)
@@ -5526,7 +5580,6 @@ def run_docx_parsing_task(
     file_bytes: bytes,
     filename: str,
     generate_answers: bool = False,
-    separated_mode: bool = False
 ):
     temp_assets = []
     current_step = "extract_docx"
@@ -5620,10 +5673,14 @@ def run_docx_parsing_task(
                 document_type="docx",
             )
 
+        # 自动识别「题目与解析分离」结构（零 token），替代原手动开关。
+        detected_separated = detect_separated_mode(locked_markdown_content)
+        DOCUMENT_TASKS.update(task_id, detected_separated=detected_separated)
+
         parsed_questions = parse_paper_text_internal(
             locked_markdown_content,
             generate_answers,
-            separated_mode=separated_mode,
+            separated_mode=detected_separated,
             progress_callback=_report_docx_split_progress,
             extra_system_note=docx_image_note,
             formula_lock=True,
@@ -5737,11 +5794,9 @@ def run_docx_parsing_task(
 def upload_docx_task(
     file: UploadFile = File(...),
     generate_answers: str = Form("false"),
-    separated_mode: str = Form("false")
 ):
     try:
         generate_answers_bool = generate_answers.lower() in ("true", "1", "yes")
-        separated_mode_bool = separated_mode.lower() in ("true", "1", "yes")
         
         # 验证文件扩展名
         filename = file.filename or ""
@@ -5782,7 +5837,6 @@ def upload_docx_task(
                 content,
                 filename,
                 generate_answers_bool,
-                separated_mode_bool,
             )
         except TaskQueueFull as exc:
             DOCUMENT_TASKS.remove(task_id)
