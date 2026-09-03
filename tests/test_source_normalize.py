@@ -37,6 +37,28 @@ def test_normalize_source_known_and_new(raw, expected):
     assert normalize_source(raw) == expected
 
 
+def test_latex_source_with_fallback_normalizes_paper_title():
+    """来源是 LaTeX 幻觉时，回退到试卷标题，且回退值仍走完整归一流程。"""
+    out = normalize_source(
+        r"\begin{tikzpicture}[scale=0.8]",
+        fallback_title="树德中学2025-2026学年高一上学期1月期末测试数学试题(1)",
+    )
+    assert out == "高一上 · 1月期末 · 树德中学 · 2025-2026学年"
+
+
+def test_latex_source_without_fallback_returns_unknown():
+    """来源是 LaTeX 且未提供回退标题时，落到『未知』而非存储垃圾。"""
+    assert normalize_source(r"\begin{tikzpicture}[scale=0.8]") == UNKNOWN
+    assert normalize_source(r"\frac{x}{y}") == UNKNOWN
+    assert normalize_source(r"\sqrt[3]{x} + \text{解}") == UNKNOWN
+
+
+def test_legitimate_source_unaffected_by_latex_guard():
+    """真实来源（无 LaTeX 特征）行为不变。"""
+    assert normalize_source("2023·全国甲卷·高考真题") == "2023·全国甲卷·高考真题"
+    assert normalize_source("树德中学高2025届高一上周练") == "高一上 · 周练 · 树德中学 · 2025-2026学年"
+
+
 def test_canonical_map_is_closed_and_idempotent():
     """每个规约终态自身也是键，且归一后不变（脚本重跑与钩子幂等的保证）。"""
     for value in list(CANONICAL_MAP.values()):

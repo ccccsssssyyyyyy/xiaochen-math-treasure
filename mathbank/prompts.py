@@ -237,7 +237,7 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         f"{curriculum_text}\n"
         f"【学段 compulsory 受控取值 — 严格从此列表中选取，不得自创、改写或填章节/小节名】: {'、'.join(list(curriculum.keys())) if isinstance(curriculum, dict) else '（见上方教材范围顶层书名）'}\n"
         "【核心拆题与分类规范】:\n"
-        "1. 字段分类：`compulsory` 必须是上方「学段受控取值」中的某一个**完整书名**（例如「必修一」），绝不可填章节名、小节名或自造词；`chapter` 必须是该学段下**精确的章节名**（须与上方教材范围完全一致，不得增删序号与字词）；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`。\n"
+        "1. 字段分类：`compulsory` 必须是上方「学段受控取值」中的某一个**完整书名**（例如「必修一」），绝不可填章节名、小节名或自造词；`chapter` 必须是该学段下**精确的章节名**（须与上方教材范围完全一致，不得增删序号与字词）；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`；`source` 必须是「年份·卷期·学校」等可读出处字符串，**严禁是 LaTeX/TikZ 代码或伪代码**（如 `\\begin{tikzpicture}`），无法确定真实出处时返回空字符串 `\"\"`，不得用任何 LaTeX 片段填充。\n"
         "1.0 题干纯净：`content` 是去掉原卷大题号后的纯净题干（系统会在组卷时统一编号）。\n"
         "1.0.1 选项豁免（极重要，违反即判本次输出错误）：上面这条**只针对题干开头的大题号**，"
         "**绝不适用于选择题的 A./B./C./D. 选项**。选择题的四个选项必须**全部、原样**保留在 `content` 中，"
@@ -279,7 +279,7 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         '      "compulsory": "学段名称",\n'
         '      "chapter": "章节名称",\n'
         '      "difficulty": "easy_error / normal / challenge / qiangji",\n'
-        '      "source": "出处信息或 null",\n'
+        '      "source": "出处信息或空字符串（严禁 LaTeX/TikZ 片段，拿不准就填空字符串）",\n'
         '      "knowledge_list": ["细粒度知识点1", "细粒度知识点2"],\n'
         '      "solve_method": "核心解题方法 (如: 数形结合)",\n'
         '      "related_chapters": ["关联章节 (如: 必修一 / 集合与函数概念 / 函数的基本性质)", "..."],\n'

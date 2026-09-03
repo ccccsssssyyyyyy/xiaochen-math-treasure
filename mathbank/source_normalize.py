@@ -27,6 +27,24 @@ import re
 # 空值兜底
 UNKNOWN = "未知"
 
+# LaTeX / TikZ 片段判定：真实来源是「中文 + 分隔符」的可读字符串，绝不含反斜杠命令。
+# 模型在拿不准 source 时，可能退化输出一段图骨架（如 `\begin{tikzpicture}[scale=0.8]`）
+# 或数学命令塞进 source 字段；命中以下任一特征即视为无效来源（幻觉）。
+_LATEX_HINT_RE = re.compile(
+    r"\\(begin|end)\s*\{"                                  # \begin{ / \end{
+    r"|\\(frac|sqrt|text|mathrm|mathbb|mathbf|includegraphics|tikzpicture"
+    r"|overline|overrightarrow|operatorname|left|right|cdot|times|pi|alpha"
+    r"|beta|theta|sum|int|lim|vec|hat|tilde|angle)\b"
+    r"|\\\w+\s*[\{\[]"                                    # 任意 \command{ 或 \command[
+)
+
+
+def _looks_like_latex(s: str) -> bool:
+    """判断字符串是否像 LaTeX/TikZ 片段（而非正常来源文本）。"""
+    if not s:
+        return False
+    return bool(_LATEX_HINT_RE.search(s))
+
 # 文件名噪声尾缀（Tier 2 剥离；Tier 1 已含带噪声的原始文件名精确映射）
 # ⚠️ 只保留「具体、几乎不会出现在真实标题中」的尾缀；泛化的「试卷」「试题」已移除，
 # 否则会误伤真实标题（如「公式保真测试卷」末二字「试卷」被整段截掉）。
@@ -55,6 +73,8 @@ CANONICAL_MAP = {
     '高一下 · 5月段考 · 树德中学 · 2024-2025学年': '高一下 · 5月段考 · 树德中学 · 2024-2025学年',
     '高一下 · 4月段考 · 树德中学 · 2025-2026学年': '高一下 · 4月段考 · 树德中学 · 2025-2026学年',
     '高一上 · 10月段考 · 树德中学 · 2025-2026学年': '高一上 · 10月段考 · 树德中学 · 2025-2026学年',
+    # ---- 校内：原始裸写式 -> 结构化（周练）----
+    '树德中学高2025届高一上周练': '高一上 · 周练 · 树德中学 · 2025-2026学年',
     '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年': '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年',
     # ---- 校内：原始文件名 -> 结构化 ----
     '2022-2023学年四川省成都市树德中学高一（下）段考试卷（5月份）': '高一下 · 5月段考 · 树德中学 · 2022-2023学年',
@@ -155,16 +175,26 @@ def _normalize_separators(s: str) -> str:
     return s
 
 
-def normalize_source(raw):
+def normalize_source(raw, fallback_title=None):
     """把任意来源写法归一为规约写法。
 
-    返回 ``UNKNOWN`` 当输入为 None / 空 / 仅空白；否则 Tier1 精确映射优先，
-    Tier2 结构兜底，兜底后仍可能匹配精确表则二次命中。
+    返回 ``UNKNOWN`` 当输入为 None / 空 / 仅空白 / 形如 LaTeX 片段（模型幻觉，
+    如把图骨架 ``\\begin{tikzpicture}`` 塞进 source）；若提供 ``fallback_title``
+    且其非 LaTeX / 非空，则对 fallback **递归**归一（仍走完整 Tier1/Tier2 流程），
+    确保回退值也符合命名规约，而非裸文件名。
+
+    注：``fallback_title`` 仅用于「来源无效时回退到试卷标题」，不会绕过归一。
     """
     if raw is None:
         return UNKNOWN
     s = str(raw).strip()
     if not s:
+        return UNKNOWN
+
+    # 拦截模型幻觉：来源绝不可能是 LaTeX/TikZ 片段，回退到试卷标题（再走归一）
+    if _looks_like_latex(s):
+        if fallback_title:
+            return normalize_source(fallback_title)
         return UNKNOWN
 
     # Tier 1: 精确别名表

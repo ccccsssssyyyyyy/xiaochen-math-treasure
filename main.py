@@ -4033,7 +4033,7 @@ def ai_parse_paper(
                 content_str = re.sub(r'^[\s、\.．]+', '', content_str)
                 q["content"] = content_str
                 
-            q["source"] = normalize_source(extracted_source or paper_title)
+            q["source"] = normalize_source(extracted_source or paper_title, fallback_title=paper_title)
             
             # Clean up double-escaped literal \n in fields
             for field in ["content", "answer_markdown"]:
@@ -5007,7 +5007,7 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
 
     # 4. 对每个题目卡片进行字段修补、占位符替换与资源晋升准备
     for q in parsed_questions:
-        q["source"] = normalize_source(q.get("source") or paper_title)
+        q["source"] = normalize_source(q.get("source") or paper_title, fallback_title=paper_title)
 
         # 规范化 AI 自动打标的知识点 / 解题方法多标签（受控词表映射 + 去重）
         q["knowledge_list"] = normalize_tag_list(q.get("knowledge_list"), field="knowledge_list")
