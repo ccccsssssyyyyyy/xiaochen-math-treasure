@@ -59,6 +59,12 @@ def test_legitimate_source_unaffected_by_latex_guard():
     assert normalize_source("树德中学高2025届高一上周练") == "高一上 · 周练 · 树德中学 · 2025-2026学年"
 
 
+def test_zhou_lian_zhongduan_alias_canonicalized():
+    # 上期期末 + 下期阶段性 两个长期遗留的原始串 → 标准模板
+    assert normalize_source('树德中学高2025级高一上期期末测试') == '高一上 · 1月期末 · 树德中学 · 2025-2026学年'
+    assert normalize_source('树德中学高2025级高一下期阶段性测试') == '高一下 · 阶段性测试 · 树德中学 · 2025-2026学年'
+
+
 def test_canonical_map_is_closed_and_idempotent():
     """每个规约终态自身也是键，且归一后不变（脚本重跑与钩子幂等的保证）。"""
     for value in list(CANONICAL_MAP.values()):
