@@ -11,6 +11,7 @@ from main import (
     ocr_via_provider,
 )
 from mathbank.ai_providers import resolve_ocr_provider
+from mathbank.prompts import COMMON_OCR_PROMPT, ILLUSTRATION_BOX_PROMPT
 
 
 def test_ocr_request_uses_resolved_multimodal_provider(tmp_path):
@@ -189,6 +190,62 @@ def test_pdf_ocr_uses_claude_provider_when_selected():
     resolved_provider = mock_ocr.call_args.args[1]
     assert resolved_provider.provider_code == "zhongzhan_claude"
     assert resolved_provider.model_name == "claude-vision"
+
+
+def test_ocr_prompt_keeps_illustration_placeholders_and_narrows_autodraw():
+    """识图提示词：多图保留占位、自动绘图触发条件收窄。
+
+    旧规则是「只要包含几何/函数插图就追加 ILLUSTRATION_BOX」，模型在多图或
+    表格内插图时也会整页自动重绘 TikZ（含把 TikZ 片段误当来源输出的幻觉）。
+    新规则要求多图/表内图在原位留下 `[插图待补: 图N]`，且只有在「全图恰一幅、
+    位于表格外、独立几何/函数图」三个条件同时满足时才输出 ILLUSTRATION_BOX。
+    """
+    # 主 OCR 规则：表格结构保留 + 多图占位，且明确禁止模型描述/重绘
+    assert "[插图待补: 图1]" in COMMON_OCR_PROMPT
+    assert "tabular" in COMMON_OCR_PROMPT
+    assert "multicolumn" in COMMON_OCR_PROMPT and "multirow" in COMMON_OCR_PROMPT
+    assert "勿描述、猜测或重绘" in COMMON_OCR_PROMPT
+
+    # 自动绘图触发条件收窄
+    assert "仅当全图恰有一幅" in ILLUSTRATION_BOX_PROMPT
+    assert "位于表格外" in ILLUSTRATION_BOX_PROMPT
+    assert "多图或无图时绝不输出" in ILLUSTRATION_BOX_PROMPT
+    # 旧措辞「务必在文末追加」会诱导模型无条件输出，必须已移除
+    assert "务必在文末追加" not in ILLUSTRATION_BOX_PROMPT
+
+    # 拼接后编号连续（主规则 1-7，自动绘图为 8）
+    assert "7. 纯净符号" in COMMON_OCR_PROMPT
+    assert ILLUSTRATION_BOX_PROMPT.startswith("\n8. 自动绘图")
+
+
+def test_ocr_request_injects_new_rules_into_prompt(tmp_path):
+    """include_illustration_box=True 时，新规则确实进入实际请求 payload。"""
+    image_path = tmp_path / "question.png"
+    image_path.write_bytes(b"fake-image-bytes")
+    provider = resolve_ocr_provider(
+        "zhongzhan_gpt",
+        {
+            "ZHONGZHAN_GPT_API_KEY": "ocr-key",
+            "ZHONGZHAN_GPT_BASE_URL": "https://vision.example/v1",
+            "ZHONGZHAN_GPT_OCR_MODEL": "gpt-5.6-luna",
+        },
+    )
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+
+    with patch("mathbank.ai_http.robust_request_post", return_value=response) as mock_post:
+        ocr_via_provider(str(image_path), provider, include_illustration_box=True)
+
+    prompt = mock_post.call_args.kwargs["json"]["messages"][0]["content"][0]["text"]
+    assert "插图待补" in prompt
+    assert "仅当全图恰有一幅" in prompt
+
+    # 未开启自动绘图时，不应携带 ILLUSTRATION_BOX 规则
+    with patch("mathbank.ai_http.robust_request_post", return_value=response) as mock_post2:
+        ocr_via_provider(str(image_path), provider, include_illustration_box=False)
+
+    prompt2 = mock_post2.call_args.kwargs["json"]["messages"][0]["content"][0]["text"]
+    assert "ILLUSTRATION_BOX" not in prompt2
 
 
 def test_tikz_correction_uses_resolved_bailian_provider(tmp_path):
