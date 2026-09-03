@@ -1,3 +1,13 @@
+import os
+
+# 让 source_normalize 在测试中加载仓库根的 example 占位映射，而非个人化的
+# data/source_canonical_map.json（后者被 .gitignore 忽略，干净 clone 下不存在，
+# 会导致来源归一测试失败）。必须在任何 mathbank.source_normalize 导入之前设置。
+os.environ["MATHBANK_SOURCE_MAP"] = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "source_canonical_map.example.json",
+)
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool

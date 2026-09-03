@@ -1,9 +1,13 @@
 """前端来源归一（editor.js normalizeSource）vm 回归 + 前后端 parity 测试。
 
-normalizeSource 在 vm 中注入后端同款 CANONICAL_MAP（模拟初始化 fetch 的结果），
+normalizeSource 在 vm 中注入后端同款 CANONICAL_MAP 与 SCHOOL_ALIASES
+（模拟初始化 fetch /api/source-canonical-map 返回的 {entries, aliases}），
 对一批输入分别用 JS 与 Python 计算，断言两者完全一致 —— 验证「前端预览 == 后端落库」。
 
 纯函数（仅 String/regex/split/replace，不依赖 DOM），可直接在 vm 注入运行。
+
+注：个人化映射与别名由 tests/conftest.py 通过 MATHBANK_SOURCE_MAP 指向
+仓库根的 source_canonical_map.example.json（占位「第一中学」）。
 """
 import json
 import os
@@ -35,7 +39,7 @@ def _resolve_node():
 
 NODE = _resolve_node()
 
-from mathbank.source_normalize import normalize_source, CANONICAL_MAP
+from mathbank.source_normalize import normalize_source, CANONICAL_MAP, SCHOOL_ALIASES
 
 
 def _extract_function(source, name):
@@ -56,9 +60,10 @@ def _extract_function(source, name):
     raise ValueError("未找到函数 %s 的匹配右括号" % name)
 
 
-def _run_js(func_src, map_obj, inputs):
+def _run_js(func_src, map_obj, aliases_obj, inputs):
     script = (
         "var SOURCE_CANONICAL_MAP = " + json.dumps(map_obj, ensure_ascii=False) + ";\n"
+        "var SOURCE_ALIASES = " + json.dumps(aliases_obj, ensure_ascii=False) + ";\n"
         + func_src + "\n"
         "const inputs = " + json.dumps(inputs, ensure_ascii=False) + ";\n"
         "console.log(JSON.stringify(inputs.map(x => normalizeSource(x))));\n"
@@ -82,22 +87,22 @@ def test_js_backend_parity(func_src):
     # 周练裸写式（Tier 1.5 / 2.5 通用规则）：映射表内 + 仅靠通用规则覆盖的，
     # 均须前后端一致，否则会出现「前端预览显示原始串、落库却已归一」的错位。
     zhoulian = [
-        "石室中学高2028届高一上第三周练",   # 映射表内有精确条目
-        "石室中学高2028届高一上周练",       # 无周次，仅通用规则覆盖
-        "石室中学高2028届高一上第四周练",
-        "树德中学高2025级高一上周练",       # 级 vs 届 学年推导不同
-        "成外高2029届高二下第3周练",        # 学校别名 + 非高一学段
-        "石室中学高2028届高一上第三周练数学试题",  # 尾缀噪声（Tier 2.5）
-        "石室中学 高2028届 高一上 第三周练",        # 多余空格
-        "石室中学高2028届高一上10月月考",   # 非周练，不得被误伤
+        "第一中学高2028届高一上第三周练",   # 映射表内有精确条目
+        "第一中学高2028届高一上周练",       # 无周次，仅通用规则覆盖
+        "第一中学高2028届高一上第四周练",
+        "第一中学高2025级高一上周练",       # 级 vs 届 学年推导不同
+        "一中高2029届高二下第3周练",        # 学校别名 + 非高一学段
+        "第一中学高2028届高一上第三周练数学试题",  # 尾缀噪声（Tier 2.5）
+        "第一中学 高2028届 高一上 第三周练",        # 多余空格
+        "第一中学高2028届高一上10月月考",   # 非周练，不得被误伤
     ]
     extras = [
         "", None, "   ",
-        "2026-2027学年四川省成都市七中万达高一（上）期末数学试题(1)",
+        "2026-2027学年第一中学高一（上）期末数学试题(1)",
     ] + zhoulian
     inputs = raw_forms + canonical_finals + extras
 
-    js_out = _run_js(func_src, CANONICAL_MAP, inputs)
+    js_out = _run_js(func_src, CANONICAL_MAP, SCHOOL_ALIASES, inputs)
     py_out = [normalize_source(x) for x in inputs]
 
     mismatches = [(i, a, b) for i, a, b in zip(inputs, js_out, py_out) if a != b]
@@ -106,8 +111,8 @@ def test_js_backend_parity(func_src):
 
 def test_js_tier2_fallback_when_map_absent(func_src):
     """映射表未加载（null）时退化为 Tier2 结构兜底，且不再抛错。"""
-    inputs = ["树德中学2025-2026学年高一上学期1月期末测试数学试题(1)", "高一上成外10月月考2025-2026学年"]
-    js_out = _run_js(func_src, None, inputs)
-    # Tier2 仅去噪声 / 别名，不补全结构（与后端 Tier1 结果不同，但必须是合法非空字符串）
-    assert js_out[0] == "树德中学2025-2026学年高一上学期1月期末测试"
-    assert js_out[1] == "高一上成都外国语学校10月月考2025-2026学年"
+    inputs = ["第一中学2025-2026学年高一上学期1月期末测试数学试题(1)", "高一上一中10月月考2025-2026学年"]
+    js_out = _run_js(func_src, None, None, inputs)
+    # Tier2 仅去噪声；别名表未加载故也不展开（与后端 Tier1 结果不同，但必须是合法非空字符串）
+    assert js_out[0] == "第一中学2025-2026学年高一上学期1月期末测试"
+    assert js_out[1] == "高一上一中10月月考2025-2026学年"

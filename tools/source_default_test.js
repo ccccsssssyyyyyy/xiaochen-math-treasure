@@ -56,15 +56,15 @@ function check(label, cond) {
 }
 
 // ---- detectSourceCandidate 用例 ----
-const headerText = '成都七中2025届高三入学考试（数学）\n1. 已知函数 f(x)=x^2，求 f(1)。';
-check('卷头行识别', detect(headerText, '') === '成都七中2025届高三入学考试（数学）');
+const headerText = '第一中学2025届高三入学考试（数学）\n1. 已知函数 f(x)=x^2，求 f(1)。';
+check('卷头行识别', detect(headerText, '') === '第一中学2025届高三入学考试（数学）');
 
 const bracketText = '（2019·全国·高考真题）已知 f(x)=x，求 f(1)。';
 check('括号出处识别', detect(bracketText, '') === '2019·全国·高考真题');
 
 check('纯题干不误判', detect('已知 f(x)=x^2，求 f(1)。', '') === '');
 
-check('文件名识别', detect('', '成都七中第三次月考.png') === '成都七中第三次月考');
+check('文件名识别', detect('', '第一中学第三次月考.png') === '第一中学第三次月考');
 
 check('带噪声文件名不误判',
   detect('', '微信图片_20250830_123456.png') === '');
