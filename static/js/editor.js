@@ -2002,12 +2002,23 @@ let bankQuestionsRetryTimer = null;
             });
             if (editTags) editTags.addEventListener('input', renderEditorPaperMeta);
 
-            // 拉取来源归一映射表（单一事实源，后端 mathbank.source_normalize.CANONICAL_MAP），
-            // 供 normalizeSource 做 Tier1 精确查表，使前端预览与后端落库完全一致。
+            // 拉取来源归一映射表（单一事实源，后端 /api/source-canonical-map 返回
+            // { entries, aliases }），供 normalizeSource 做 Tier1 精确查表与别名展开，
+            // 使前端预览与后端落库完全一致。
             fetch('/api/source-canonical-map')
                 .then(function (r) { return r.json(); })
-                .then(function (data) { SOURCE_CANONICAL_MAP = data; })
-                .catch(function () { SOURCE_CANONICAL_MAP = null; });
+                .then(function (data) {
+                    if (data && typeof data === 'object' && !Array.isArray(data) &&
+                        ('entries' in data || 'aliases' in data)) {
+                        SOURCE_CANONICAL_MAP = data.entries || null;
+                        SOURCE_ALIASES = data.aliases || null;
+                    } else {
+                        // 兼容旧接口（仅返回映射对象）的降级路径
+                        SOURCE_CANONICAL_MAP = data || null;
+                        SOURCE_ALIASES = null;
+                    }
+                })
+                .catch(function () { SOURCE_CANONICAL_MAP = null; SOURCE_ALIASES = null; });
 
             // Initial render of meta badges
             renderEditorPaperMeta();
@@ -2495,9 +2506,11 @@ let bankQuestionsRetryTimer = null;
             return found;
         }
 
-        // 来源归一映射表（Tier1 精确查表），单一事实源来自后端 /api/source-canonical-map，
-        // 初始化时拉取一次。未加载前 normalizeSource 退化为 Tier2 结构兜底，不影响落库正确性。
+        // 来源归一映射表（Tier1 精确查表）与学校别名表，单一事实源来自后端
+        // /api/source-canonical-map，初始化时拉取一次。未加载前 normalizeSource
+        // 退化为 Tier2 结构兜底（别名也不展开），不影响落库正确性。
         var SOURCE_CANONICAL_MAP = null;
+        var SOURCE_ALIASES = null;
 
         // 来源自动归一（前端预览；后端落库时仍会再次归一，两者共用同一映射表，预览与存储一致）。
         // Tier1 精确别名表（来自后端） -> Tier2 结构兜底（去噪声/分隔符/罗马数字/别名）。
@@ -2517,12 +2530,43 @@ let bankQuestionsRetryTimer = null;
             // 否则规则只匹配带「第N」的写法。
             var ZHOULIAN_RE = /^(.+?)高(\d{4})(级|届)高([一二三])([上下])(?:第([一二三四五六七八九十百\d]+)周|周)练(?:习)?$/;
             var LEVEL_NUM = { '一': 1, '二': 2, '三': 3 };
+            // 学校别名展开：别名表来自后端注入（SOURCE_ALIASES），未加载则原样返回，
+            // 与后端 mathbank.source_normalize.SCHOOL_ALIASES 同源，杜绝前后端别名不一致。
+            // 先保护已存在的规范名，再展开别名，最后还原 —— 避免「一中 → 第一中学」
+            // 这类子串别名把「第一中学」二次替换成「第第一中学学」。
+            function applyAliases(str) {
+                if (!SOURCE_ALIASES) return str;
+                var out = str;
+                var canonicals = {};
+                for (var k in SOURCE_ALIASES) {
+                    if (Object.prototype.hasOwnProperty.call(SOURCE_ALIASES, k)) {
+                        canonicals[SOURCE_ALIASES[k]] = true;
+                    }
+                }
+                var ph = [];
+                var idx = 0;
+                for (var c in canonicals) {
+                    var tok = '\u0000' + idx + '\u0000';
+                    ph.push([tok, c]);
+                    out = out.split(c).join(tok);
+                    idx++;
+                }
+                for (var alias in SOURCE_ALIASES) {
+                    if (Object.prototype.hasOwnProperty.call(SOURCE_ALIASES, alias)) {
+                        out = out.split(alias).join(SOURCE_ALIASES[alias]);
+                    }
+                }
+                for (var i = 0; i < ph.length; i++) {
+                    out = out.split(ph[i][0]).join(ph[i][1]);
+                }
+                return out;
+            }
             function matchZhouLian(rawStr) {
                 if (!rawStr) return null;
                 var t = String(rawStr).replace(/\s+/g, '');
                 var m = ZHOULIAN_RE.exec(t);
                 if (!m) return null;
-                var school = m[1].replace(/成外/g, '成都外国语学校').trim();
+                var school = applyAliases(m[1]).trim();
                 if (!school) return null;
                 var cohort = parseInt(m[2], 10);
                 var levelNum = LEVEL_NUM[m[4]];
@@ -2542,7 +2586,7 @@ let bankQuestionsRetryTimer = null;
 
             // Tier 2: 结构兜底（best-effort，针对全新输入）
             // 学校别名
-            s = s.replace(/成外/g, '成都外国语学校');
+            s = applyAliases(s);
 
             // 文件名噪声尾缀
             // 只保留具体、不会出现在真实标题中的尾缀；泛化的「试卷」「试题」已移除，

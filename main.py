@@ -117,7 +117,7 @@ from mathbank.question_types import (
 )
 from mathbank.latex_normalize import normalize_choice_options_to_latex
 from mathbank.choice_recovery import recover_missing_choices
-from mathbank.source_normalize import normalize_source, CANONICAL_MAP
+from mathbank.source_normalize import normalize_source, CANONICAL_MAP, SCHOOL_ALIASES
 import shutil
 from mathbank.pdf_inspector_helper import (
     is_pdf_inspector_available,
@@ -4145,10 +4145,11 @@ def get_sources(db: Session = Depends(get_db)):
 def get_source_canonical_map():
     """吐出来源归一映射表，供前端 preview 精确对齐后端落库结果。
 
-    单一事实源为 mathbank.source_normalize.CANONICAL_MAP；前端初始化时拉取一次，
-    在 normalizeSource 中作为 Tier1 精确查表，保证预览值与存储值完全一致、且无重复定义。
+    单一事实源为 mathbank.source_normalize 的 CANONICAL_MAP（精确条目）与
+    SCHOOL_ALIASES（学校别名）；前端初始化时拉取一次，在 normalizeSource 中
+    分别作为 Tier1 精确查表与别名展开，保证预览值与存储值完全一致、且无重复定义。
     """
-    return CANONICAL_MAP
+    return {"entries": CANONICAL_MAP, "aliases": SCHOOL_ALIASES}
 
 @app.post("/api/shutdown")
 def shutdown_server():

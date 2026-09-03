@@ -39,6 +39,7 @@
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -150,13 +151,26 @@ _USER_MAP_SEARCH_PATHS = [
 ]
 
 
+def _resolve_user_map_paths() -> list[Path]:
+    """返回用户配置文件的搜索路径；支持环境变量覆盖。
+
+    ``MATHBANK_SOURCE_MAP`` 指向一个替代配置文件时优先使用（测试/CI 用它指向
+    仓库根的 ``source_canonical_map.example.json``，避免依赖被 .gitignore 的
+    个人化 ``data/source_canonical_map.json``）。
+    """
+    override = os.environ.get("MATHBANK_SOURCE_MAP")
+    if override:
+        return [Path(override)]
+    return _USER_MAP_SEARCH_PATHS
+
+
 def _load_user_canonical_map() -> dict[str, dict]:
     """从用户配置文件加载个人化 Tier 1 映射与学校别名。
 
     返回 ``{"entries": {...}, "aliases": {...}}``。
     加载失败（缺失 / JSON 语法错 / 字段非字典）返回空 dict 对应项，不抛异常。
     """
-    for path in _USER_MAP_SEARCH_PATHS:
+    for path in _resolve_user_map_paths():
         if not path.is_file():
             continue
         try:
@@ -212,8 +226,19 @@ def _strip_noise(s: str) -> str:
 
 
 def _apply_aliases(s: str) -> str:
+    if not SCHOOL_ALIASES:
+        return s
+    # 先保护已存在的规范名（canonical），再展开别名，最后还原 —— 避免
+    # 「一中 → 第一中学」这类子串别名把「第一中学」二次替换成「第第一中学学」。
+    placeholders: dict[str, str] = {}
+    for i, canonical in enumerate(dict.fromkeys(SCHOOL_ALIASES.values())):
+        tok = f"\x00{i}\x00"
+        placeholders[tok] = canonical
+        s = s.replace(canonical, tok)
     for alias, canonical in SCHOOL_ALIASES.items():
         s = s.replace(alias, canonical)
+    for tok, canonical in placeholders.items():
+        s = s.replace(tok, canonical)
     return s
 
 
@@ -234,8 +259,8 @@ def _normalize_separators(s: str) -> str:
 # Tier 1.5：通用「周练」裸写式结构识别
 # ---------------------------------------------------------------------------
 # 形如「{学校}高{YYYY}{级|届}高{一|二|三}{上|下}[第N周]练」，例：
-#   石室中学高2028届高一上第三周练   ->  高一上 · 第三周练 · 石室中学 · 2025-2026学年
-#   树德中学高2025级高一上周练       ->  高一上 · 周练 · 树德中学 · 2025-2026学年
+#   第一中学高2028届高一上第三周练   ->  高一上 · 第三周练 · 第一中学 · 2025-2026学年
+#   第一中学高2025级高一上周练       ->  高一上 · 周练 · 第一中学 · 2025-2026学年
 #
 # 学年推导（级 / 届 语义不同，必须区分）：
 #   - 级 = 入学年份 N：高 L 的学年 = (N + L - 1) → (N + L)
@@ -265,7 +290,7 @@ def _match_zhoulian(raw: str):
     """
     if not raw:
         return None
-    # 该模式为纯中文 + 数字，空格无语义，先剥离以容忍「石室中学 高2028届 …」这类写法
+    # 该模式为纯中文 + 数字，空格无语义，先剥离以容忍「第一中学 高2028届 …」这类写法
     s = re.sub(r"\s+", "", str(raw))
     m = _ZHOULIAN_RE.match(s)
     if not m:
