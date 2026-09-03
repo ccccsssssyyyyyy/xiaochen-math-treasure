@@ -18,7 +18,7 @@ from sqlalchemy.engine import Engine
 from mathbank.paths import SCHEMA_SNAPSHOT_DIR
 
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 1004
 REQUIRED_TABLES = {"questions", "question_curriculums", "papers", "paper_questions"}
 
 
@@ -302,6 +302,27 @@ def _recompute_fingerprints_v4(engine: Engine) -> dict[str, int]:
     return stats
 
 
+def _bump_to_fork_v1004(engine: Engine) -> dict[str, int]:
+    """本 fork 版本线基线跳号：v4 -> v1004（仅写 user_version，不动数据）。
+
+    本派生 fork 自 JudgePeach/math-question-bank，后者已演进到 v8+。为避免本 fork
+    的数据库与上游数据库互换时 ``RuntimeError: 数据库版本高于程序支持版本`` 误伤用户，
+    把 fork 的版本线偏移到 ``1000 + 上游版本号``（v4 -> 1004）。该步骤：
+
+    - 不重建表、不重算指纹、不动数据；
+    - 仅写入 ``PRAGMA user_version = 1004``；
+    - 对尚未经历过上游 v5+ 迁移的 fork 用户库是「无操作」式的版本号跳号，幂等可重复执行。
+    """
+    stats: dict[str, int] = {"bumped_to_v1004": 1}
+    with engine.begin() as connection:
+        try:
+            connection.exec_driver_sql("PRAGMA user_version=1004")
+        except Exception:
+            connection.exec_driver_sql("ROLLBACK")
+            raise
+    return stats
+
+
 def migrate_database(
     engine: Engine,
     *,
@@ -341,11 +362,19 @@ def migrate_database(
             step_stats = _rebuild_relationship_tables(engine)
             current = 3
         elif current == 3:
-            # v4：用修正后的归一化规则整表重算指纹（落 user_version=4）
+            # v4：用修正后的归一化规则整表重算指纹（落 user_version=3 → 4）
             step_stats = _recompute_fingerprints_v4(engine)
             current = 4
+        elif current == 4:
+            # v1004：本 fork 版本线基线跳号（不重建数据，仅写 user_version=1004）。
+            # 见 _bump_to_fork_v1004 函数文档。
+            step_stats = _bump_to_fork_v1004(engine)
+            current = 1004
         else:
-            break
+            raise RuntimeError(
+                f"未实现从版本 {current} 到 {LATEST_SCHEMA_VERSION} 的迁移，"
+                f"请升级 math-question-bank 后再打开此数据库。"
+            )
         if step_stats:
             stats.update(step_stats)
     return {

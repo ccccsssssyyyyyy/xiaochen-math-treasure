@@ -18,11 +18,29 @@
 - **Tier 1 — 精确别名表（CANONICAL_MAP）**：覆盖库内已出现过的全部取值，及其原始
   文件名 / 裸写形式，直接返回规范写法。这是最可靠的一层。
 - **Tier 2 — 结构兜底（best-effort）**：针对全新输入，剥离文件名噪声尾缀、归一分隔符
-  为 `` · ``、归一卷种罗马数字（I/II/III → Ⅰ/Ⅱ/Ⅲ）、应用学校别名（成外 → 成都外国语学校）。
+  为 `` · ``、归一卷种罗马数字（I/II/III → Ⅰ/Ⅱ/Ⅲ）、应用用户配置的学校别名（见下文）。
   全新来源无法被自动推断结构，仅做噪声清理；若仍想规整，可手动录入规范写法或扩展本表。
+
+个人化 Tier 1 映射与学校别名（按学校 / 地区定制）
+--------------------------------------------------
+ 本校相关条目（含 identity 与裸写 / 原始 PDF 文件名形式）**不写在本文件**，
+ 统一从运行时配置文件加载，搜索顺序如下（首个存在且合法者胜出）：
+
+ 1. ``<项目根>/data/source_canonical_map.json``（个人题库实例配置；已被 .gitignore 忽略）
+ 2. ``~/.config/mathbank/source_canonical_map.json``（跨项目用户配置，可选）
+
+ 加载失败（缺失 / JSON 语法错误 / 字段非字典）会**静默回退**到本模块内置的通用
+ Tier 1（高考真题 + 专题汇编 + 空值），不会阻断入库。文件结构示例见
+ ``source_canonical_map.example.json``（仓库根目录）。
+
+ 学校别名亦来自用户配置文件的 ``school_aliases`` 字段，与 Tier 1.5 周练结构识别
+ 共享同一别名表。
 """
 
+import json
+import logging
 import re
+from pathlib import Path
 
 # 空值兜底
 UNKNOWN = "未知"
@@ -33,7 +51,7 @@ UNKNOWN = "未知"
 _LATEX_HINT_RE = re.compile(
     r"\\(begin|end)\s*\{"                                  # \begin{ / \end{
     r"|\\(frac|sqrt|text|mathrm|mathbb|mathbf|includegraphics|tikzpicture"
-    r"|overline|overrightarrow|operatorname|left|right|cdot|times|pi|alpha"
+    r"|overline|overrightarrow|operatorname|left|right|cdot|times|alpha"
     r"|beta|theta|sum|int|lim|vec|hat|tilde|angle)\b"
     r"|\\\w+\s*[\{\[]"                                    # 任意 \command{ 或 \command[
 )
@@ -59,43 +77,13 @@ NOISE_TOKENS = [
     "（六）", "(六)",
 ]
 
-# 学校别名（Tier 2）
-SCHOOL_ALIASES = {
-    "成外": "成都外国语学校",
-}
+# 学校别名（运行时加载，初始为空；详见模块底部 _load_user_canonical_map）
+SCHOOL_ALIASES: dict[str, str] = {}
 
-# Tier 1：库内全部取值 -> 规范写法。
-# 含 60 个规范终态（identity）与 67 个原始文件名 / 裸写形式，2026-08-31 与用户确认。
-CANONICAL_MAP = {
-    # ---- 校内：已结构化（identity）----
-    '高一上 · 期末模拟 · 石室中学北湖校区 · 2022-2023学年': '高一上 · 期末模拟 · 石室中学北湖校区 · 2022-2023学年',
-    '高一下 · 学业练习 · 石室天府中学 · 2025-2026学年': '高一下 · 学业练习 · 石室天府中学 · 2025-2026学年',
-    '高一下 · 5月段考 · 树德中学 · 2024-2025学年': '高一下 · 5月段考 · 树德中学 · 2024-2025学年',
-    '高一下 · 4月段考 · 树德中学 · 2025-2026学年': '高一下 · 4月段考 · 树德中学 · 2025-2026学年',
-    '高一上 · 10月段考 · 树德中学 · 2025-2026学年': '高一上 · 10月段考 · 树德中学 · 2025-2026学年',
-    # ---- 校内：原始裸写式 -> 结构化（周练）----
-    '树德中学高2025届高一上周练': '高一上 · 周练 · 树德中学 · 2025-2026学年',
-    '树德中学高2025级高一上期期末测试': '高一上 · 1月期末 · 树德中学 · 2025-2026学年',
-    '树德中学高2025级高一下期阶段性测试': '高一下 · 阶段性测试 · 树德中学 · 2025-2026学年',
-    '石室中学高2028届高一上第三周练': '高一上 · 第三周练 · 石室中学 · 2025-2026学年',
-    '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年': '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年',
-    # ---- 校内：原始文件名 -> 结构化 ----
-    '2022-2023学年四川省成都市树德中学高一（下）段考试卷（5月份）': '高一下 · 5月段考 · 树德中学 · 2022-2023学年',
-    '2022-2023学年四川省成都市树德中学高一（上）月考试卷（10月份）': '高一上 · 10月月考 · 树德中学 · 2022-2023学年',
-    '2022-2023学年四川省成都市树德中学光华校区高一（下）月考试卷（六）': '高一下 · 月考 · 树德中学光华校区 · 2022-2023学年',
-    '2019-2020学年四川省成都市树德中学高一（上）10月月考试卷': '高一上 · 10月月考 · 树德中学 · 2019-2020学年',
-    '2021-2022学年四川省成都市树德中学高一（下）段考试卷（5月份）': '高一下 · 5月段考 · 树德中学 · 2021-2022学年',
-    '树德中学2025-2026学年高一上学期1月期末测试数学试题(1)': '高一上 · 1月期末 · 树德中学 · 2025-2026学年',
-    '成都七中高三入学考27届(1)': '高三上 · 入学考 · 成都七中 · 2026-2027学年',
-    '四川省成都市青羊区成都市树德中学2020-2021学年高一上学期月考试题': '高一上 · 月考 · 树德中学 · 2020-2021学年',
-    '四川省成都市树德中学2025-2026学年高三上学期开学考试数学试题（原卷版）(1)': '高三上 · 开学考 · 树德中学 · 2025-2026学年',
-    '2024-2025学年四川省成都市树德中学高一（下）段考试卷（4月份）': '高一下 · 4月段考 · 树德中学 · 2024-2025学年',
-    '2018-2019学年四川省成都市石室中学高一（上）10月月考试卷': '高一上 · 10月月考 · 石室中学 · 2018-2019学年',
-    '高一上成外10月月考2025-2026学年': '高一上 · 10月月考 · 成都外国语学校 · 2025-2026学年',
-    '2025-2026学年四川省成都市教育科学研究院附中高一（上）月考数学试卷（10月份）': '高一上 · 10月月考 · 教科院附中 · 2025-2026学年',
-    '2024-2025学年四川省成都市石室中学高一（上）月考数学试卷（10月份）': '高一上 · 10月月考 · 石室中学 · 2024-2025学年',
-    '2023-2024学年四川省成都市石室中学高一（下）入学数学试卷（理科）': '高一下 · 入学考 · 石室中学 · 2023-2024学年',
-    '成都外国语学校 2025 级高一数学 12 月月考试题': '高一上 · 12月月考 · 成都外国语学校 · 2025-2026学年',
+# Tier 1 — 内置通用规则（与具体学校/地区无关）。
+# 仅含高考真题 identity / 裸写式归一 / 专题汇编 / 空值；个人题库本校相关条目
+# 请放 ``data/source_canonical_map.json``（详见模块 docstring）。
+_BASE_CANONICAL_MAP: dict[str, str] = {
     # ---- 高考真题：已规范式（identity）----
     '2023·全国甲卷·高考真题': '2023·全国甲卷·高考真题',
     '2023·全国乙卷·高考真题': '2023·全国乙卷·高考真题',
@@ -147,10 +135,74 @@ CANONICAL_MAP = {
     '': '未知',
 }
 
-# 闭合映射：每个规范终态也作为自身键，保证已归一的值幂等通过，
-# 脚本可重复执行（已符合新值的行 0 改动），且实时钩子对规范值直接命中不二次处理。
+# 闭合基础映射：每个规范终态也作为自身键，保证已归一的值幂等通过
+for _v in list(_BASE_CANONICAL_MAP.values()):
+    _BASE_CANONICAL_MAP.setdefault(_v, _v)
+
+
+# ---------------------------------------------------------------------------
+# 用户配置文件加载（Tier 1 + 学校别名）
+# ---------------------------------------------------------------------------
+_USER_MAP_FILENAME = "source_canonical_map.json"
+_USER_MAP_SEARCH_PATHS = [
+    Path(__file__).resolve().parent.parent / "data" / _USER_MAP_FILENAME,
+    Path.home() / ".config" / "mathbank" / _USER_MAP_FILENAME,
+]
+
+
+def _load_user_canonical_map() -> dict[str, dict]:
+    """从用户配置文件加载个人化 Tier 1 映射与学校别名。
+
+    返回 ``{"entries": {...}, "aliases": {...}}``。
+    加载失败（缺失 / JSON 语法错 / 字段非字典）返回空 dict 对应项，不抛异常。
+    """
+    for path in _USER_MAP_SEARCH_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            with path.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.warning("source_normalize: 加载用户映射失败 %s (%s)", path, exc)
+            return {"entries": {}, "aliases": {}}
+        if not isinstance(data, dict):
+            logging.warning("source_normalize: 用户映射根非字典 %s", path)
+            return {"entries": {}, "aliases": {}}
+
+        entries_raw = data.get("school_entries", {})
+        aliases_raw = data.get("school_aliases", {})
+        if not isinstance(entries_raw, dict) or not isinstance(aliases_raw, dict):
+            logging.warning("source_normalize: school_entries/school_aliases 非字典 %s", path)
+            return {"entries": {}, "aliases": {}}
+
+        # 过滤掉说明字段：以纯虚线或下划线开头（如 "----- 校内：…-----": ""、
+        # "_doc": "..."）。真实映射条目 key 为可读中文/数字。
+        entries = {
+            k: v for k, v in entries_raw.items()
+            if isinstance(k, str) and isinstance(v, str)
+            and not k.startswith("-----") and not k.startswith("_")
+        }
+        aliases = {
+            k: v for k, v in aliases_raw.items()
+            if isinstance(k, str) and isinstance(v, str)
+            and not k.startswith("-----") and not k.startswith("_")
+        }
+        return {"entries": entries, "aliases": aliases}
+    return {"entries": {}, "aliases": {}}
+
+
+_USER_MAP = _load_user_canonical_map()
+
+# 公开 CANONICAL_MAP：基础 + 用户映射（用户条目覆盖基础同键值）
+CANONICAL_MAP: dict[str, str] = dict(_BASE_CANONICAL_MAP)
+CANONICAL_MAP.update(_USER_MAP["entries"])
+
+# 闭合最终映射：每个规范终态也作为自身键
 for _v in list(CANONICAL_MAP.values()):
     CANONICAL_MAP.setdefault(_v, _v)
+
+# 公开 SCHOOL_ALIASES：运行时副本（基础为空，全部来自用户配置）
+SCHOOL_ALIASES.update(_USER_MAP["aliases"])
 
 
 def _strip_noise(s: str) -> str:
