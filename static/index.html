@@ -2034,15 +2034,15 @@
                             <i class="fa-solid fa-circle-info text-brand-500"></i>
                             <span>提示：在上方 PDF 页面图上按住鼠标左键并拖拽，即可框选题目中的几何插图区域。</span>
                         </div>
-                        <div class="flex items-center space-x-3">
-                            <button id="pdfCropClearBtn" onclick="clearPdfCropSelection()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-700 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
+                        <div class="flex items-center space-x-3 shrink-0">
+                            <button id="pdfCropClearBtn" onclick="clearPdfCropSelection()" class="whitespace-nowrap px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-700 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
                                 <span>清除框选</span>
                             </button>
-                            <button id="pdfCropConfirmBtn" onclick="submitPdfCropCoordinates()" class="px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
+                            <button id="pdfCropConfirmBtn" onclick="submitPdfCropCoordinates()" class="whitespace-nowrap px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
                                 <i class="fa-solid fa-crop-simple mr-1.5"></i>
                                 <span>确认截取配图</span>
                             </button>
-                            <button id="pdfCropOcrBtn" onclick="submitPdfCropCoordinates(true)" class="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled title="截取后调用 OCR 把该区域识别为 LaTeX，可补全跨页/缺失的题干或解析">
+                            <button id="pdfCropOcrBtn" onclick="submitPdfCropCoordinates(true)" class="whitespace-nowrap px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled title="截取后调用 OCR 把该区域识别为 LaTeX，可补全跨页/缺失的题干或解析">
                                 <i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i>
                                 <span>截取并识别为 LaTeX</span>
                             </button>
