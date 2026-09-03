@@ -72,10 +72,14 @@ def test_blank_page_stays_ocr(monkeypatch):
 
 
 def test_real_pdf_options_recovered(monkeypatch):
-    """真实树德中学试卷：pdf-inspector 抽空时，回退后 options 不丢。"""
-    path = "/Users/ccsssy/Desktop/树德中学高2025级高一下期阶段性测试数学试卷.pdf"
-    if not os.path.exists(path):
-        pytest.skip("真实试卷不在桌面，跳过")
+    """真实试卷选项回溯验证（需本地样例 PDF，仓库不随附，故默认跳过）。
+
+    若要在本地验证，把一份真实数学试卷 PDF 路径通过环境变量
+    MATHBANK_REAL_PDF 提供即可启用本测试。
+    """
+    path = os.environ.get("MATHBANK_REAL_PDF")
+    if not path or not os.path.exists(path):
+        pytest.skip("未提供本地真实试卷 PDF（设置 MATHBANK_REAL_PDF 可启用）")
     with open(path, "rb") as f:
         pdf_bytes = f.read()
     monkeypatch.setattr(

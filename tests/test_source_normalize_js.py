@@ -11,7 +11,10 @@ import subprocess
 import sys
 import pytest
 
-JS = "/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank/static/js/editor.js"
+JS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "static", "js", "editor.js",
+)
 
 
 def _resolve_node():
@@ -23,11 +26,7 @@ def _resolve_node():
     import glob
     import shutil
     candidates = [shutil.which("node")]
-    candidates += sorted(
-        glob.glob("/Users/ccsssy/.workbuddy/binaries/node/versions/*/bin/node"),
-        reverse=True,
-    )
-    candidates += ["/usr/local/bin/node", "/opt/homebrew/bin/node"]
+    candidates += ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"]
     for c in candidates:
         if c and os.path.exists(c):
             return c
