@@ -1977,7 +1977,7 @@
                     texFileName.textContent = file.name;
                     texFileName.className = "text-xs text-brand-600 font-bold";
                     texFileIcon.className = "fa-solid fa-file-pdf text-brand-500 text-xl mb-1.5 animate-bounce";
-                    latexTextarea.value = `[PDF 试卷已成功载入: ${file.name}]\n总页数、高清转换与插图定位将会在点击“一键 AI 智能拆解并关联”后于后台异步执行。`;
+                    latexTextarea.value = `[PDF 试卷已成功载入: ${file.name}]\n总页数、高清转换与插图定位将会在点击“开始拆解吧”后于后台异步执行。`;
                     latexTextarea.disabled = true;
 
                     const titleInput = document.getElementById('importPaperTitle');
@@ -2076,7 +2076,7 @@
                     .finally(() => {
                         if (runBtn) {
                             runBtn.disabled = false;
-                            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>一键 AI 智能拆解并关联</span>';
+                            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>开始拆解吧</span>';
                         }
                         // TeX 预读（异步）完成，textarea 已就绪，通知调用方继续拆解
                         if (typeof onReady === 'function') onReady();
@@ -2366,7 +2366,7 @@
                     // 无队列（单文件模式）：两个按钮都恢复默认
                     if (runBtn) {
                         runBtn.disabled = false;
-                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>一键 AI 智能拆解并关联</span>';
+                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i><span>开始拆解吧</span>';
                     }
                     if (saveAllBtn) {
                         saveAllBtn.disabled = false;
@@ -2887,7 +2887,7 @@
                     }
                     resetBtn.classList.remove('hidden');
                     runBtn.disabled = false;
-                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                 });
                 return;
             }
@@ -2970,7 +2970,7 @@
                     }
                     resetBtn.classList.remove('hidden');
                     runBtn.disabled = false;
-                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                 });
                 return;
             }
@@ -3139,7 +3139,7 @@
                 .finally(() => {
                     if (!isCurrentDocumentImportTask(importTaskGeneration)) return;
                     runBtn.disabled = false;
-                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                 });
         }
 
@@ -3197,7 +3197,7 @@
             const runBtn = document.getElementById('runParseBtn');
             if (runBtn) {
                 runBtn.disabled = false;
-                runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
             }
             
             if (typeof showToast === 'function') {
@@ -3276,7 +3276,7 @@
 
                 if (runBtn) {
                     runBtn.disabled = false;
-                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                    runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                 }
             } catch (renderErr) {
                 console.error('[队列] ❌ 渲染过程异常（仍尝试推进队列）:', renderErr);
@@ -3495,7 +3495,7 @@
                         if (!finishDocumentPoll(identity)) return;
                         document.getElementById('importLoadingState').classList.add('hidden');
                         runBtn.disabled = false;
-                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                     } else if (task.status === 'error') {
                         if (!finishDocumentPoll(identity)) return;
                         appendImportLog(`分析失败: ${task.error || '未知错误'}`, 'error');
@@ -3530,7 +3530,7 @@
                         }
 
                         runBtn.disabled = false;
-                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+                        runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
                         showToast(`${documentLabel} 拆解分析失败: ${task.error || '未知错误'}`, 'error');
                         if (window.__currentParseAppendMode && typeof advanceQueueAfterParse === 'function') {
                             advanceQueueAfterParse(false, task.error || '未知错误');
@@ -3696,7 +3696,7 @@
             // 重置按钮状态
             const runBtn = document.getElementById('runParseBtn');
             runBtn.disabled = false;
-            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>一键 AI 智能拆解并关联</span>';
+            runBtn.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i> <span>开始拆解吧</span>';
 
             // 清空解析结果数据
             replaceParsedQuestions([]);
