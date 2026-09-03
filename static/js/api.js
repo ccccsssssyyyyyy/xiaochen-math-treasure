@@ -746,7 +746,8 @@
             
             const trimmed = newName.trim();
             const customStr = localStorage.getItem(`custom_models_${provider}`);
-            const customs = customStr ? JSON.parse(customStr) : [];
+            let customs = [];
+            try { if (customStr) customs = JSON.parse(customStr); } catch (e) { console.error(`解析自定义模型失败 for ${provider}:`, e); }
             
             if (isPresetModel(provider, typeKey, trimmed)) {
                 alert("该预设模型已存在于列表中！");
@@ -774,7 +775,11 @@
             const customStr = localStorage.getItem(`custom_models_${provider}`);
             if (!customStr) return;
             
-            let customs = JSON.parse(customStr);
+            let customs;
+            try { customs = JSON.parse(customStr); } catch (e) {
+                console.error(`解析自定义模型失败 for ${provider}:`, e);
+                return;
+            }
             customs = customs.filter(m => m !== modelValue);
             localStorage.setItem(`custom_models_${provider}`, JSON.stringify(customs));
             
@@ -793,7 +798,8 @@
             }
             
             const customStr = localStorage.getItem(`custom_models_${provider}`);
-            const customs = customStr ? JSON.parse(customStr) : [];
+            let customs = [];
+            try { if (customStr) customs = JSON.parse(customStr); } catch (e) { console.error(`解析自定义模型失败 for ${provider}:`, e); }
             
             if (!customs.includes(newName)) {
                 customs.push(newName);
@@ -817,7 +823,11 @@
             const customStr = localStorage.getItem(`custom_models_${provider}`);
             if (!customStr) return;
             
-            let customs = JSON.parse(customStr);
+            let customs;
+            try { customs = JSON.parse(customStr); } catch (e) {
+                console.error(`解析自定义模型失败 for ${provider}:`, e);
+                return;
+            }
             if (!customs.includes(newName)) {
                 alert(`未在下拉历史中找到模型 "${newName}"`);
                 return;

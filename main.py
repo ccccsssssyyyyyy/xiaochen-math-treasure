@@ -1153,7 +1153,10 @@ def ai_solve(
                                     if r_tok is not None:
                                         reasoning_count = max(reasoning_count, r_tok)
 
-                                delta = chunk_json.get("choices", [{}])[0].get("delta", {})
+                                chunk_choices = chunk_json.get("choices")
+                                if not chunk_choices:
+                                    continue
+                                delta = chunk_choices[0].get("delta", {})
                                 reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                                 content_piece = delta.get("content") or ""
                                 
@@ -1507,27 +1510,33 @@ def save_settings(
         os.environ.pop("PIX2TEXT_API_KEY", None)
         os.environ.pop("PIX2TEXT_SERVER_TYPE", None)
         
-        os.environ["DEEPSEEK_API_KEY"] = deepseek_key
-        os.environ["SILICONFLOW_API_KEY"] = siliconflow_key
-        os.environ["ALI_BAILIAN_API_KEY"] = ali_bailian_key
-        os.environ["ZHONGZHAN_GPT_API_KEY"] = zhongzhan_gpt_key
-        os.environ["ZHONGZHAN_GPT_BASE_URL"] = zhongzhan_gpt_base_url
-        os.environ["ZHONGZHAN_GPT_OCR_MODEL"] = zhongzhan_gpt_ocr_model
-        os.environ["ZHONGZHAN_CLAUDE_API_KEY"] = zhongzhan_claude_key
-        os.environ["ZHONGZHAN_CLAUDE_BASE_URL"] = zhongzhan_claude_base_url
-        os.environ["ZHONGZHAN_CLAUDE_OCR_MODEL"] = zhongzhan_claude_ocr_model
-        
-        os.environ["OCR_PREFER_ENGINE"] = prefer_engine
-        os.environ["SILICONFLOW_OCR_MODEL"] = siliconflow_model
-        os.environ["ALI_BAILIAN_OCR_MODEL"] = ali_bailian_model
-        os.environ["PREFER_SOLVE_MODEL"] = prefer_solve_model
-        os.environ["PREFER_PARSE_MODEL"] = prefer_parse_model
-        os.environ["PREFER_CLASSIFY_MODEL"] = prefer_classify_model
-        os.environ["PREFER_DRAW_MODEL"] = prefer_draw_model
-        os.environ["PREFER_FREE_PARSE_MODEL"] = prefer_free_parse_model
-        os.environ["PREFER_FREE_CLASSIFY_MODEL"] = prefer_free_classify_model
-        os.environ["PREFER_FREE_SOLVE_MODEL"] = prefer_free_solve_model
-        os.environ["PREFER_FREE_EVAL_MODEL"] = prefer_free_eval_model
+        # 仅当表单提交非空时才覆盖进程环境变量；
+        # 空值（用户未填写）保留 shell / 启动时注入的既有键值，避免误清空。
+        _env_updates = {
+            "DEEPSEEK_API_KEY": deepseek_key,
+            "SILICONFLOW_API_KEY": siliconflow_key,
+            "ALI_BAILIAN_API_KEY": ali_bailian_key,
+            "ZHONGZHAN_GPT_API_KEY": zhongzhan_gpt_key,
+            "ZHONGZHAN_GPT_BASE_URL": zhongzhan_gpt_base_url,
+            "ZHONGZHAN_GPT_OCR_MODEL": zhongzhan_gpt_ocr_model,
+            "ZHONGZHAN_CLAUDE_API_KEY": zhongzhan_claude_key,
+            "ZHONGZHAN_CLAUDE_BASE_URL": zhongzhan_claude_base_url,
+            "ZHONGZHAN_CLAUDE_OCR_MODEL": zhongzhan_claude_ocr_model,
+            "OCR_PREFER_ENGINE": prefer_engine,
+            "SILICONFLOW_OCR_MODEL": siliconflow_model,
+            "ALI_BAILIAN_OCR_MODEL": ali_bailian_model,
+            "PREFER_SOLVE_MODEL": prefer_solve_model,
+            "PREFER_PARSE_MODEL": prefer_parse_model,
+            "PREFER_CLASSIFY_MODEL": prefer_classify_model,
+            "PREFER_DRAW_MODEL": prefer_draw_model,
+            "PREFER_FREE_PARSE_MODEL": prefer_free_parse_model,
+            "PREFER_FREE_CLASSIFY_MODEL": prefer_free_classify_model,
+            "PREFER_FREE_SOLVE_MODEL": prefer_free_solve_model,
+            "PREFER_FREE_EVAL_MODEL": prefer_free_eval_model,
+        }
+        for _env_name, _env_val in _env_updates.items():
+            if _env_val:
+                os.environ[_env_name] = _env_val
         
         return {"status": "success", "message": "API 与首选大模型配置已成功保存并即时生效！"}
     except Exception as e:
@@ -2252,7 +2261,9 @@ def check_document_imported(name: str = "", db: Session = Depends(get_db)):
     """
     if not name:
         return {"imported": False, "count": 0}
-    count = db.query(Question).filter(Question.source == name).count()
+    # 入库时 source 经 normalize_source 归一后落库，故比较前同样归一，
+    # 否则经 CANONICAL_MAP / Tier2 改写的文件名永远匹配不到，去重守卫静默失效。
+    count = db.query(Question).filter(Question.source == normalize_source(name)).count()
     return {"imported": count > 0, "count": count}
 
 
@@ -6258,6 +6269,15 @@ def export_paper_tex(payload: dict, db: Session = Depends(get_db)):
 def export_paper_bundle(payload: dict, db: Session = Depends(get_db)):
     """一键导出合并全套 Zip 压缩包（包含 LaTeX 源码、相关插图以及已编译好的 PDF）"""
     try:
+        # 若系统未安装 xelatex，提前给出明确提示，而不是静默返回一个缺失 PDF 的压缩包。
+        if shutil.which("xelatex") is None:
+            return JSONResponse(content={
+                "status": "warning",
+                "message": (
+                    "系统未检测到 xelatex 编译器（需安装 TeX Live / MacTeX 并加入 PATH），"
+                    "无法编译 PDF。请安装排版工具链后重试。"
+                ),
+            }, status_code=200)
         title = payload.get("title", "2026年高中数学模拟考试试卷")
         subtitle = payload.get("subtitle", "")
         paper_type = payload.get("paper_type", "exam")

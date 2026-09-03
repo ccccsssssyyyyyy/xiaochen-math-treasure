@@ -16,6 +16,7 @@ from mathbank.ai_providers import (
     apply_bailian_thinking_policy,
 )
 from mathbank.ai_http import post_chat_completion
+from mathbank.ai_json import _strip_markdown_fence
 
 
 def evaluate_document_difficulty(latex_content: str, eval_model: str) -> dict:
@@ -72,10 +73,17 @@ def evaluate_document_difficulty(latex_content: str, eval_model: str) -> dict:
     res_json = response.json()
     ai_text = res_json.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
-    if ai_text.startswith("```"):
-        ai_text = ai_text.strip("`").strip()
+    if not ai_text:
+        raise RuntimeError("评估模型返回了空内容，无法判断难度。")
 
-    result = json.loads(ai_text)
+    # 部分模型在 json_object 之外仍会包裹 ```json 围栏，需用通用围栏提取
+    # （仅去反引号会残留 `json` 语言标签导致 json.loads 失败）。
+    ai_text = _strip_markdown_fence(ai_text)
+
+    try:
+        result = json.loads(ai_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"评估模型返回了非 JSON 内容：{ai_text[:120]}") from exc
     difficulty = result.get("difficulty", "medium")
     if difficulty not in ("simple", "medium", "hard"):
         difficulty = "medium"

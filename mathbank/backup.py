@@ -142,7 +142,7 @@ def _snapshot_database(source_path: Path, target_path: Path) -> dict[str, Any]:
     if not source_path.is_file():
         raise FileNotFoundError(f"数据库文件不存在: {source_path}")
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(source_path)) as source, closing(
+    with closing(sqlite3.connect(source_path, timeout=30)) as source, closing(
         sqlite3.connect(target_path)
     ) as target:
         source.backup(target)
@@ -480,7 +480,13 @@ def create_full_backup_if_due(
                 # not suppress creation of the next verified automatic backup.
                 continue
             return None
-        return create_full_backup(output_dir=output_dir, retention=retention)
+        try:
+            return create_full_backup(output_dir=output_dir, retention=retention)
+        except Exception as exc:  # 单次自动备份失败不应拖垮调度器
+            import logging
+
+            logging.getLogger(__name__).warning("自动备份失败：%s", exc)
+            return None
 
 
 def _validate_member_name(name: str) -> str:

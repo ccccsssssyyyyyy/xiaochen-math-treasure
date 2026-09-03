@@ -133,16 +133,16 @@ def _wrap_inline_choices(content: str) -> str:
             continue
         start = run[0].start()
         last = run[-1]
-        tail = content[last.end():]
+        tail = protected[last.end():]
         m_tail = _TRAILING_MARKERS.search(tail)
         if m_tail:
             # 选项正文截止到答案/解析标记之前；标记及其后的整段（属答案区，不属于题干）一并丢弃
             body_end_pos = last.end() + m_tail.start()
-            consume_end = len(content)
+            consume_end = len(protected)
         else:
             body_end_pos = last.end() + len(tail)
             consume_end = body_end_pos
-        block = content[start:body_end_pos]
+        block = protected[start:body_end_pos]
         sub = list(_OPTION_START.finditer(block))
         items = []
         for i, sm in enumerate(sub):
