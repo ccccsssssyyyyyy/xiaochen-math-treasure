@@ -77,6 +77,7 @@ CANONICAL_MAP = {
     '树德中学高2025届高一上周练': '高一上 · 周练 · 树德中学 · 2025-2026学年',
     '树德中学高2025级高一上期期末测试': '高一上 · 1月期末 · 树德中学 · 2025-2026学年',
     '树德中学高2025级高一下期阶段性测试': '高一下 · 阶段性测试 · 树德中学 · 2025-2026学年',
+    '石室中学高2028届高一上第三周练': '高一上 · 第三周练 · 石室中学 · 2025-2026学年',
     '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年': '高一上 · 10月月考 · 石室天府中学 · 2024-2025学年',
     # ---- 校内：原始文件名 -> 结构化 ----
     '2022-2023学年四川省成都市树德中学高一（下）段考试卷（5月份）': '高一下 · 5月段考 · 树德中学 · 2022-2023学年',
@@ -177,6 +178,67 @@ def _normalize_separators(s: str) -> str:
     return s
 
 
+# ---------------------------------------------------------------------------
+# Tier 1.5：通用「周练」裸写式结构识别
+# ---------------------------------------------------------------------------
+# 形如「{学校}高{YYYY}{级|届}高{一|二|三}{上|下}[第N周]练」，例：
+#   石室中学高2028届高一上第三周练   ->  高一上 · 第三周练 · 石室中学 · 2025-2026学年
+#   树德中学高2025级高一上周练       ->  高一上 · 周练 · 树德中学 · 2025-2026学年
+#
+# 学年推导（级 / 届 语义不同，必须区分）：
+#   - 级 = 入学年份 N：高 L 的学年 = (N + L - 1) → (N + L)
+#   - 届 = 毕业年份 N：高 L 的学年 = (N + L - 4) → (N + L - 3)（毕业年倒推）
+#
+# 周次「第 N」为可选：有则保留进考试类型段（便于区分第三周 / 第四周），
+# 无则退化为裸「周练」，对无周次来源零影响。
+_ZHOULIAN_RE = re.compile(
+    r"^(?P<school>.+?)"
+    r"高(?P<cohort>\d{4})(?P<kind>级|届)"
+    r"高(?P<level>[一二三])(?P<term>[上下])"
+    # 二选一：显式周次「第N周练」 或 裸「周练」。
+    # 注意：无周次时「周」字仍存在（高一上*周*练），必须由备选分支消耗，
+    # 否则整条规则只匹配带「第N」的写法。
+    r"(?:第(?P<week>[一二三四五六七八九十百\d]+)周|周)"
+    r"练(?:习)?$"
+)
+
+_LEVEL_NUM = {"一": 1, "二": 2, "三": 3}
+
+
+def _match_zhoulian(raw: str):
+    """识别「周练」类裸写式并归一为规约写法；不匹配返回 None。
+
+    仅当结构完整（学校 + 届/级 + 学段 + 结尾『练』）时才命中，
+    避免误伤其他考试类型（月考 / 期末 / 段考等）。
+    """
+    if not raw:
+        return None
+    # 该模式为纯中文 + 数字，空格无语义，先剥离以容忍「石室中学 高2028届 …」这类写法
+    s = re.sub(r"\s+", "", str(raw))
+    m = _ZHOULIAN_RE.match(s)
+    if not m:
+        return None
+
+    school = _apply_aliases(m.group("school").strip())
+    if not school:
+        return None
+
+    cohort = int(m.group("cohort"))
+    kind = m.group("kind")
+    level = m.group("level")
+    term = m.group("term")
+    week = m.group("week")
+
+    level_num = _LEVEL_NUM[level]
+    if kind == "级":
+        start = cohort + level_num - 1
+    else:  # 届：毕业年倒推
+        start = cohort + level_num - 4
+
+    exam_type = f"第{week}周练" if week else "周练"
+    return f"高{level}{term} · {exam_type} · {school} · {start}-{start + 1}学年"
+
+
 def normalize_source(raw, fallback_title=None):
     """把任意来源写法归一为规约写法。
 
@@ -203,6 +265,11 @@ def normalize_source(raw, fallback_title=None):
     if s in CANONICAL_MAP:
         return CANONICAL_MAP[s]
 
+    # Tier 1.5: 通用「周练」裸写式结构识别（学校 + 届/级 + 学段 + 可选第N周 + 练）
+    hit = _match_zhoulian(s)
+    if hit:
+        return hit
+
     # Tier 2: 结构兜底（best-effort）
     s2 = _strip_noise(s)
     s2 = _apply_aliases(s2)
@@ -212,5 +279,10 @@ def normalize_source(raw, fallback_title=None):
     # 兜底清理后仍可能命中精确表（如剥离尾缀后恰好是已录入的规范写法）
     if s2 in CANONICAL_MAP:
         return CANONICAL_MAP[s2]
+
+    # Tier 2.5: 清理后重试通用规则（容忍「…第三周练数学试题」这类尾缀噪声）
+    hit = _match_zhoulian(s2)
+    if hit:
+        return hit
 
     return s2 or UNKNOWN

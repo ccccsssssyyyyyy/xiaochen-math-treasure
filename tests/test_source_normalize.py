@@ -88,3 +88,59 @@ def test_raw_forms_all_map_to_canonical():
     }
     got = {normalize_source(r) for r in raw_forms}
     assert got == expected_finals
+
+
+# ---------------------------------------------------------------------------
+# Tier 1.5：通用「周练」裸写式（学校 + 高N级/届 + 学段 + 可选第N周 + 练）
+# ---------------------------------------------------------------------------
+
+def test_zhoulian_keeps_week_number_when_present():
+    """有『第 N 周』时保留进考试类型段，避免第三周 / 第四周塌缩成同一来源。"""
+    assert normalize_source("石室中学高2028届高一上第三周练") == "高一上 · 第三周练 · 石室中学 · 2025-2026学年"
+    assert normalize_source("石室中学高2028届高一上第四周练") == "高一上 · 第四周练 · 石室中学 · 2025-2026学年"
+    # 数字周次同样支持
+    assert normalize_source("石室中学高2028届高一上第12周练") == "高一上 · 第12周练 · 石室中学 · 2025-2026学年"
+
+
+def test_zhoulian_without_week_number_degrades_gracefully():
+    """没有周次时退化为裸『周练』，不影响无周次来源的归一。"""
+    assert normalize_source("石室中学高2028届高一上周练") == "高一上 · 周练 · 石室中学 · 2025-2026学年"
+    # 库内既有条目（无周次）行为不变
+    assert normalize_source("树德中学高2025届高一上周练") == "高一上 · 周练 · 树德中学 · 2025-2026学年"
+
+
+def test_zhoulian_distinguishes_ji_and_jie():
+    """『级』= 入学年份正推，『届』= 毕业年份倒推，两者语义不同。"""
+    # 级：入学 2025 → 高一 2025-2026 / 高三 2027-2028
+    assert normalize_source("树德中学高2025级高一上周练") == "高一上 · 周练 · 树德中学 · 2025-2026学年"
+    assert normalize_source("树德中学高2025级高三上周练") == "高三上 · 周练 · 树德中学 · 2027-2028学年"
+    # 届：毕业 2028 → 高一 2025-2026 / 高二 2026-2027 / 高三 2027-2028
+    assert normalize_source("石室中学高2028届高一上周练") == "高一上 · 周练 · 石室中学 · 2025-2026学年"
+    assert normalize_source("石室中学高2028届高二上周练") == "高二上 · 周练 · 石室中学 · 2026-2027学年"
+    assert normalize_source("石室中学高2028届高三上周练") == "高三上 · 周练 · 石室中学 · 2027-2028学年"
+
+
+def test_zhoulian_does_not_misclassify_other_exam_types():
+    """非『周练』结尾的考试类型不得被通用规则误伤（仍走 Tier2 兜底）。"""
+    assert normalize_source("石室中学高2028届高一上10月月考") == "石室中学高2028届高一上10月月考"
+    assert normalize_source("树德中学高2025级高一上期期末测试") == "高一上 · 1月期末 · 树德中学 · 2025-2026学年"
+    assert normalize_source("2023·全国甲卷·高考真题") == "2023·全国甲卷·高考真题"
+
+
+def test_zhoulian_tolerates_trailing_noise_and_spaces():
+    """尾缀噪声（数学试题）与多余空格不应阻断结构识别。"""
+    assert normalize_source("石室中学高2028届高一上第三周练数学试题") == "高一上 · 第三周练 · 石室中学 · 2025-2026学年"
+    assert normalize_source("石室中学 高2028届 高一上 第三周练") == "高一上 · 第三周练 · 石室中学 · 2025-2026学年"
+    # 学校名含多校区 / 别名时正常提取
+    assert normalize_source("成外高2028届高一上周练") == "高一上 · 周练 · 成都外国语学校 · 2025-2026学年"
+
+
+def test_zhoulian_canonical_values_are_idempotent():
+    """通用规则产出的规约终态必须幂等（脚本重跑 & 实时钩子重复调用安全）。"""
+    for value in [
+        "高一上 · 第三周练 · 石室中学 · 2025-2026学年",
+        "高一上 · 周练 · 石室中学 · 2025-2026学年",
+        "高二上 · 周练 · 石室中学 · 2026-2027学年",
+        "高三上 · 周练 · 树德中学 · 2027-2028学年",
+    ]:
+        assert normalize_source(value) == value

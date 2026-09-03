@@ -6,12 +6,35 @@ normalizeSource 在 vm 中注入后端同款 CANONICAL_MAP（模拟初始化 fet
 纯函数（仅 String/regex/split/replace，不依赖 DOM），可直接在 vm 注入运行。
 """
 import json
+import os
 import subprocess
 import sys
 import pytest
 
 JS = "/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank/static/js/editor.js"
-NODE = "/Users/ccsssy/.workbuddy/binaries/node/versions/22.22.2/bin/node"
+
+
+def _resolve_node():
+    """定位可用的 node 可执行文件。
+
+    托管 node 的版本目录可能带后缀（如 22.22.2-2），硬编码单一路径会随升级失效，
+    改为按「PATH -> 托管版本目录（新版优先）-> 常见系统路径」依次探测。
+    """
+    import glob
+    import shutil
+    candidates = [shutil.which("node")]
+    candidates += sorted(
+        glob.glob("/Users/ccsssy/.workbuddy/binaries/node/versions/*/bin/node"),
+        reverse=True,
+    )
+    candidates += ["/usr/local/bin/node", "/opt/homebrew/bin/node"]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    raise RuntimeError("未找到 node 可执行文件，无法运行前端 parity 测试")
+
+
+NODE = _resolve_node()
 
 from mathbank.source_normalize import normalize_source, CANONICAL_MAP
 
@@ -57,7 +80,22 @@ def test_js_backend_parity(func_src):
     # 原始写法（key != value）、规约终态、空值、若干全新输入
     raw_forms = [k for k, v in CANONICAL_MAP.items() if k != v]
     canonical_finals = list({v for v in CANONICAL_MAP.values()})
-    extras = ["", None, "   ", "2026-2027学年四川省成都市七中万达高一（上）期末数学试题(1)"]
+    # 周练裸写式（Tier 1.5 / 2.5 通用规则）：映射表内 + 仅靠通用规则覆盖的，
+    # 均须前后端一致，否则会出现「前端预览显示原始串、落库却已归一」的错位。
+    zhoulian = [
+        "石室中学高2028届高一上第三周练",   # 映射表内有精确条目
+        "石室中学高2028届高一上周练",       # 无周次，仅通用规则覆盖
+        "石室中学高2028届高一上第四周练",
+        "树德中学高2025级高一上周练",       # 级 vs 届 学年推导不同
+        "成外高2029届高二下第3周练",        # 学校别名 + 非高一学段
+        "石室中学高2028届高一上第三周练数学试题",  # 尾缀噪声（Tier 2.5）
+        "石室中学 高2028届 高一上 第三周练",        # 多余空格
+        "石室中学高2028届高一上10月月考",   # 非周练，不得被误伤
+    ]
+    extras = [
+        "", None, "   ",
+        "2026-2027学年四川省成都市七中万达高一（上）期末数学试题(1)",
+    ] + zhoulian
     inputs = raw_forms + canonical_finals + extras
 
     js_out = _run_js(func_src, CANONICAL_MAP, inputs)

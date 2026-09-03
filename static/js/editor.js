@@ -2506,10 +2506,39 @@ let bankQuestionsRetryTimer = null;
             var s = String(raw).trim();
             if (!s) return '未知';
 
+            // 「周练」裸写式识别（Tier 1.5 / 2.5 共用），与后端
+            // mathbank.source_normalize._match_zhoulian 完全对应：
+            //   {学校}高{YYYY}{级|届}高{一|二|三}{上|下}[第N周]练
+            //   - 级 = 入学年份 N：学年 = (N + L - 1) → (N + L)
+            //   - 届 = 毕业年份 N：学年 = (N + L - 4) → (N + L - 3)（毕业年倒推）
+            // 周次「第N」可选：有则保留进考试类型段（便于区分第三周 / 第四周），
+            // 无则退化为裸「周练」，对无周次来源零影响。
+            // 注意：无周次时「周」字仍存在（高一上*周*练），必须由备选分支消耗，
+            // 否则规则只匹配带「第N」的写法。
+            var ZHOULIAN_RE = /^(.+?)高(\d{4})(级|届)高([一二三])([上下])(?:第([一二三四五六七八九十百\d]+)周|周)练(?:习)?$/;
+            var LEVEL_NUM = { '一': 1, '二': 2, '三': 3 };
+            function matchZhouLian(rawStr) {
+                if (!rawStr) return null;
+                var t = String(rawStr).replace(/\s+/g, '');
+                var m = ZHOULIAN_RE.exec(t);
+                if (!m) return null;
+                var school = m[1].replace(/成外/g, '成都外国语学校').trim();
+                if (!school) return null;
+                var cohort = parseInt(m[2], 10);
+                var levelNum = LEVEL_NUM[m[4]];
+                var start = (m[3] === '级') ? (cohort + levelNum - 1) : (cohort + levelNum - 4);
+                var examType = m[6] ? ('第' + m[6] + '周练') : '周练';
+                return '高' + m[4] + m[5] + ' · ' + examType + ' · ' + school + ' · ' + start + '-' + (start + 1) + '学年';
+            }
+
             // Tier 1: 精确别名表（与后端 mathbank.source_normalize.CANONICAL_MAP 一致）
             if (SOURCE_CANONICAL_MAP && Object.prototype.hasOwnProperty.call(SOURCE_CANONICAL_MAP, s)) {
                 return SOURCE_CANONICAL_MAP[s];
             }
+
+            // Tier 1.5: 通用「周练」裸写式结构识别
+            var zhouLian = matchZhouLian(s);
+            if (zhouLian) return zhouLian;
 
             // Tier 2: 结构兜底（best-effort，针对全新输入）
             // 学校别名
@@ -2537,6 +2566,10 @@ let bankQuestionsRetryTimer = null;
             if (SOURCE_CANONICAL_MAP && Object.prototype.hasOwnProperty.call(SOURCE_CANONICAL_MAP, s)) {
                 return SOURCE_CANONICAL_MAP[s];
             }
+
+            // Tier 2.5: 清理后重试通用规则（容忍「…第三周练数学试题」这类尾缀噪声）
+            zhouLian = matchZhouLian(s);
+            if (zhouLian) return zhouLian;
 
             return s || '未知';
         }
