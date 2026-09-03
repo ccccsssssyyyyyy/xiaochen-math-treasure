@@ -1,0 +1,24 @@
+{
+  "_doc": "题目来源归一——个人题库 Tier 1 映射与学校别名的用户配置文件（模板）。",
+  "_doc_en": "Template for user-supplied canonical map and school aliases used by question source normalization (Tier 1).",
+  "_usage": "复制本文件为 data/source_canonical_map.json 并按需填入本校相关条目；JSON 解析失败或字段缺失时，系统会静默回退到 mathbank/source_normalize.py 内置的通用规则（高考/专题汇编），不会中断入库。",
+  "_note": "本文件只用于展示 JSON 结构。data/source_canonical_map.json 已被 .gitignore 忽略，不会随代码提交。修改后需重启服务才会重新加载。",
+
+  "school_entries": {
+    "_doc": "Key = 原始或已规范写法，Value = 规范终态。校内考试使用规约：{学段} · {考试类型} · {学校} · {学年}。",
+
+    "----- 校内：identity（已结构化）-----": "",
+    "高一上 · 10月月考 · XXX中学 · 2025-2026学年": "高一上 · 10月月考 · XXX中学 · 2025-2026学年",
+
+    "----- 校内：周练裸写式 -----": "",
+    "XXX中学高2025级高一上周练": "高一上 · 周练 · XXX中学 · 2025-2026学年",
+
+    "----- 校内：原始 PDF 文件名 → 结构化 -----": "",
+    "2025-2026学年XXX中学高一（上）月考数学试卷（10月份）": "高一上 · 10月月考 · XXX中学 · 2025-2026学年"
+  },
+
+  "school_aliases": {
+    "_doc": "学校短别名 → 规范名称，应用于周练裸写式结构识别（_match_zhoulian）与 Tier 2 结构兜底。",
+    "XXX": "XXX中学"
+  }
+}

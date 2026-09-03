@@ -26,6 +26,9 @@
 
 > 原项目：<https://github.com/JudgePeach/math-question-bank>
 
+> [!IMPORTANT]
+> **数据库 schema 为本派生私有版本（v4），与上游不兼容。** 本仓库内置迁移仅覆盖 v1→v4（本派生内部演进），不会、也不能把上游 MathBank 的数据库直接迁移过来。请勿将上游 `mathbank.db` 与本派生混用或互相覆盖；如需引入上游题目，请走"题目导出 / 重新导入"链路，而非直接替换数据库文件。相关逻辑见 `mathbank/db_migrations.py`。
+
 ---
 
 ## 相比原项目的变动
@@ -371,3 +374,56 @@ python3 -m scripts.restore <快照.zip> --apply --yes  # 实际恢复（须先�
 
 - 感谢 [JudgePeach](https://github.com/JudgePeach) 开源 [math-question-bank](https://github.com/JudgePeach/math-question-bank)（MathBank），本项目底层能力全部源自该仓库。
 - 感谢各 AI 模型方（DeepSeek、通义千问、GPT / Gemini 等）与 LaTeX 生态（TeX Live / MacTeX / XeLaTeX / TikZ）让本地化数学备课成为可能。
+
+---
+
+## 演示图与题目数据
+
+README 中的界面截图（`docs/images/Clipboard_Screenshot*.png`）来自本工具在用户本地题库上的真实渲染效果，仅用于展示工作台功能。截图中的题目片段与学校名称**均来自本项目作者的个人备课数据**，开源版仓库本身**不包含任何题目数据**（数据库已被 `.gitignore` 忽略）；演示图不构成对相关学校或试卷来源的代理或认可。
+
+---
+
+## 第三方依赖致谢
+
+本项目前端通过 `static/lib/` vendored 了若干第三方库与字体，以实现离线运行（无需 CDN）。完整列表与许可证类型见 [``static/lib/THIRD_PARTY_LICENSES.md`](static/lib/THIRD_PARTY_LICENSES.md)。Python 依赖（`requirements.txt`）通过 PyPI 安装。
+
+其中 **PyMuPDF 1.28+（Python 绑定）** 采用 **GNU AGPL-3.0**，与本项目协议兼容，按其许可证要求归属。
+
+Font Awesome 6 的图标采用 **CC BY 4.0**，使用中已保留「Font Awesome by Fonticons, Inc.」署名；如您在自己的派生中移除 Font Awesome，请相应删除本项目 README 中的对应署名并替换为自己的图标方案。
+
+---
+
+## 开源部署（fork 后首次发布）
+
+如您计划将本派生发布到**自有** GitHub 仓库（请勿直接 push 到 `JudgePeach/math-question-bank`），操作清单：
+
+1. **创建自有仓库**（建议设为 `Private`，调试就绪后再转 `Public`）：在 GitHub 创建一个空仓库，**不要**勾选「Initialize with README」（本仓库已有）。
+2. **改 remote 指向**：
+   ```bash
+   git remote set-url origin https://github.com/<your-name>/<your-repo>.git
+   git remote -v   # 确认 origin 已切换
+   ```
+3. **首次 push**：
+   ```bash
+   git push -u origin main
+   ```
+4. **AGPL-3.0 合规提醒**（仅当您将本工具部署为**对他人开放的公共服务**时触发）：
+   - AGPL-3.0 §13 要求「网络部署须向使用者提供完整对应源码」。本项目定位为本地单机工具（端口 8000、单用户），§13 一般**不触发**；
+   - 若您确需提供公共服务部署，应在服务页面给出源码获取链接（指向您的公开仓库）。
+5. **个人化数据归属**：
+   - 您的真实题库数据库与上传文件均已被 `.gitignore` 忽略，**不会**被 push；
+   - 个人题库的来源映射（学校、考试名等）放在 `data/source_canonical_map.json`（已在 `.gitignore` 内），按 `source_canonical_map.example.json` 模板填入；
+   - API 密钥放在未跟踪的 `.env`（600 权限）。
+
+如您希望本派生长期保持与上游 `JudgePeach/math-question-bank` 的同步，建议保留现有 `JudgePeach/math-question-bank` 作为第二个 remote（`upstream`），仅拉取不推送：
+```bash
+git remote add upstream https://github.com/JudgePeach/math-question-bank.git
+git fetch upstream
+git merge upstream/main   # 手动整合上游更新
+```
+
+---
+
+## 致开发者
+
+如您基于本派生继续开发，欢迎把改进回推上游 `JudgePeach/math-question-bank`（原始作者维护），或在自己的 fork 中独立演进。本项目的 4 块核心定制（拆卷进度条、AI 自动归一、选择题选项包裹、来源命名规约）均设计为可移植到上游，亦欢迎上游集成。

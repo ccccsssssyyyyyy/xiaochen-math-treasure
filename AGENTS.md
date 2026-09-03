@@ -64,6 +64,7 @@
   - 草稿统一存放在 LocalStorage 键 `mathbank_local_drafts`。离开未保存 Dirty 页面时提供“存入本地库/暂存草稿/离开/返回”决策流，入库后自动从草稿箱移除。
 - **题库列表分页契约**：`GET /api/questions` 不传 `page` 时保留历史数组响应；传入 `page` 后返回 `{items,total,page,page_size,total_pages}`，`page_size` 限制为 1–100，`sort` 仅支持 `asc` / `desc` 语义。侧栏必须使用分页响应，并以 `AbortController` 和请求序号保证最后一次请求胜出。
 - **数据库一致性与迁移**：SQLite 连接必须启用外键、`busy_timeout` 与经验证的 WAL；当前结构版本写入 `PRAGMA user_version`。任何结构迁移必须先生成独立、通过完整性检查且带 SHA-256 的快照，再在单事务中修复并迁移；未来版本数据库必须在任何建表、加列或建索引前拒绝启动。题目及关系写入应以一次数据库事务为成功边界，文件清理和 JSON 同步属于提交后的补偿操作，不得把已提交写入误报为失败。
+- **Fork 版本线偏移（v4 → v1004）**：本 fork 的 ``LATEST_SCHEMA_VERSION`` 偏移到 ``1000 + 上游版本号``（当前 ``1004``）以避免与上游 `JudgePeach/math-question-bank` 数据库互换时的版本号冲突。fork 库看到上游 ``v8`` 库会走到 ``raise RuntimeError("未实现从版本 8 到 1004 的迁移")``（明确报错，不会静默损坏数据）；fork 库看到 ``v1008+`` 库会走到 ``raise RuntimeError("数据库版本高于程序支持版本")``。下次新增迁移须在 ``elif current == 1004`` 处续接，版本号继续 ``+1``。
 
 ### 3.2 解答与解析模块
 - **多途径解析汇总**：解答区包含手动输入、AI 智能生成（关联 OCR 上下文与引导指令）、OCR 识图、教师点评 (`review`) 与自定义标签 (`tags`) 5 个 Tab，统一汇总至编辑框。

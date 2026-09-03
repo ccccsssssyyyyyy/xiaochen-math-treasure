@@ -15,6 +15,9 @@
 *.failed_attempt
 *.log
 
+# 2.x 运行时数据目录（server.log、上传的试卷/插图，可能含学生数据，禁止入库）
+data/
+
 # 3. 忽略本地备份目录下的所有数据备份与导出只读题库
 # 但通过排除 .gitkeep，使得 data_backup 目录结构可以被提交到 GitHub 上
 data_backup/*
@@ -99,3 +102,8 @@ cleanup_report.txt
 # 14. 忽略批量分类脚本产出的审阅清单（调试/对账用，不入库）
 classify_uncategorized_report.csv
 classify_uncategorized_ai_report.csv
+
+# 15. 忽略 Node 依赖与锁文件（tools/ 前端回归测试用，由 npm install 生成）
+node_modules/
+package-lock.json
+
