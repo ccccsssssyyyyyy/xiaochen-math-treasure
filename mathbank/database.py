@@ -103,6 +103,10 @@ def normalize_question_content(content: str) -> str:
     if not content or not isinstance(content, str):
         return ""
     text = content
+    # 剥离图片 markdown（![alt](url)）：OCR 每次导入都会随机生成 uuid/hash，
+    # 若不剔除会污染指纹，使带图题目二次入库时漏报重复（指纹被随机串稀释，
+    # 相似度被拉低到 0.92 阈值以下）。归一化只比数学文本，图片引用不参与。
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
     # 去掉开头的题号（如 "1." "（1）" "一、" "1、" 等）
     text = re.sub(r"^\s*[\d一二三四五六七八九十]+[\.、\)）\s]+", "", text)
     text = re.sub(r"^\s*\([\d]+\)\s*", "", text)

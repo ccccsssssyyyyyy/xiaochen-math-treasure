@@ -18,7 +18,7 @@ from sqlalchemy.engine import Engine
 from mathbank.paths import SCHEMA_SNAPSHOT_DIR
 
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 REQUIRED_TABLES = {"questions", "question_curriculums", "papers", "paper_questions"}
 
 
@@ -246,7 +246,9 @@ def _rebuild_relationship_tables(engine: Engine) -> dict[str, int]:
             if violations:
                 raise RuntimeError(f"迁移后仍存在外键异常: {violations[:5]}")
 
-            connection.exec_driver_sql(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")
+            # v3 步骤只负责把结构升级到 v3（含 content_fingerprint 列 + 首次回填）。
+            # 注意：此处固定落到 3，不再跟随 LATEST，否则会跳过后续的 v4 步骤。
+            connection.exec_driver_sql("PRAGMA user_version=3")
             connection.exec_driver_sql("COMMIT")
             transaction_started = False
             stats = {
@@ -262,6 +264,41 @@ def _rebuild_relationship_tables(engine: Engine) -> dict[str, int]:
             enabled = int(connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one())
             if enabled != 1:
                 raise RuntimeError("迁移连接未能恢复 SQLite 外键检查")
+    return stats
+
+
+def _recompute_fingerprints_v4(engine: Engine) -> dict[str, int]:
+    """v4: 用修正后的 normalize_question_content 重算全部 content_fingerprint。
+
+    修正点：归一化时剥离图片 markdown（![...](...)），避免 OCR 生成的随机
+    uuid/hash 污染指纹，导致带图题目二次入库漏报重复。存量数据必须整表重算，
+    否则旧行仍带图片 uuid，与同题的新行对不齐、依旧漏报。
+
+    本步骤只更新 questions.content_fingerprint，不触碰结构与其他表，因此无需
+    关闭外键检查；仍沿用 AUTOCOMMIT + 显式 BEGIN IMMEDIATE 的事务边界以保证原子性。
+    """
+
+    from mathbank.database import normalize_question_content
+
+    stats: dict[str, int] = {"recomputed_fingerprints": 0}
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            rows = connection.exec_driver_sql(
+                "SELECT id, content FROM questions"
+            ).fetchall()
+            for _qid, _qcontent in rows:
+                _fp = normalize_question_content(_qcontent or "")
+                connection.exec_driver_sql(
+                    "UPDATE questions SET content_fingerprint = ? WHERE id = ?",
+                    (_fp, _qid),
+                )
+            stats["recomputed_fingerprints"] = len(rows)
+            connection.exec_driver_sql("PRAGMA user_version=4")
+            connection.exec_driver_sql("COMMIT")
+        except Exception:
+            connection.exec_driver_sql("ROLLBACK")
+            raise
     return stats
 
 
@@ -291,12 +328,28 @@ def migrate_database(
         missing = ", ".join(sorted(REQUIRED_TABLES - table_names))
         raise RuntimeError(f"数据库结构不完整，缺少必要数据表: {missing}")
 
+    original_version = current
     backup = pre_migration_backup or create_pre_migration_backup(
         engine, from_version=current, to_version=LATEST_SCHEMA_VERSION
     )
-    stats = _rebuild_relationship_tables(engine)
+    # 按版本号逐步升级：每个步骤只负责把结构推进到自己的目标版本，
+    # 避免一次性大事务把 v3 关系重建与 v4 指纹重算耦合，也便于失败回滚定位。
+    stats: dict[str, object] = {}
+    while current < LATEST_SCHEMA_VERSION:
+        if current < 3:
+            # v3：关系表重建 + content_fingerprint 列与首次回填（落 user_version=3）
+            step_stats = _rebuild_relationship_tables(engine)
+            current = 3
+        elif current == 3:
+            # v4：用修正后的归一化规则整表重算指纹（落 user_version=4）
+            step_stats = _recompute_fingerprints_v4(engine)
+            current = 4
+        else:
+            break
+        if step_stats:
+            stats.update(step_stats)
     return {
-        "from_version": current,
+        "from_version": original_version,
         "to_version": LATEST_SCHEMA_VERSION,
         "backup": str(backup) if backup else None,
         **stats,
