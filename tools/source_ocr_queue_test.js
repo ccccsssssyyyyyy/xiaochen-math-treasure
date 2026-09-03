@@ -6,7 +6,7 @@ const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const code = fs.readFileSync(path.join(ROOT, 'static/js/ocr.js'), 'utf8');
 
 function makeEl(id) {

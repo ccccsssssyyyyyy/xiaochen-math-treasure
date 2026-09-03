@@ -9,7 +9,7 @@ import sys
 import urllib.request
 import urllib.error
 
-ROOT = "/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = open(os.path.join(ROOT, ".system_generated", "local_token")).read().strip()
 BASE = "http://127.0.0.1:8000"
 

@@ -3,9 +3,9 @@
 //      (3) 调用 __forceReparseByName 可强制重新拆解被跳过的文件。
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'static/index.html'), 'utf8');
 const fileNames = ['api', 'editor', 'ocr', 'import', 'paper'];
 const codes = fileNames.map(n => fs.readFileSync(path.join(ROOT, 'static/js', `${n}.js`), 'utf8'));

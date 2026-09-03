@@ -2,9 +2,9 @@
 // 复用 multifile_test_pdf.js 的 jsdom 引导结构，直接驱动真实渲染与筛选函数。
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'static/index.html'), 'utf8');
 const fileNames = ['api', 'editor', 'ocr', 'import', 'paper'];
 const codes = fileNames.map(n => fs.readFileSync(path.join(ROOT, 'static/js', `${n}.js`), 'utf8'));

@@ -1,7 +1,7 @@
 // 验证 paper.js 中「已选试题」tab 的下移按钮不再引用未定义的 displayList
 const fs = require('fs');
 
-const code = fs.readFileSync('/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank/static/js/paper.js', 'utf8');
+const code = fs.readFileSync(ROOT + '/static/js/paper.js', 'utf8');
 
 // 1. 语法校验（node --check 已通过，这里二次确认）
 new Function(code);

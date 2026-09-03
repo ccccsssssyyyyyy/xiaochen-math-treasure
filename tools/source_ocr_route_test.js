@@ -6,7 +6,7 @@ const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const code = fs.readFileSync(path.join(ROOT, 'static/js/ocr.js'), 'utf8');
 
 function makeEl(id) {
@@ -77,7 +77,6 @@ const file2 = { type: 'image/png', name: 'q2.png' };
 sandbox.window.runContentOcrBatch([file1, file2]).then(() => {
   const content = getEl('editContent').value;
   const answer = getEl('editAnswerMarkdown').value;
-  console.log('DEBUG content=[' + content + '] answer=[' + answer + ']');
   assert(content === '题干部分', '第一张图的题干部分只进题干栏');
   assert(answer.includes('【答案】答案部分'), '第一张图的答案部分进答案栏');
   assert(answer.includes('后续解析正文'), '第二张图（forceAnswer）追加到答案栏');

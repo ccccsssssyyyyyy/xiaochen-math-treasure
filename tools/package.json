@@ -1,0 +1,12 @@
+{
+  "name": "mathbank-tools-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "jsdom-based regression fixtures for the math question bank frontend.",
+  "scripts": {
+    "test": "node multifile_test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

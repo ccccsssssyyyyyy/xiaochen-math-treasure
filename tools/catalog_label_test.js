@@ -2,9 +2,9 @@
 // 验证：多文件时标签为「（中文文件序号）题型缩写+文件内连续序号」，单文件无括弧。
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'static/index.html'), 'utf8');
 const fileNames = ['api', 'editor', 'ocr', 'import', 'paper'];
 const codes = fileNames.map(n => fs.readFileSync(path.join(ROOT, 'static/js', `${n}.js`), 'utf8'));

@@ -2,9 +2,9 @@
 // 策略：在渲染函数定义后注入导出钩子，用 jsdom window.eval 在真实 window 上下文执行 paper.js
 // 测量"丝滑度"代理指标：DOM 节点数是否随题库规模恒定、KaTeX 是否只渲染可视区、滚动重渲染是否恒定。
 const fs = require('fs');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const PAPER_JS = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank/static/js/paper.js';
+const PAPER_JS = ROOT + '/static/js/paper.js';
 let code = fs.readFileSync(PAPER_JS, 'utf8');
 
 // 在"题目详情弹窗"注释前插入导出钩子（此时渲染函数与常量已定义，初始化代码尚未执行）

@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const editorSrc = fs.readFileSync(path.join(ROOT, 'static/js', 'editor.js'), 'utf8');
 
 const noop = function () {};

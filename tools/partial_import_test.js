@@ -4,9 +4,9 @@
 // 不导入尚未出现的 fileB 的题（题目还没拆解出来）。
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'static/index.html'), 'utf8');
 const fileNames = ['api', 'editor', 'ocr', 'import', 'paper'];
 const codes = fileNames.map(n => fs.readFileSync(path.join(ROOT, 'static/js', `${n}.js`), 'utf8'));

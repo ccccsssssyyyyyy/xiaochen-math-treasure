@@ -1,6 +1,6 @@
 """Unit tests for parse_related_curriculums (融合题多章节校验/归一化)."""
 import sys, os
-sys.path.insert(0, "/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 让 main 的 IS_TESTING 守卫跳过运行时锁（服务正在运行）
 sys.argv.insert(0, "pytest")
 from main import parse_related_curriculums

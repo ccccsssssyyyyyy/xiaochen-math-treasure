@@ -6,9 +6,9 @@
 // 修复：方案A 给 requestBackupSnapshot 补 related_curriculums；方案B 让 backupEditorState 在 requestSnapshot 分支 merge 默认字段。
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('/Users/ccsssy/.workbuddy/binaries/node/workspace/node_modules/jsdom');
+const { JSDOM } = require('jsdom');
 
-const ROOT = '/Users/ccsssy/WorkBuddy/2026-08-24-00-26-36/math-question-bank';
+const ROOT = require('path').resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(ROOT, 'static/index.html'), 'utf8');
 const fileNames = ['api', 'editor', 'ocr', 'import', 'paper'];
 const codes = fileNames.map(n => fs.readFileSync(path.join(ROOT, 'static/js', `${n}.js`), 'utf8'));
