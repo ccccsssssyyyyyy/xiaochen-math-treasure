@@ -203,5 +203,64 @@ def test_recover_skips_when_stem_too_short_to_locate():
     assert "\\begin{choices}" not in questions[0]["content"]
 
 
+# ---------- 2026-09-04 代码审查 A2 修复回归（extract_options 内层循环 break） ----------
+
+def test_extract_options_breaks_on_non_contiguous_letter():
+    """字母链断裂（A-B 后跳过 C 直奔 D，再回头出现 C）→ 立即 break。
+
+    修复前：内层 continue 让循环跳过 D（不匹配 expected=C）继续向后找，
+    撞上「A,B,D,C」结构中的真正 C → run=[A,B,C]（错的，C 是真正字母却被「接回」）
+    修复后：第一次不连续（D≠expected C）就 break，run=[A,B]
+
+    关键断言：labels 仅含 A、B，**不含 C/D**（与修复前的本质差异）。
+    """
+    block = (
+        "A. 选项甲\n"
+        "B. 选项乙\n"
+        "D. 选项丁（被错误排在 C 之前）\n"
+        "C. 选项丙\n"
+    )
+    result = extract_options(block)
+    labels = [letter for letter, _ in result]
+    assert labels == ["A", "B"], (
+        f"字母链断裂后只到 B，实际产出 labels={labels}（修复前会是 [A,B,C]）"
+    )
+    assert "C" not in labels and "D" not in labels
+
+
+def test_extract_options_does_not_bridge_past_interfering_same_letter():
+    """同字母干扰：A,B,C干扰,C真,D。
+
+    修复前：run=[A,B,C干扰,D]（跳过真 C，把 D 错连上去）
+    修复后：run=[A,B,C干扰]（含干扰 C，但不再错连 D）
+    关键验证：修复后产出的字母集合里 **不应包含 D**，这是与修复前的本质差异。
+    """
+    block = (
+        "A. 选项甲\n"
+        "B. 选项乙\n"
+        "C. 干扰行（也是 C 字母）\n"
+        "C. 选项丙的真正内容\n"
+        "D. 选项丁\n"
+    )
+    result = extract_options(block)
+    labels = [letter for letter, _ in result]
+    assert "D" not in labels, f"修复后 D 不应被错连，实际产出 {result}"
+    # A、B 应在；C 可能在（干扰 C 仍匹配 _OPTION_LINE），关键是 D 被隔离
+    assert "A" in labels and "B" in labels
+
+
+def test_extract_options_normal_abcd_unchanged():
+    """回归保护：正常连续 ABCD 仍然返回全部 4 项。"""
+    block = (
+        "A. 选项甲\n"
+        "B. 选项乙\n"
+        "C. 选项丙\n"
+        "D. 选项丁\n"
+    )
+    result = extract_options(block)
+    labels = [letter for letter, _ in result]
+    assert labels == ["A", "B", "C", "D"], f"正常 ABCD 应全收，实际产出 {result}"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

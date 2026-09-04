@@ -101,6 +101,12 @@ def extract_options(block_text: str, min_options: int = DEFAULT_MIN_OPTIONS):
 
     只接受「A 开头且字母连续递增」的最长一段（A,B,C,D / A,B,C），
     避免把题干中孤立的 ``A.`` 误当成选项。
+
+    字母连续性严格要求：内层循环首次遇到非预期字母即 ``break``。
+    修复前 ``continue`` 会跨过无关行继续向后找「恰好等于期望字母」的项，
+    导致干扰行（如同字母的「C. 干扰」 + 「C. 真选项」 + 「D. 真正丁」）
+    被错误拼成 A,B,C干扰,D —— 真 C 被丢弃、D 被错连。修复后 ``break``
+    保证字母链一旦断裂就停止拼接，符合模块「宁可跳过，绝不误补」原则。
     """
     if not block_text:
         return []
@@ -118,6 +124,9 @@ def extract_options(block_text: str, min_options: int = DEFAULT_MIN_OPTIONS):
             if ord(nxt.group(1).upper()) == expected:
                 run.append(nxt)
                 expected += 1
+            else:
+                # 字母链断裂，停止向后拼接；与「宁可跳过绝不误补」原则一致
+                break
         if len(run) > len(best_run):
             best_run = run
 
