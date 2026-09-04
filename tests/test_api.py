@@ -560,21 +560,24 @@ def test_figure_align_api(client):
 def test_version_and_update_check_api(client):
     from unittest.mock import patch, MagicMock
     from main import parse_version_tuple
-    
+    import mathbank
+
     # 1. Test version tuple parser
     assert parse_version_tuple("v2.0.1") == (2, 0, 1)
     assert parse_version_tuple("2.1.0-beta") == (2, 1, 0)
     assert parse_version_tuple("V3") == (3, 0, 0)
     assert parse_version_tuple("v2.1.0") > parse_version_tuple("2.0.1")
-    
-    # 2. Test GET /api/version
+
+    # 2. Test GET /api/version —— repo 字段跟随当前 GITHUB_REPO 常量（不再硬编码上游名）
     res_ver = client.get("/api/version")
     assert res_ver.status_code == 200
     data_ver = res_ver.json()
     assert "current_version" in data_ver
-    assert data_ver["repo"] == "JudgePeach/math-question-bank"
+    assert data_ver["repo"] == mathbank.GITHUB_REPO
 
     # 3. Test GET /api/version/check-update with mocked GitHub response
+    # 当前默认是 fork（localfork/...），会在请求前短路返回；这里临时把 repo 改成上游名
+    # 模拟「未 fork 的纯净上游场景」，确保上游发布解析、版本比较、资源映射都仍工作。
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
@@ -598,14 +601,45 @@ def test_version_and_update_check_api(client):
             }
         ]
     }
-    
-    with patch("mathbank.ai_http.requests.get", return_value=mock_resp):
-        res_update = client.get("/api/version/check-update")
-        assert res_update.status_code == 200
-        data_update = res_update.json()
-        assert data_update["status"] == "success"
-        assert data_update["has_update"] is True
-        assert data_update["latest_version"] == "v9.9.9"
-        assert "macOS" in data_update["assets"]
-        assert "Windows" in data_update["assets"]
-        assert data_update["assets"]["macOS"]["size_mb"] == 10.0
+
+    original_repo = mathbank.GITHUB_REPO
+    mathbank.GITHUB_REPO = "JudgePeach/math-question-bank"
+    try:
+        with patch("mathbank.ai_http.requests.get", return_value=mock_resp):
+            res_update = client.get("/api/version/check-update")
+            assert res_update.status_code == 200
+            data_update = res_update.json()
+            assert data_update["status"] == "success"
+            assert data_update["has_update"] is True
+            assert data_update["latest_version"] == "v9.9.9"
+            assert "macOS" in data_update["assets"]
+            assert "Windows" in data_update["assets"]
+            assert data_update["assets"]["macOS"]["size_mb"] == 10.0
+    finally:
+        mathbank.GITHUB_REPO = original_repo
+
+
+def test_check_update_short_circuits_on_localfork(client):
+    """本地 fork（GITHUB_REPO 以 `localfork/` 开头）→ 不向上游发请求，直接返回 info。
+
+    防止 UI 推荐上游覆盖升级清空本地所有定制。
+    """
+    from unittest.mock import patch
+    import mathbank
+
+    # 断言当前常量就是 fork 占位（避免上游误改后本测试失去意义）
+    assert mathbank.GITHUB_REPO.startswith("localfork/")
+
+    # 用 side_effect 触发即抛异常：若真去请求，本测试会捕获到 RuntimeError
+    def _explode(*args, **kwargs):
+        raise AssertionError(
+            "check_version_update should NOT call requests.get when GITHUB_REPO is a localfork placeholder"
+        )
+
+    with patch("mathbank.ai_http.requests.get", side_effect=_explode):
+        res = client.get("/api/version/check-update")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "info"
+        assert "本地定制派生" in data["message"]
+        assert data["has_update"] is False

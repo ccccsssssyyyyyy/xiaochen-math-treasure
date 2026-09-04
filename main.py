@@ -1578,10 +1578,10 @@ def check_version_update():
     """Check for latest release on GitHub."""
     from mathbank import __version__, GITHUB_REPO
     from mathbank.ai_http import robust_request_get
-    
+
     is_git_repo = (PROJECT_ROOT / ".git").exists()
     current_ver = __version__
-    
+
     result = {
         "status": "success",
         "current_version": current_ver,
@@ -1594,7 +1594,14 @@ def check_version_update():
         "assets": {},
         "is_git_repo": is_git_repo
     }
-    
+
+    # 本地定制 fork（GITHUB_REPO 仍是 `localfork/...` 占位）→ 不向上游查询更新。
+    # 防止 UI 推荐上游覆盖升级清空本地所有定制，并避免在 GitHub API 留下无效查询日志。
+    if GITHUB_REPO.startswith("localfork/"):
+        result["status"] = "info"
+        result["message"] = "当前为本地定制派生，更新检查已禁用。"
+        return result
+
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         headers = {
