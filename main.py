@@ -3832,6 +3832,14 @@ def detect_separated_mode(text: str) -> bool:
     零 token 成本：仅在拆题前对后端已提取出的文本跑一次正则。
     命中条件：答案区锚点明显靠后（>=60% 位置）、前半段几乎无锚点、
     且每题内联答案占比低（避免把「边讲边练」误判为分离）。
+
+    注意：``q_count`` 只统计答案区锚点之前的题号。若统计全文，会把答案区里
+    重写的「1. / 2. / ...」也计入，稀释 inline_ratio，让讲义型文档
+    （每题内联解析 + 末尾参考答案）被误判为分离结构。
+
+    阈值 1.0：``inline_ratio < 1.0`` 才判分离。即「答案区前每题都内联解析」
+    （覆盖率 = 100%）就视为讲义而非分离卷 —— 比 1.2 更严格，确保
+    q_count=10、inline=10 的典型讲义不会被误判。
     """
     t = text or ""
     n = max(1, len(t))
@@ -3841,11 +3849,15 @@ def detect_separated_mode(text: str) -> bool:
     last_pos = max(p for p, _ in hits)
     head_hits = sum(1 for p, _ in hits if p < 0.55)
     inline = len(_INLINE_ANSWER.findall(t))
+    boundary = max(1, int(last_pos * n))
     q_count = len(
-        re.findall(r"(?m)^\s*(?:\\item\s+)?(?:\d{1,3}|[一二三四五六七八九十]+)[．.、]", t)
+        re.findall(
+            r"(?m)^\s*(?:\\item\s+)?(?:\d{1,3}|[一二三四五六七八九十]+)[．.、]",
+            t[:boundary],
+        )
     )
     inline_ratio = (inline / q_count) if q_count else 0.0
-    return last_pos >= 0.6 and head_hits <= 2 and inline_ratio < 1.2
+    return last_pos >= 0.6 and head_hits <= 2 and inline_ratio < 1.0
 
 
 def parse_paper_text_internal(
