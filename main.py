@@ -2151,6 +2151,49 @@ def list_questions(
     seq_map = get_seq_mapping(db, [item.id for item in questions])
     return [{**item.to_summary_dict(), "seq_num": seq_map.get(item.id)} for item in questions]
 
+
+@app.get("/api/knowledge-stats")
+def knowledge_stats(
+    compulsory: Optional[str] = None,
+    chapter: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """按「必修 + 章节」过滤，返回 ``{category_knowledge: count}`` 字典。
+
+    服务端 ``GROUP BY category_knowledge`` 直接聚合，前端不再拉整章题目的完整
+    LaTeX 题干/图片路径再客户端 forEach 统计（实测最大章节 228.8 KB vs 聚合
+    后 0.68 KB，约 339× 传输浪费）。
+
+    章节过滤与 ``list_questions`` 一致：主分类或关联章节(related_curriculums
+    JSON)命中即统计，融合题不漏算。
+    """
+    from sqlalchemy import func
+
+    query = db.query(
+        Question.category_knowledge.label("knowledge"),
+        func.count(Question.id).label("count"),
+    )
+    if compulsory:
+        query = query.filter(Question.category_compulsory == compulsory)
+    if chapter:
+        query = query.filter(
+            or_(
+                Question.category_chapter == chapter,
+                text(
+                    "EXISTS (SELECT 1 FROM json_each(COALESCE(related_curriculums, '[]')) "
+                    "WHERE json_extract(value, '$.chapter') = :chap)"
+                ).bindparams(chap=chapter),
+            )
+        )
+    rows = query.group_by(Question.category_knowledge).all()
+    # 库内 category_knowledge 默认 ""，与 list_questions 行为对齐：空值统一显示为「未细分知识点」
+    result: dict = {}
+    for knowledge, count in rows:
+        key = knowledge if knowledge else "未细分知识点"
+        result[key] = result.get(key, 0) + count
+    return result
+
+
 @app.get("/api/questions/{question_id}")
 def get_question(question_id: int, db: Session = Depends(get_db)):
     q = db.query(Question).filter(Question.id == question_id).first()
