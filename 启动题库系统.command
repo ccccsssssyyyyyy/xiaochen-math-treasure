@@ -261,6 +261,15 @@ if [ "$NEEDS_DEPENDENCY_INSTALL" -eq 1 ]; then
         fail "无法原子更新依赖锁摘要。"
 fi
 
+# === 配置 macOS LibreOffice 中文字体 fallback（数学宝藏项目）===
+# 主路径仍是项目独立 profile（.system_generated/libreoffice-profile/），
+# 这里只兜底用户绕过 main.py 直接调 soffice 的场景；幂等：含标记则跳过。
+echo "正在配置 macOS LibreOffice 中文字体 fallback（全局兜底）..."
+"$PYTHON_BIN" -B -c "
+from mathbank.headless_libreoffice_profile import install_global_libreoffice_fallback
+install_global_libreoffice_fallback()
+" || echo "⚠️ 字体 fallback 全局兜底写入失败（非致命，可手动配置）。"
+
 PORT_PIDS=$(listener_pids)
 if [ -n "$PORT_PIDS" ]; then
     fail "端口 8000 在启动前再次被占用 (PID: $(echo "$PORT_PIDS" | tr '\n' ' '))；请重试。"

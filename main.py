@@ -118,6 +118,10 @@ from mathbank.question_types import (
 from mathbank.latex_normalize import normalize_choice_options_to_latex
 from mathbank.choice_recovery import recover_missing_choices
 from mathbank.source_normalize import normalize_source, CANONICAL_MAP, SCHOOL_ALIASES
+from mathbank.headless_libreoffice_profile import (
+    build_soffice_command as _build_soffice_command,
+    find_soffice as _find_soffice,
+)
 import shutil
 from mathbank.pdf_inspector_helper import (
     is_pdf_inspector_available,
@@ -3860,10 +3864,13 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
 # 旧版靠前端「题目与解析分离」开关手动指定；现改为后端在拆题前对提取文本跑一次
 # 本地启发式，自动判断是否「题干区在前、解析区在后」结构，从而去掉该按钮。
 # ---------------------------------------------------------------------------
+# 裸锚点「解析」必须排除数学专有名词，否则「解析式 / 解析几何 / 解析法」会被
+# 当成答案区标题。这类词在函数、圆锥曲线题的题干里极常见（实测成都七中高一期中
+# 卷题干出现 2 次「解析式」，直接把 head_hits 从 2 顶到 3 导致漏判）。
 _ANSWER_ZONE_ANCHORS = re.compile(
     r"(参考答案|答案与解析|答案解析|答案与评分标准|参考答案与评分细则|"
     r"试题解析|详解与答案|参考答案及解析|答案部分|解答部分|"
-    r"【答案】|【解析】|参\s*考\s*答\s*案|解\s*析)",
+    r"【答案】|【解析】|参\s*考\s*答\s*案|解\s*析(?!式|几何|法))",
     re.MULTILINE,
 )
 _INLINE_ANSWER = re.compile(r"(【答案】|【解析】|解\s*[：:]|答案\s*[：:]|证明\s*[：:])")
@@ -3873,34 +3880,52 @@ def detect_separated_mode(text: str) -> bool:
     """本地启发式判断文档是否为「题干在前、解析在后」的分离结构。
 
     零 token 成本：仅在拆题前对后端已提取出的文本跑一次正则。
-    命中条件：答案区锚点明显靠后（>=60% 位置）、前半段几乎无锚点、
-    且每题内联答案占比低（避免把「边讲边练」误判为分离）。
 
-    注意：``q_count`` 只统计答案区锚点之前的题号。若统计全文，会把答案区里
-    重写的「1. / 2. / ...」也计入，稀释 inline_ratio，让讲义型文档
-    （每题内联解析 + 末尾参考答案）被误判为分离结构。
+    判定思路：**答案区起点**定位 + 起点之前的内联解析覆盖率。
+    命中条件：首个答案区锚点落在 15%~90%（前面有实质题干区、后面不是只剩页脚），
+    且该起点之前「每题内联答案占比」< 1.0（题干区本身不带解析）。
 
-    阈值 1.0：``inline_ratio < 1.0`` 才判分离。即「答案区前每题都内联解析」
-    （覆盖率 = 100%）就视为讲义而非分离卷 —— 比 1.2 更严格，确保
-    q_count=10、inline=10 的典型讲义不会被误判。
+    ---- 为什么用「首个锚点」而不是「最后一个锚点」----
+
+    旧实现用 ``last_pos >= 0.6``，隐含假设「答案区位于文档后 40%」。这条假设在
+    菁优网 / 学科网式试卷上系统性失效：这类卷子的详解区往往**比题干区还长**
+    （实测成都七中高一期中卷：题干区 29.4%、答案区 70.6%，含 19 个【解答】块）。
+
+    更糟的是旧实现还被页脚噪声「救活」——该卷唯一的靠后锚点是页脚
+    「声明：试题解析著作权属菁优网所有」(98%)。一旦换一份没有这行版权声明的
+    卷子，``last_pos`` 掉到 0.30，判定立刻翻车。所以边界必须取**答案区起点**。
+
+    ---- 为什么 ``inline`` 也要限定在边界之前 ----
+
+    ``inline_ratio`` 的语义是「题干区里有多少题自带解析」，分子分母必须是同一
+    范围。旧实现 ``inline`` 全文统计（把答案区的【解答】解：全部算进分子），
+    ``q_count`` 却只算边界之前 —— 分子分母范围不一致，实测把该卷 ratio 从
+    0.10 抬到 1.20，直接越过 1.0 阈值。
+
+    阈值 1.0：``inline_ratio < 1.0`` 才判分离。即「边界前每题都内联解析」
+    （覆盖率 = 100%）就视为讲义而非分离卷。
     """
     t = text or ""
     n = max(1, len(t))
     hits = [(m.start() / n, m.group(0)) for m in _ANSWER_ZONE_ANCHORS.finditer(t)]
     if not hits:
         return False
-    last_pos = max(p for p, _ in hits)
-    head_hits = sum(1 for p, _ in hits if p < 0.55)
-    inline = len(_INLINE_ANSWER.findall(t))
-    boundary = max(1, int(last_pos * n))
+    # 答案区起点 = 首个锚点位置（而非最后一个，理由见 docstring）
+    answer_start = min(p for p, _ in hits)
+    boundary = max(1, int(answer_start * n))
+    head = t[:boundary]
+    # 分子分母同范围：都只统计答案区起点之前
+    inline = len(_INLINE_ANSWER.findall(head))
     q_count = len(
         re.findall(
             r"(?m)^\s*(?:\\item\s+)?(?:\d{1,3}|[一二三四五六七八九十]+)[．.、]",
-            t[:boundary],
+            head,
         )
     )
     inline_ratio = (inline / q_count) if q_count else 0.0
-    return last_pos >= 0.6 and head_hits <= 2 and inline_ratio < 1.0
+    # 下界 0.15：前面必须有成规模的题干区，排除「答案区在开头」的误判
+    # 上界 0.90：锚点不能只是文末页脚，后面得留得下真正的解析内容
+    return 0.15 <= answer_start <= 0.90 and inline_ratio < 1.0
 
 
 def parse_paper_text_internal(
@@ -5606,24 +5631,6 @@ if not IS_TESTING:
     DOCUMENT_TASKS.start_maintenance(interval_seconds=60.0)
 
 
-def _find_soffice() -> str:
-    """定位 LibreOffice 的 soffice 可执行文件；未安装则返回空字符串。"""
-    candidates = [
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-        "/opt/homebrew/bin/soffice",
-        "/usr/local/bin/soffice",
-        "/usr/bin/soffice",
-        # Windows 默认安装路径（与 pandoc 的 Windows 探测对称处理）
-        r"C:\Program Files\LibreOffice\program\soffice.exe",
-        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    import shutil
-    return shutil.which("soffice") or ""
-
-
 def _render_pdf_bytes_to_page_images(pdf_bytes, task_id, temp_assets):
     """把 PDF 字节渲染成逐页 PNG（dpi=250），返回可访问 URL 列表，并追加到 temp_assets。
 
@@ -5821,13 +5828,21 @@ def run_docx_parsing_task(
                 src_docx_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.docx"
                 src_docx_path.write_bytes(file_bytes)
                 try:
+                    # 用 build_soffice_command 拼命令,把 -env:UserInstallation
+                    # 插到参数首位,启用项目独立 LibreOffice profile(其 xcu 内置
+                    # SimSun/SimHei/宋体/黑体/微软雅黑/Arial Unicode MS → STHeiti Medium
+                    # / Hiragino Sans GB 的字体替换表,避免 macOS headless 转 PDF 时
+                    # fallback 到 Arial Unicode MS 字形不全导致原卷预览出现空白)。
                     subprocess.run(
-                        [soffice, "--headless", "--norestore", "--convert-to", "pdf",
-                         "--outdir", TMP_UPLOAD_DIR, str(src_docx_path)],
+                        _build_soffice_command(
+                            soffice,
+                            "--headless", "--norestore", "--convert-to", "pdf",
+                            "--outdir", TMP_UPLOAD_DIR, str(src_docx_path),
+                        ),
                         capture_output=True, timeout=240,
                     )
                 except subprocess.TimeoutExpired:
-                    diagnostics.setdefault("warnings", []).append("LibreOffice 转换超时，未生成原卷预览图。")
+                    diagnostics.setdefault("warnings", []).append("LibreOffice 转换超时,未生成原卷预览图。")
                 pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.pdf"
                 if pdf_path.exists() and pdf_path.stat().st_size > 0:
                     page_images = _render_pdf_bytes_to_page_images(pdf_path.read_bytes(), task_id, temp_assets)
