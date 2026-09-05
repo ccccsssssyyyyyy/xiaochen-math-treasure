@@ -108,7 +108,7 @@
 - **双轨分流架构与解析策略 (`pdf-inspector`)**：
   - **阶段 0 探测与分流**：PDF 上传后支持选择解析策略（`native_preferred` 原生文字公式提取 vs `force_ocr` 全图视觉 OCR）。
   - **原生电子卷直提 (`native_preferred`)**：`TextBased` 直接毫秒级提取排版与文本流拆题（0 视觉 Token），结合 `_has_math_formula_loss` 自动校验公式完备性。若检测到 Word/MathType 特殊导出卷（公式硬转化为了内联图片导致文本丢公式），系统自动翻转 `needs_ocr = True` 平滑降级至 VLM 识图补全。
-  - **全图视觉转译 (`force_ocr`)**：绕过文本直提，强制将所有页面渲染为 PyMuPDF 150DPI 图像并调用多模态 VLM 进行全图 OCR 识别与转译，兜底应对极端排版复杂或规则失效的试卷。
+  - **全图视觉转译 (`force_ocr`)**：绕过文本直提，强制将所有页面渲染为 PyMuPDF 250DPI 图像并调用多模态 VLM 进行全图 OCR 识别与转译，兜底应对极端排版复杂或规则失效的试卷。（250 DPI 是升级后的定值：页图同时是【手动截图】的裁剪源图，百分比坐标按真实像素换算，调低会直接让裁出的配图变糊。）
   - **逐页可信分流与跨页合并**：按页码提取 Markdown，无需直提的页面单独调用 VLM OCR，页标使用 `<!-- MATHBANK_PDF_PAGE:N -->` 合并且不切断跨页题目。
 - **配图关联**：题目拆解默认不含配图。若原题有插图，由用户点击【手动截图】在 PDF 灯箱中框选，向 `/api/ai/manual-crop-pdf` 发送百分比坐标进行精准裁剪。
 - **有界任务与协作取消**：PDF/Word 导入共用 `mathbank.task_manager.TaskManager`，默认最多 2 个工作任务与 4 个排队任务，PDF 最多 80 页、OCR 并发最多 4。前端轮询 `/api/tasks/{task_id}/status`，点击【中止拆分】或按 `ESC` 调用取消；工作线程必须在阶段转换和付费 AI 调用前检查取消信号。`completed` / `error` / `cancelled` 是不可覆盖终态，取消端点必须复核最终状态，不能把刚完成任务误报为已取消。

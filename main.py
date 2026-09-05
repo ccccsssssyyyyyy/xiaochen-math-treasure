@@ -5209,7 +5209,7 @@ def run_pdf_parsing_task(
                 DOCUMENT_TASKS.check_cancelled(task_id)
                 page = document.load_page(page_num)
                 estimated_pixels = int(
-                    (page.rect.width / 72 * 150) * (page.rect.height / 72 * 150)
+                    (page.rect.width / 72 * 250) * (page.rect.height / 72 * 250)
                 )
                 if estimated_pixels > 30_000_000:
                     raise ValueError(f"第 {page_num + 1} 页尺寸异常，已停止高清渲染。")
@@ -5625,7 +5625,13 @@ def _find_soffice() -> str:
 
 
 def _render_pdf_bytes_to_page_images(pdf_bytes, task_id, temp_assets):
-    """把 PDF 字节渲染成逐页 PNG（dpi=150），返回可访问 URL 列表，并追加到 temp_assets。"""
+    """把 PDF 字节渲染成逐页 PNG（dpi=250），返回可访问 URL 列表，并追加到 temp_assets。
+
+    250 DPI 与 PDF 拆解链路（``_render_pdf_page_images`` 附近的拆题渲染）保持一致：
+    这里的页图同时是【手动截图】的裁剪源图，``/api/ai/manual-crop-pdf`` 收到的是
+    百分比坐标、后端按图片真实像素换算，因此 DPI 直接决定裁出配图的清晰度，
+    不要为了省本地渲染时间把这里调低。
+    """
     import fitz
     page_urls = []
     tmp_pdf_path = Path(TMP_UPLOAD_DIR) / f"{task_id}_preview.pdf"
