@@ -1345,6 +1345,9 @@
                 }
             }
 
+            // 打开弹窗时同步「插入目标」徽标（跟随最后一次聚焦的编辑框）
+            refreshCropInsertTargetBadge();
+
             // Show modal
             const modal = document.getElementById('pdfCropModal');
             modal.classList.remove('hidden');
@@ -1647,17 +1650,21 @@
                     return runOcrOnCroppedImage(croppedUrl, qIdx);
                 }
 
-                // 插图模式：把裁剪图作为插图追加到题干
+                // 插图模式：把裁剪图作为插图追加到「焦点所在」字段（题干/解析）
                 const card = document.getElementById(`parsed-card-${qIdx}`);
+                const target = window.cropInsertTarget === 'answer' ? 'answer' : 'content';
+                const selector = target === 'answer' ? '.card-answer-textarea' : '.card-content-textarea';
                 if (card) {
-                    const textarea = card.querySelector('.card-content-textarea');
+                    const textarea = card.querySelector(selector);
                     if (textarea) {
                         textarea.value = textarea.value.trim() + `\n\n![插图](${croppedUrl})\n\n`;
                         textarea.dispatchEvent(new Event('input'));
                     }
                 }
 
-                showToast("裁剪并生成配图成功！已自动关联至此题卡。");
+                showToast(target === 'answer'
+                    ? "裁剪成功！插图已追加到解析。"
+                    : "裁剪成功！插图已追加到题干。");
                 closePdfCropModal();
                 return null;
             })
@@ -1792,6 +1799,39 @@
         window.setOcrMode = setOcrMode;
         window.getOcrMode = getOcrMode;
         refreshAllOcrModeUI();
+
+        // ==== 裁剪插图目标字段：跟随焦点（点题干框→插题干，点解析框→插解析）====
+        // 不能读 document.activeElement：点「确认截取配图」按钮那一刻焦点已在按钮上，
+        // 必须在 focusin 里提前记住用户最后点击的编辑框。
+        window.cropInsertTarget = 'content'; // 'content'=题干 | 'answer'=解析
+
+        function refreshCropInsertTargetBadge() {
+            const textEl = document.getElementById('pdfCropInsertTargetText');
+            if (textEl) {
+                textEl.textContent = window.cropInsertTarget === 'answer' ? '将插入到：解析' : '将插入到：题干';
+            }
+            const badge = document.getElementById('pdfCropInsertTargetBadge');
+            if (badge) {
+                const isAnswer = window.cropInsertTarget === 'answer';
+                badge.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] whitespace-nowrap transition-colors ' +
+                    (isAnswer
+                        ? 'bg-indigo-500/15 border border-indigo-500/40 text-indigo-300'
+                        : 'bg-slate-800 border border-brand-500/40 text-brand-300');
+            }
+        }
+
+        // 事件委托：卡片是动态渲染的，focusin 会冒泡，能在 document 层捕获
+        document.addEventListener('focusin', (e) => {
+            const t = e.target;
+            if (!t || !t.classList) return;
+            if (t.classList.contains('card-content-textarea')) {
+                window.cropInsertTarget = 'content';
+                refreshCropInsertTargetBadge();
+            } else if (t.classList.contains('card-answer-textarea')) {
+                window.cropInsertTarget = 'answer';
+                refreshCropInsertTargetBadge();
+            }
+        });
 
         function performOrphanedTempCropsCleanup() {
             const tempPaths = [];
@@ -2498,6 +2538,15 @@
 
             // 由拆解完成/失败回调调用，推进队列
             advanceQueueAfterParse = function(success, errorMsg) {
+                // ★ 同一完成事件可能并发触发多次（防御性保险）。
+                // 真正根因在 handleParseTaskCompleted 的 taskId 去重；此处再加一道
+                // 队列推进幂等位，防止 processFileQueue() 被反复启动。
+                if (window.__queueAdvanceInFlight) {
+                    console.log('[队列] advanceQueueAfterParse 已在执行中，丢弃重复调用');
+                    return;
+                }
+                window.__queueAdvanceInFlight = true;
+                try {
                 console.log(`[队列] advanceQueueAfterParse 被调用: success=${success}, error=${errorMsg || '无'}`, {
                     pendingFiles: pendingFiles.map(f => ({ name: f.name, status: f.status })),
                     __currentQueueFile: window.__currentQueueFile ? window.__currentQueueFile.name : null,
@@ -2540,6 +2589,9 @@
                 // 继续处理下一份
                 console.log('[队列] → 调用 processFileQueue() 继续下一份');
                 processFileQueue();
+                } finally {
+                    window.__queueAdvanceInFlight = false;
+                }
             }
 
             // 供 resetImportState 调用：清空整个文件队列与 UI
@@ -3145,6 +3197,11 @@
 
         let documentImportTaskGeneration = 0;
         let activeDocumentPoll = null;
+        // 已处理过的 taskId 集合，防止同一完成回调被多次触发（轮询节奏过密或并发 fetch
+        // 抢占）导致同一份 Word/PDF 被重复 append 到审查列表、把 7 个文件扩成 48 个分组。
+        // 详见 2026-09-06 多文件拆解数量暴增 bug。beginDocumentImportTask() 中按
+        // 新一轮拆解清空，避免长期驻留导致重传/重试被吞。
+        const completedTaskIds = new Set();
 
         function stopCurrentDocumentPoll() {
             if (activeDocumentPoll?.intervalId) clearInterval(activeDocumentPoll.intervalId);
@@ -3155,6 +3212,8 @@
             documentImportTaskGeneration += 1;
             stopCurrentDocumentPoll();
             window.currentPdfTaskId = null;
+            // 新一轮拆解开工：清空已处理 taskId 集合（上一轮的"已完成"任务不再相关）。
+            completedTaskIds.clear();
             return documentImportTaskGeneration;
         }
 
@@ -3219,6 +3278,18 @@
         // 拆解任务成功完成后的统一收尾：灌入审查列表、打印诊断、推进队列。
         // 抽成独立函数，供「轮询到 completed」与「超时判定后的抢救」两条路径复用。
         function handleParseTaskCompleted(task, taskId, identity) {
+            // ★ 多并发完成回调防御：同一 taskId 只处理一次。
+            // 之前 setInterval 漏 delay + 完成回调未做幂等，任务完成后多个并发 fetch
+            // 都会到达这里，导致同一份文件被多次 appendParsedQuestions，
+            // 7 个文件被扩成 48 个分组、1483 道题（详见 2026-09-06 复盘）。
+            // 注意：救援入口 window.__rescueCompletedTask 也复用本函数，仍可正常 append。
+            if (taskId) {
+                if (completedTaskIds.has(taskId)) {
+                    console.log(`[队列] taskId=${taskId} 已处理过，忽略重复完成回调（多并发 fetch 防御）`);
+                    return;
+                }
+                completedTaskIds.add(taskId);
+            }
             console.log('[队列] PDF/Word 任务 completed，开始处理完成回调', { identity, appendMode: window.__currentParseAppendMode });
             if (identity && typeof finishDocumentPoll === 'function' && !finishDocumentPoll(identity)) {
                 console.warn('[队列] ⚠️ finishDocumentPoll 返回 false，generation 可能已过期，但仍尝试推进队列');

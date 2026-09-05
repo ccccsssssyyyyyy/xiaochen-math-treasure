@@ -2035,6 +2035,10 @@
                             <span>提示：在上方 PDF 页面图上按住鼠标左键并拖拽，即可框选题目中的几何插图区域。</span>
                         </div>
                         <div class="flex items-center space-x-3 shrink-0">
+                            <span id="pdfCropInsertTargetBadge" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-brand-500/40 text-brand-300 font-bold text-[11px] whitespace-nowrap transition-colors" title="插图将插入到你最近点击的编辑框（题干或解析）">
+                                <i class="fa-solid fa-location-arrow text-brand-500"></i>
+                                <span id="pdfCropInsertTargetText">将插入到：题干</span>
+                            </span>
                             <button id="pdfCropClearBtn" onclick="clearPdfCropSelection()" class="whitespace-nowrap px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-700 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
                                 <span>清除框选</span>
                             </button>
