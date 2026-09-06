@@ -3906,7 +3906,6 @@
                     <!-- Card Top Configs Bar -->
                     <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 border-b pb-3 shrink-0">
                         <div class="flex items-center space-x-2 select-none text-slate-700 text-xs font-bold">
-                            <input type="checkbox" data-index="${index}" class="card-select-checkbox h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer transition-colors" ${q.saved ? 'disabled opacity-50' : 'checked'} onclick="event.stopPropagation()">
                             <span class="h-5 w-5 bg-brand-50 text-brand-600 rounded-full flex items-center justify-center text-[10px] font-bold border border-brand-100">${index + 1}</span>
                             <span>题型与难度</span>
                         </div>
@@ -4025,6 +4024,15 @@
                                 <span>${q.saved ? '再次导入' : '导入此题'}</span>
                             </button>
                         </div>
+                    </div>
+
+                    <!-- Card Select Footer: 勾选此题以便批量导入（与顶部「已选 X/Y」徽标 + 批量导入按钮同步） -->
+                    <div class="flex items-center justify-between border-t border-slate-100 pt-3 mt-2 shrink-0">
+                        <label class="flex items-center space-x-2 text-[11px] font-bold cursor-pointer select-none ${q.saved ? 'text-slate-400' : 'text-slate-600 hover:text-brand-600'}">
+                            <input type="checkbox" data-index="${index}" class="card-select-checkbox h-5 w-5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer transition-colors" ${q.saved ? 'disabled opacity-50' : 'checked'} onclick="event.stopPropagation()">
+                            <i class="fa-solid fa-check-double text-brand-500 text-[10px]"></i>
+                            <span>${q.saved ? '本题已入库，无需勾选' : '勾选此题加入本次批量导入'}</span>
+                        </label>
                     </div>
                 `;
 

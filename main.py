@@ -5826,13 +5826,22 @@ def run_docx_parsing_task(
                     document_type="docx",
                 )
                 src_docx_path = Path(TMP_UPLOAD_DIR) / f"{task_id}.docx"
-                src_docx_path.write_bytes(file_bytes)
+                # 方案A：把 docx 字体声明归一化为 Arial Unicode MS（macOS 上唯一
+                # 同时覆盖中文+数学符号的字体，详见 mathbank/docx_font_normalizer.py
+                # 顶部表），让 LO 转 PDF 时真正把它嵌入子集，不再退回到 Liberation Sans
+                # 等无 CJK 的 fallback。失败时静默回退原始 docx（主解析流程不受影响，
+                # 仅原卷预览图可能仍含方框）。
                 try:
-                    # 用 build_soffice_command 拼命令,把 -env:UserInstallation
-                    # 插到参数首位,启用项目独立 LibreOffice profile(其 xcu 内置
-                    # SimSun/SimHei/宋体/黑体/微软雅黑/Arial Unicode MS → STHeiti Medium
-                    # / Hiragino Sans GB 的字体替换表,避免 macOS headless 转 PDF 时
-                    # fallback 到 Arial Unicode MS 字形不全导致原卷预览出现空白)。
+                    normalized_docx_bytes = normalize_docx_fonts(file_bytes)
+                except Exception as norm_exc:
+                    diagnostics.setdefault("warnings", []).append(
+                        f"docx 字体归一化失败（已回退原始 docx）: {norm_exc}"
+                    )
+                    normalized_docx_bytes = file_bytes
+                src_docx_path.write_bytes(normalized_docx_bytes)
+                try:
+                    # 注入项目独立 LibreOffice profile（OnScreenOnly 字体替换表，
+                    # 仅影响屏显）；PDF 字形正确性由上方 normalize_docx_fonts 保证。
                     subprocess.run(
                         _build_soffice_command(
                             soffice,
