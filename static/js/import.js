@@ -1385,13 +1385,10 @@
             const container = document.getElementById('pdfPagesThumbnailsContainer');
             container.innerHTML = '';
 
-            console.log('[PDF预览] renderPdfPagesThumbnails 被调用, pdfPageImages 长度:', window.pdfPageImages.length);
-            console.log('[PDF预览] pdfPageImages 内容:', window.pdfPageImages);
-
+                        
             window.pdfPageImages.forEach((url, i) => {
                 const safeUrl = window.MathBankSafe.safeImageUrl(url);
-                console.log(`[PDF预览] 缩略图 ${i}: 原始URL="${url}", safeUrl="${safeUrl}"`);
-                if (!safeUrl) { console.warn(`[PDF预览] ⚠️ 缩略图 ${i} 被 safeImageUrl 过滤掉!`); return; }
+                                if (!safeUrl) { console.warn(`[PDF预览] ⚠️ 缩略图 ${i} 被 safeImageUrl 过滤掉!`); return; }
                 const thumb = document.createElement('div');
                 thumb.className = `cursor-pointer border-2 rounded-lg overflow-hidden transition-all duration-200 aspect-[3/4] relative group hover:border-brand-500 bg-white ${i === activePageIndex ? 'border-brand-500 shadow-md ring-2 ring-brand-500/20' : 'border-slate-200'}`;
                 thumb.innerHTML = `
@@ -1422,8 +1419,7 @@
             
             const img = document.getElementById('pdfCropActiveImage');
             const safePageUrl = window.MathBankSafe.safeImageUrl(window.pdfPageImages[pageIdx]);
-            console.log(`[PDF预览] 主图 P${pageIdx + 1}: 原始URL="${window.pdfPageImages[pageIdx]}", safeUrl="${safePageUrl}"`);
-            // 注意：img.onload / onerror 由 setupPdfCropDrawListeners 统一安装，
+                        // 注意：img.onload / onerror 由 setupPdfCropDrawListeners 统一安装，
             // 这里只负责切 src，不要覆盖，否则首次自适应缩放逻辑会失效。
             img.src = safePageUrl || '';
 
@@ -1865,8 +1861,7 @@
             })
             .then(r => r.json())
             .then(res => {
-                console.log("[Storage Cleanup] Server cleaned temporary crops:", res);
-                window.tempCroppedPathsThisSession = [];
+                                window.tempCroppedPathsThisSession = [];
             })
             .catch(err => {
                 console.error("[Storage Cleanup] Error:", err);
@@ -2479,20 +2474,14 @@
 
             // 串行处理队列：一次只拆一个文件，拆完再取下一份
             function processFileQueue() {
-                console.log('[队列] processFileQueue() 被调用', {
-                    queueProcessing,
-                    pendingFiles: pendingFiles.map(f => ({ name: f.name, status: f.status }))
-                });
-                if (queueProcessing) {
-                    console.log('[队列] processFileQueue: 队列正在处理中，跳过（queueProcessing=true）');
-                    return;
+                                if (queueProcessing) {
+                                        return;
                 }
                 const next = pendingFiles.find(f => f.status === 'pending');
                 if (!next) {
                     const allSettled = pendingFiles.every(f => f.status === 'done' || f.status === 'failed' || f.status === 'skipped');
                     if (allSettled && pendingFiles.length > 0) {
-                        console.log('[队列] ✅ 所有文件已处理完毕:', pendingFiles.map(f => ({ name: f.name, status: f.status })));
-                        const skippedCnt = pendingFiles.filter(f => f.status === 'skipped').length;
+                                                const skippedCnt = pendingFiles.filter(f => f.status === 'skipped').length;
                         showToast(skippedCnt > 0 ? `拆解完成！其中 ${skippedCnt} 个文件已导入题库，已自动跳过` : '所有文件均已拆解完成！', 'success');
                         // 恢复底部按钮区
                         document.querySelectorAll('[data-queue-collapse="1"]').forEach(el => el.classList.add('hidden'));
@@ -2502,8 +2491,7 @@
                 }
                 queueProcessing = true;
                 next.status = 'parsing';
-                console.log(`[队列] → 开始处理文件 "${next.name}" (${pendingFiles.filter(f => f.status !== 'pending').length + 1}/${pendingFiles.length})`);
-                window.__fileStartTimes = window.__fileStartTimes || {};
+                                window.__fileStartTimes = window.__fileStartTimes || {};
                 window.__fileStartTimes[next.name] = Date.now();
                 renderFileQueue();
                 // 先查库判断该文档是否已导入：已导入（且非强制）则跳过，避免重复拆解；否则正常拆解。
@@ -2542,25 +2530,18 @@
                 // 真正根因在 handleParseTaskCompleted 的 taskId 去重；此处再加一道
                 // 队列推进幂等位，防止 processFileQueue() 被反复启动。
                 if (window.__queueAdvanceInFlight) {
-                    console.log('[队列] advanceQueueAfterParse 已在执行中，丢弃重复调用');
-                    return;
+                                        return;
                 }
                 window.__queueAdvanceInFlight = true;
                 try {
-                console.log(`[队列] advanceQueueAfterParse 被调用: success=${success}, error=${errorMsg || '无'}`, {
-                    pendingFiles: pendingFiles.map(f => ({ name: f.name, status: f.status })),
-                    __currentQueueFile: window.__currentQueueFile ? window.__currentQueueFile.name : null,
-                    queueProcessing
-                });
-                let cur = window.__currentQueueFile;
+                                let cur = window.__currentQueueFile;
                 // 兜底：若 __currentQueueFile 丢失（例如浏览器缓存导致旧逻辑残留、
                 // 或运行中状态被异常清空），按"当前仍在 parsing 的文件"找回，
                 // 避免第 N 个文件拆完后卡死、不再推第 N+1 个。
                 if (!cur || pendingFiles.indexOf(cur) === -1) {
                     const stillParsing = pendingFiles.find(f => f.status === 'parsing');
                     if (stillParsing) {
-                        console.log('[队列] __currentQueueFile 丢失，兜底找回:', stillParsing.name);
-                        cur = stillParsing;
+                                                cur = stillParsing;
                         window.__currentQueueFile = stillParsing;
                     } else {
                         console.warn('[队列] ⚠️ 找不到 parsing 状态的文件！pendingFiles 状态:', pendingFiles.map(f => ({ name: f.name, status: f.status })));
@@ -2569,16 +2550,13 @@
                 if (cur && pendingFiles.indexOf(cur) !== -1) {
                     if (success) {
                         cur.status = 'done';
-                        console.log(`[队列] ✅ 文件 "${cur.name}" 标记为 done`);
-                    } else {
+                                            } else {
                         cur.status = 'failed';
                         cur.error = errorMsg || '拆解失败';
-                        console.log(`[队列] ❌ 文件 "${cur.name}" 标记为 failed: ${errorMsg}`);
-                    }
+                                            }
                     const _startTs = (window.__fileStartTimes && window.__fileStartTimes[cur.name]) || null;
                     const _elapsedSec = _startTs ? Math.round((Date.now() - _startTs) / 1000) : null;
-                    console.log(`[队列] 文件 "${cur.name}" 总耗时=${_elapsedSec != null ? _elapsedSec + 's' : '未知'} (success=${success})`);
-                } else if (!cur) {
+                                    } else if (!cur) {
                     console.error('[队列] ❌ 无法确定当前文件，队列可能已损坏');
                 } else {
                     console.error('[队列] ❌ 当前文件不在 pendingFiles 中，可能被意外清理');
@@ -2587,8 +2565,7 @@
                 queueProcessing = false;
                 renderFileQueue();
                 // 继续处理下一份
-                console.log('[队列] → 调用 processFileQueue() 继续下一份');
-                processFileQueue();
+                                processFileQueue();
                 } finally {
                     window.__queueAdvanceInFlight = false;
                 }
@@ -2903,8 +2880,7 @@
                     if (taskData.status === 'success') {
                         const taskId = taskData.task_id;
                         appendImportLog(`Word 任务已成功创建！任务 ID: ${taskId}，开始轮询分析切片进度...`, 'success');
-                        console.log(`[队列][提交] 后端已接收 Word 任务 task=${taskId} 文件=${(window.__currentParseSourceFile || (window.currentDocxFile && window.currentDocxFile.name) || '')} 开始轮询`);
-                        pollPdfTaskStatus(taskId, importTaskGeneration);
+                                                pollPdfTaskStatus(taskId, importTaskGeneration);
                     } else {
                         throw new Error(taskData.message || '创建 Word 解析任务失败');
                     }
@@ -2986,8 +2962,7 @@
                     if (taskData.status === 'success') {
                         const taskId = taskData.task_id;
                         appendImportLog(`任务已成功创建！任务 ID: ${taskId}，开始轮询后台分析进度...`, 'success');
-                        console.log(`[队列][提交] 后端已接收 PDF 任务 task=${taskId} 文件=${(window.__currentParseSourceFile || (window.currentPdfFile && window.currentPdfFile.name) || '')} 开始轮询`);
-                        pollPdfTaskStatus(taskId, importTaskGeneration);
+                                                pollPdfTaskStatus(taskId, importTaskGeneration);
                     } else {
                         throw new Error(taskData.message || '创建 PDF 解析任务失败');
                     }
@@ -3148,8 +3123,7 @@
                         }
 
                         if (appendMode) {
-                            console.log('[队列] TeX 拆解完成，调用 advanceQueueAfterParse(true)');
-                            if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
+                                                        if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
                         }
                     } else {
                         const errMsg = data.message || '拆解失败';
@@ -3285,13 +3259,11 @@
             // 注意：救援入口 window.__rescueCompletedTask 也复用本函数，仍可正常 append。
             if (taskId) {
                 if (completedTaskIds.has(taskId)) {
-                    console.log(`[队列] taskId=${taskId} 已处理过，忽略重复完成回调（多并发 fetch 防御）`);
-                    return;
+                                        return;
                 }
                 completedTaskIds.add(taskId);
             }
-            console.log('[队列] PDF/Word 任务 completed，开始处理完成回调', { identity, appendMode: window.__currentParseAppendMode });
-            if (identity && typeof finishDocumentPoll === 'function' && !finishDocumentPoll(identity)) {
+                        if (identity && typeof finishDocumentPoll === 'function' && !finishDocumentPoll(identity)) {
                 console.warn('[队列] ⚠️ finishDocumentPoll 返回 false，generation 可能已过期，但仍尝试推进队列');
                 // 不 return——即使 generation 过期也尝试推进队列，避免卡死
             }
@@ -3355,10 +3327,8 @@
                 // 即使渲染异常也不卡队列
             }
             // ★★★ 关键：无论前面是否异常，都要推进队列 ★★★
-            console.log('[队列] 准备推进队列: appendMode=', appendMode, 'typeof advanceQueueAfterParse=', typeof advanceQueueAfterParse);
-            if (appendMode) {
-                console.log('[队列] ✅ 调用 advanceQueueAfterParse(true) 推进到下一文件');
-                if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
+                        if (appendMode) {
+                                if (typeof advanceQueueAfterParse === 'function') advanceQueueAfterParse(true);
             }
         }
 
@@ -3414,8 +3384,7 @@
                     const rescued = (task.data || []).length;
                     window.__currentParseSourceFile = window.__currentParseSourceFile || (task.document_type === 'docx' ? 'Word 试卷' : 'PDF 试卷');
                     handleParseTaskCompleted(task, taskId, null);
-                    console.log(`[抢救] ✅ 已回收 ${rescued} 道题到审查列表`);
-                    return rescued;
+                                        return rescued;
                 })
                 .catch(err => {
                     console.error('[抢救] 失败：', err);
@@ -3494,8 +3463,7 @@
                     const _idleSec = Math.round((_nowTs - identity.lastProgressAt) / 1000);
                     const _totalSec = Math.round((_nowTs - identity.startedAt) / 1000);
                     const _isQueued = (task.status === 'pending' || task.status === 'queued');
-                    console.log(`[队列][轮询] task=${taskId} status=${task.status} progress=${task.progress} idle=${_idleSec}s total=${_totalSec}s${_isQueued ? ' ⚠️仍在后端队列等待(无进度推进)' : ''}`);
-                    // 排队状态同步到 identity 以豁免静默超时，并给用户可见的等待提示。
+                                        // 排队状态同步到 identity 以豁免静默超时，并给用户可见的等待提示。
                     if (_isQueued) {
                         if (!identity.backendQueued) {
                             identity.backendQueued = true;
@@ -3614,8 +3582,7 @@
                         // 兜底：即使回调异常也尝试推进队列，避免卡死
                         const appendMode = window.__currentParseAppendMode;
                         if (appendMode && typeof advanceQueueAfterParse === 'function') {
-                            console.log('[队列] 从 catch 兜底调用 advanceQueueAfterParse(false)');
-                            advanceQueueAfterParse(false, err.message || '轮询回调异常');
+                                                        advanceQueueAfterParse(false, err.message || '轮询回调异常');
                         }
                     }
                 });
