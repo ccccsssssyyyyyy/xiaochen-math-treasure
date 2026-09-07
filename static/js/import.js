@@ -3976,6 +3976,7 @@
                             <!-- Thumbnail labels of images selected -->
                         </div>
                         <div class="flex items-center space-x-2">
+                            <input type="checkbox" data-index="${index}" class="card-select-checkbox h-5 w-5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer transition-colors" ${q.saved ? 'disabled opacity-50' : 'checked'} onclick="event.stopPropagation()" title="${q.saved ? '本题已入库，无需勾选' : '勾选此题加入本次批量导入'}">
                             ${questionHasCropPages(index) ? `
                                 <button onclick="openPdfCropModalForQuestion(${index})" class="glass-btn text-amber-700 font-bold px-3 py-1.5 rounded-lg text-[10px] flex items-center space-x-1" title="查看原卷页面并拖拽框选截图">
                                     <i class="fa-solid fa-scissors"></i>
@@ -3991,15 +3992,6 @@
                                 <span>${q.saved ? '再次导入' : '导入此题'}</span>
                             </button>
                         </div>
-                    </div>
-
-                    <!-- Card Select Footer: 勾选此题以便批量导入（与顶部「已选 X/Y」徽标 + 批量导入按钮同步） -->
-                    <div class="flex items-center justify-between border-t border-slate-100 pt-3 mt-2 shrink-0">
-                        <label class="flex items-center space-x-2 text-[11px] font-bold cursor-pointer select-none ${q.saved ? 'text-slate-400' : 'text-slate-600 hover:text-brand-600'}">
-                            <input type="checkbox" data-index="${index}" class="card-select-checkbox h-5 w-5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer transition-colors" ${q.saved ? 'disabled opacity-50' : 'checked'} onclick="event.stopPropagation()">
-                            <i class="fa-solid fa-check-double text-brand-500 text-[10px]"></i>
-                            <span>${q.saved ? '本题已入库，无需勾选' : '勾选此题加入本次批量导入'}</span>
-                        </label>
                     </div>
                 `;
 
