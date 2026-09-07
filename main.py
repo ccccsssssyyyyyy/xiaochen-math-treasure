@@ -5833,6 +5833,17 @@ def run_docx_parsing_task(
                         f"docx 字体归一化失败（已回退原始 docx）: {norm_exc}"
                     )
                     normalized_docx_bytes = file_bytes
+
+                # 方案B：把 MathType OLE 公式对象预渲染为 PNG 图片，避免 macOS LO
+                # headless 无法调用 MathType 引擎导致公式区域显示为空白方框。
+                try:
+                    from mathbank.mathtype_ole_renderer import replace_mathtype_ole_with_images
+                    normalized_docx_bytes = replace_mathtype_ole_with_images(normalized_docx_bytes)
+                except Exception as ole_exc:
+                    diagnostics.setdefault("warnings", []).append(
+                        f"MathType 公式预渲染失败（已回退原始 docx）: {ole_exc}"
+                    )
+
                 src_docx_path.write_bytes(normalized_docx_bytes)
                 try:
                     # 注入项目独立 LibreOffice profile（OnScreenOnly 字体替换表，
