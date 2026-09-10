@@ -3410,6 +3410,71 @@
             }
         }
 
+        // L3 用户可见：拆解质量徽章（题数校验发现疑似漏题时高亮提示）
+        // parse_quality 形如 {expected_count, parsed_count, truncated_blocks, missing_ranges:[[from,to],...], retries}
+        // 仅在 missing_ranges 非空或截断/重试发生时显示；否则隐藏（不打扰用户）。
+        function renderParseQualityBadge(parseQuality, identity) {
+            const badge = document.getElementById('parseQualityBadge');
+            const text = document.getElementById('parseQualityText');
+            if (!badge || !text) return;
+            if (!parseQuality || typeof parseQuality !== 'object') {
+                badge.classList.add('hidden');
+                return;
+            }
+            const expected = Number(parseQuality.expected_count) || 0;
+            const parsed = Number(parseQuality.parsed_count) || 0;
+            const truncatedBlocks = Number(parseQuality.truncated_blocks) || 0;
+            const retries = Number(parseQuality.retries) || 0;
+            const missingRanges = Array.isArray(parseQuality.missing_ranges) ? parseQuality.missing_ranges : [];
+
+            const hasMissing = missingRanges.length > 0;
+            const hasTruncation = truncatedBlocks > 0 || retries > 0;
+
+            if (!hasMissing && !hasTruncation) {
+                badge.classList.add('hidden');
+                return;
+            }
+
+            // 拼出人类可读的徽章文本：优先生成 missing 区间，没有则提示已自动续拆。
+            let label;
+            if (hasMissing) {
+                const rangesText = missingRanges
+                    .map(r => Array.isArray(r) && r.length >= 2 ? `${r[0]}-${r[1]}` : '?')
+                    .join('、');
+                label = `可能漏题：第 ${rangesText} 题（预计 ${expected} 题 / 实拆 ${parsed} 题）`;
+            } else {
+                label = `自动续拆 ${retries} 次后已修复（实拆 ${parsed} 题）`;
+            }
+
+            const titleParts = [];
+            if (expected && parsed < expected) {
+                titleParts.push(`预估题目区 ${expected} 题，实际拆得 ${parsed} 题`);
+            }
+            if (hasTruncation) {
+                titleParts.push(`触发截断续拆 ${truncatedBlocks} 块 / 总重试 ${retries} 次`);
+            }
+            if (hasMissing) {
+                titleParts.push('可能是模型漏答或输出被截断未续完，请进入编辑页核对后手动补全');
+            }
+            const title = titleParts.join('\n');
+
+            // 颜色：有漏题用红色，没有漏题但有续拆用琥珀色（让用户知道发生过）
+            if (hasMissing) {
+                badge.className = 'flex items-center gap-1.5 text-[10px] font-bold text-rose-600';
+            } else {
+                badge.className = 'flex items-center gap-1.5 text-[10px] font-bold text-amber-700';
+            }
+            text.textContent = label;
+            badge.title = title;
+            badge.classList.remove('hidden');
+
+            // 日志只打一次，避免每拍重复
+            if (!identity._qualityLogged) {
+                identity._qualityLogged = true;
+                appendImportLog(`拆解质量告警：${label}`, 'current');
+            }
+        }
+
         function pollPdfTaskStatus(taskId, generation) {
             if (!isCurrentDocumentImportTask(generation)) return;
             let lastLog = '';
@@ -3493,6 +3558,10 @@
                     // AI 自动识别「题目与解析分离」标记渲染（替代原手动开关）
                     if (task.detected_separated !== undefined && task.detected_separated !== null) {
                         renderSeparatedDetectBadge(task.detected_separated, identity);
+                    }
+                    // L3 用户可见：拆解质量徽章（题数校验发现疑似漏题时显示）
+                    if (task.parse_quality !== undefined && task.parse_quality !== null) {
+                        renderParseQualityBadge(task.parse_quality, identity);
                     }
                     
                     if (task.log && task.log !== lastLog) {

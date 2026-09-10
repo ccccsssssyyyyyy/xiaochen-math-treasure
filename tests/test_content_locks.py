@@ -34,7 +34,7 @@ def test_parse_chunk_progress_callback_reports_every_chunk():
 
     这是前端「静默超时」判定的依据：只要回调持续触发，任务就不该被判死。
     """
-    from main import _parse_chunks_to_questions
+    from main import _parse_chunks_to_questions, ChunkParseResult
 
     reported = []
     chunks_seen = []
@@ -47,7 +47,7 @@ def test_parse_chunk_progress_callback_reports_every_chunk():
         # 第二段模拟失败，验证失败路径同样会回报进度
         if len(chunks_seen) == 2:
             raise RuntimeError("模拟该段解析失败")
-        return [{"content": f"题目{len(chunks_seen)}", "answer_markdown": ""}]
+        return ChunkParseResult(questions=[{"content": f"题目{len(chunks_seen)}", "answer_markdown": ""}])
 
     with patch("main.split_markdown_into_question_chunks", side_effect=fake_split), \
          patch("main._parse_single_chunk", side_effect=fake_parse_single):
@@ -60,12 +60,12 @@ def test_parse_chunk_progress_callback_reports_every_chunk():
         )
 
     assert reported == [(1, 3), (2, 3), (3, 3)]
-    assert len(result) == 2
+    assert len(result.questions) == 2
 
 
 def test_parse_chunk_progress_callback_never_breaks_parsing():
     """回调自身抛异常时不得影响解析主流程。"""
-    from main import _parse_chunks_to_questions
+    from main import _parse_chunks_to_questions, ChunkParseResult
 
     def fake_split(document_text):
         return ["段落一", "段落二"]
@@ -75,7 +75,7 @@ def test_parse_chunk_progress_callback_never_breaks_parsing():
     def fake_parse_single(user_content, decision, system_instructions, max_tokens, timeout, paid_timeout=None, chunk_markdown=None):
         seq["n"] += 1
         # 题干必须各不相同，否则末尾的 dedupe_questions 会把两段合并成一条
-        return [{"content": f"题目{seq['n']}", "answer_markdown": ""}]
+        return ChunkParseResult(questions=[{"content": f"题目{seq['n']}", "answer_markdown": ""}])
 
     with patch("main.split_markdown_into_question_chunks", side_effect=fake_split), \
          patch("main._parse_single_chunk", side_effect=fake_parse_single):
@@ -87,7 +87,7 @@ def test_parse_chunk_progress_callback_never_breaks_parsing():
             progress_callback=lambda done, total: (_ for _ in ()).throw(RuntimeError("回调爆炸")),
         )
 
-    assert len(result) == 2
+    assert len(result.questions) == 2
 
 
 def test_visible_math_lock_overwrites_model_modified_formula_inside_tag():

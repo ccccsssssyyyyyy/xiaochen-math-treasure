@@ -19,7 +19,8 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 import secrets
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 from PIL import Image
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request, Response, Header
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
@@ -70,9 +71,12 @@ from mathbank.latex_diagnostics import (
     build_local_latex_diagnostic,
     merge_ai_latex_diagnostic,
 )
-from mathbank.ai_json import parse_ai_json
+from mathbank.ai_json import parse_ai_json, detect_truncation_signals
 from mathbank.paper_chunking import (
+    DEFAULT_MAX_QUESTIONS,
     dedupe_questions,
+    split_chunks_by_question_count,
+    _question_number_positions,
     split_markdown_into_question_chunks,
 )
 from mathbank.ai_http import (
@@ -3646,14 +3650,80 @@ def _parse_single_chunk(user_content, decision, system_instructions, max_output_
             raise
 
     res_json = response.json()
+    # L2 截断感知：把 finish_reason 和 usage 透出到上游，由 _parse_chunks_to_questions 决定是否续拆。
+    finish_reason = ""
+    try:
+        finish_reason = (res_json.get("choices") or [{}])[0].get("finish_reason", "") or ""
+    except Exception:
+        finish_reason = ""
+    completion_tokens = None
+    try:
+        usage = res_json.get("usage") or {}
+        if isinstance(usage, dict):
+            completion_tokens = usage.get("completion_tokens")
+    except Exception:
+        completion_tokens = None
     raw_ai_text = res_json["choices"][0]["message"]["content"].strip()
+    # 抓 last_q_no + was_truncated 两条关键信号（即使 parse_ai_json 兜底成功也要记录）
+    was_truncated, last_q_no = detect_truncation_signals(raw_ai_text)
+    # finish_reason=length 强信号覆盖：raw_decode 成功也按截断处理（输出顶到 max_tokens）
+    if finish_reason == "length" and not was_truncated:
+        was_truncated = True
     parsed_data = parse_ai_json(raw_ai_text, raw_markdown=chunk_markdown if chunk_markdown is not None else user_content)
-    return _extract_questions_list(parsed_data)
+    questions = _extract_questions_list(parsed_data)
+    return ChunkParseResult(
+        questions=questions,
+        was_truncated=was_truncated,
+        last_q_no=last_q_no,
+        finish_reason=finish_reason,
+        completion_tokens=completion_tokens,
+        raw_text=raw_ai_text,
+    )
 
 
 # 多块拆题时附带给下一段的「上一段末尾」字符数。用于让模型判断本段开头是否是
 # 上一道题的延续（跨页/跨块题目兜底）。过大浪费 token，过小看不出上下文。
 CHUNK_CONTEXT_CHARS = 800
+
+
+# ---------------------------------------------------------------------------
+# 拆解质量契约：L2/L3 防御所需的结构化返回值
+# ---------------------------------------------------------------------------
+@dataclass
+class ChunkParseResult:
+    """单块解析结果：题目列表 + 截断感知元数据。
+
+    - ``questions``：本次解析出的题目列表（按模型输出顺序，可能含已截断回收的）。
+    - ``was_truncated``：本次输出是否被检测到截断（JSON 不闭合 / finish_reason=length）。
+    - ``last_q_no``：从已回收题目中识别的最大题号，供续拆定位；无信号时为 None。
+    - ``finish_reason``：模型原始 finish_reason（"length"/"stop"/其他）。
+    - ``completion_tokens``：模型声明的实际输出 token 数，用于排查"假截断"等问题。
+    - ``raw_text``：原始 AI 输出文本（仅诊断用，不返回前端）。
+    """
+    questions: List[Any]
+    was_truncated: bool = False
+    last_q_no: Optional[int] = None
+    finish_reason: Optional[str] = None
+    completion_tokens: Optional[int] = None
+    raw_text: str = ""
+
+
+@dataclass
+class DocParseResult:
+    """整卷拆解结果：题目列表 + 拆解质量（透传到 DOCUMENT_TASKS，供前端徽章展示）。
+
+    - ``expected_count``：基于题目区题号识别估算的应有题数（0 表示无法可靠估算）。
+    - ``parsed_count``：本次实际拆出的题目数（dedupe 前）。
+    - ``truncated_blocks``：本次触发自动续拆的块数。
+    - ``missing_ranges``：疑似漏掉的题号区间列表 ``[(from, to), ...]``。
+    - ``retries``：触发的续拆总次数。
+    """
+    questions: List[Any]
+    expected_count: int = 0
+    parsed_count: int = 0
+    truncated_blocks: int = 0
+    missing_ranges: List[Tuple[int, int]] = field(default_factory=list)
+    retries: int = 0
 
 
 def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lock: bool = True, generate_answers_bool: bool = False) -> str:
@@ -3671,7 +3741,7 @@ def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lo
     base = (
         "你是资深高中数学教研专家。正在解析一份多段试卷的其中一段（首段已给出完整规则，"
         "此处仅给精简提醒）。必须且只能输出严格合法 JSON，字段为 questions 数组，每条题目含：\n"
-        "- content：纯净题干（去掉原卷大题号，保留 LaTeX 与图片占位符 [[IMGn]]"
+        "- content：纯净题干（去掉原卷大题号，保留 LaTeX 与图片占位符 [插图待补: 图N]"
         + ("、公式占位符 [[Mn]]" if formula_lock else "")
         + "）\n"
         "- answer_markdown：答案与解析\n"
@@ -3680,7 +3750,7 @@ def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lo
         "- difficulty：easy_error / normal / challenge / qiangji\n"
         "- source：出处信息或 null\n"
         "- knowledge_list：字符串数组；solve_method：单个字符串；related_chapters：字符串数组；tags：字符串数组\n"
-        "- referenced_images：字符串数组（把 [[IMGn]] 列入）\n"
+        "- referenced_images：字符串数组（把 [插图待补: 图N] 列入）\n"
         "- answer_belongs_to：仅分离模式需要，否则 null\n"
         "【关键保留规则】\n"
     )
@@ -3693,7 +3763,7 @@ def _build_condensed_parse_system_prompt(extra_system_note: str = "", formula_lo
             "1. 公式：本卷公式未做锁定标记，你必须在输出时把每一个数学公式/符号/表达式用 `$...$`（行内）或 `$$...$$`（独立）完整包裹，原样保留公式本体与 `$` 定界符，绝不许丢弃 `$`，绝不许使用 `[[Mn]]` 占位符。\n"
         )
     base = base + formula_section + (
-        "2. 图片：输入中的 `[[IMGn]]` 必须原样保留，并列入 referenced_images，不得展开为 URL 或改写。\n"
+        "2. 图片：输入中的 `[插图待补: 图N]` 必须原样保留，并列入 referenced_images，不得展开为 URL 或改写。\n"
         "3. 选择题选项统一 `\\begin{choices}\\item...\\end{choices}` 且每项独立成行；填空题用 `\\fillin`；加粗用 `\\textbf{}`（禁双星号）；严禁用单个 `*` 把几何顶点/变量做成 Markdown 斜体（如 `*X*`），一律用 `$...$` 包裹（如 `$X$`）。\n"
         "4. 完整保留 tabular/array/matrix/cases/aligned 等数学与表格结构。\n"
         "5. 字符串内换行用 `\\n`，LaTeX 反斜杠写成 `\\\\`；不要包裹 ```json 代码块。只解析本段内的题目。\n"
@@ -3788,35 +3858,49 @@ def _report_parse_progress(progress_callback, done, total):
 def _parse_chunks_to_questions(document_text, decision, system_instructions, generate_answers_bool, separated_mode=False, progress_callback=None, extra_system_note: str = "", formula_lock: bool = True):
     """将（可能超长的）试卷文本按题号边界分块，逐块调用 LLM 解析，合并去重。
 
-    彻底解决「超长文档 → AI 输出超过 max_tokens 被截断 → JSON 解析失败 → 拆解失败」。
+    四层防御的核心调度器（L1 + L2 + L3）：
+
+    - **L1 事前**：先按字符切（split_markdown_into_question_chunks），再按题数
+      和字符硬上限再分批（split_chunks_by_question_count），让单次输出可控。
+    - **L2 事中**：调用 _parse_single_chunk 拿到 ChunkParseResult，检测 was_truncated。
+      若截断，从「last_q_no+1」起在原 chunk 切子段续拆，最多 3 次。
+    - **L3 事后**：合并后预估题目区题数，对比实际拆得题数，记录 missing_ranges。
+
     单块失败不会拖垮整卷，会跳过并继续；所有块都失败才抛错。
 
-    progress_callback: 可选回调 (done, total)，每完成/跳过一段即调用一次，
-    供解析任务刷新进度，避免长卷拆解期间前端因长时间无变化而误判超时。
+    返回 :class:`DocParseResult`：题目列表 + 拆解质量统计，供前端徽章展示。
+
+    progress_callback: 可选回调 (done, total)，每完成/跳过一段即调用一次。
     """
     max_output_tokens = 65536
     FREE_PARSE_TIMEOUT = 90   # 免费模型（SiliconFlow Qwen3-VL-8B-Instruct）对复杂数学题易 ReadTimeout；
                              # 正常返回通常 <60s，90s 足够其完成，超时即视为卡死立即回退付费
-    PAID_PARSE_TIMEOUT = 300 # 付费回退（deepseek-v4-flash）给足 5 分钟，避免复杂大题二次超时丢块
+    PAID_PARSE_TIMEOUT = 300 # 付费回退（deepseek-flash）给足 5 分钟，避免复杂大题二次超时丢块
+    MAX_TRUNCATION_RETRIES = 3  # 单块截断续拆上限（治本 L2）
 
     chunks = split_markdown_into_question_chunks(document_text)
+    # 治本：字符未超阈值时，若题目区题数过多，单次输出仍会顶到模型 max_tokens
+    # 上限被硬截断（实测 19 题卷只回收前 10 题）。按题数+字符硬上限再分批，让每次
+    # LLM 调用的输出体量可控、不截断。题号识别不到的块由字符切分兜底。
+    chunks = split_chunks_by_question_count(chunks, max_questions=DEFAULT_MAX_QUESTIONS)
     total = len(chunks)
-    if total <= 1:
-        result = _parse_single_chunk(
-            chunks[0] if chunks else document_text,
-            decision, system_instructions, max_output_tokens, FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT,
-        )
-        result = [sanitize_question_markdown(q) for q in result]
-        _report_parse_progress(progress_callback, 1, 1)
-        return result
 
-    print(f"[Parse Chunking] 文档较长，已切分为 {total} 段逐段解析。")
-    # Plan C：首块用完整系统提示；后续块改用精简提示，避免每块重复 ~3.7K 字系统提示。
-    condensed_system = _build_condensed_parse_system_prompt(
-        extra_system_note, formula_lock, generate_answers_bool
-    )
-    all_questions = []
-    for idx, chunk in enumerate(chunks):
+    # L2 续拆辅助：从「last_q_no」起在原 chunk 中切子段，供 _parse_single_chunk 复用。
+    def _slice_tail_after_q_no(chunk_text: str, after_q_no: int) -> Optional[str]:
+        """在 chunk 中找到「题号 > after_q_no」的第一个题号位置，取到末尾。"""
+        seq = _question_number_positions(chunk_text)
+        for num, pos in seq:
+            if num > after_q_no:
+                return chunk_text[pos:]
+        return None
+
+    all_questions: List[Any] = []
+    total_retries = 0
+    truncated_blocks = 0
+
+    def _process_chunk(chunk_text: str, idx: int, total_chunks: int) -> List[Any]:
+        """处理单个块：构造 user_content + 处理续拆。返回本块（含续拆）的所有题。"""
+        nonlocal total_retries, truncated_blocks
         # 跨页/跨块兜底：把上一段末尾作为「上文片段」附上，让模型能判断本段开头
         # 是否是上一道题的延续（如上一块末尾停在「（1）」、本块开头是「（2）」），
         # 避免把半道题当成完整题输出。chunk_markdown 仍传原始 chunk，保持诊断一致。
@@ -3831,14 +3915,91 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
                     "</上文片段>\n\n"
                 )
         user_content = (
-            f"[这是试卷的第 {idx + 1}/{total} 段，请只解析本段内的题目，"
+            f"[这是试卷的第 {idx + 1}/{total_chunks} 段，请只解析本段内的题目，"
             f"忽略其它段落；返回格式仍为 {{\"questions\": [...]}}。]\n\n"
             f"{context_block}"
-            f"<本段正文 这才是你要解析的内容>\n{chunk}\n</本段正文>"
+            f"<本段正文 这才是你要解析的内容>\n{chunk_text}\n</本段正文>"
         )
-        chunk_system = system_instructions if idx == 0 else condensed_system
+        chunk_system = system_instructions if idx == 0 else _build_condensed_parse_system_prompt(
+            extra_system_note, formula_lock, generate_answers_bool
+        )
+        # 首次解析
+        result: ChunkParseResult = _parse_single_chunk(
+            user_content, decision, chunk_system, max_output_tokens,
+            FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT, chunk_markdown=chunk_text,
+        )
+        collected = list(result.questions)
+        # L2 截断自动续拆：若首次返回被截断，从 last_q_no+1 起切子段重试
+        retries = 0
+        current_chunk = chunk_text
+        last_q = result.last_q_no
+        while result.was_truncated and retries < MAX_TRUNCATION_RETRIES and last_q is not None:
+            tail = _slice_tail_after_q_no(current_chunk, last_q)
+            if not tail or not tail.strip():
+                # 子段为空（题号已切走），不再续拆
+                break
+            retries += 1
+            total_retries += 1
+            truncated_blocks += 1
+            sub_user = (
+                f"[这是试卷的第 {idx + 1}/{total_chunks} 段续拆 {retries}/{MAX_TRUNCATION_RETRIES}，"
+                f"刚才输出被截断在第 {last_q} 题，本次只解析第 {last_q + 1} 题起的剩余题目，"
+                f"全部完整输出不要省略；返回格式仍为 {{\"questions\": [...]}}。]\n\n"
+                f"<本段子段 这才是你要解析的内容>\n{tail}\n</本段子段>"
+            )
+            print(
+                f"[Parse Chunking] 第 {idx + 1}/{total_chunks} 段检测到截断（last_q={last_q}），"
+                f"自动续拆 {retries}/{MAX_TRUNCATION_RETRIES}（子段 {len(tail)} 字符）...",
+                flush=True,
+            )
+            try:
+                result = _parse_single_chunk(
+                    sub_user, decision, chunk_system, max_output_tokens,
+                    FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT, chunk_markdown=tail,
+                )
+                collected.extend(result.questions)
+                last_q = result.last_q_no
+            except Exception as exc:
+                print(
+                    f"[Parse Chunking] 第 {idx + 1}/{total_chunks} 段续拆 {retries}/{MAX_TRUNCATION_RETRIES} 失败："
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                break
+        return collected
+
+    if total <= 1:
         try:
-            qs = _parse_single_chunk(user_content, decision, chunk_system, max_output_tokens, FREE_PARSE_TIMEOUT, paid_timeout=PAID_PARSE_TIMEOUT, chunk_markdown=chunk)
+            qs = _process_chunk(chunks[0] if chunks else document_text, 0, 1)
+        except Exception as exc:
+            print(f"[Parse Chunking] 段解析失败: {type(exc).__name__}: {exc}", flush=True)
+            raise
+        for q in qs:
+            sanitize_question_markdown(q)
+        all_questions.extend(qs)
+        _report_parse_progress(progress_callback, 1, 1)
+        final = dedupe_questions(all_questions)
+        expected = _estimate_question_count(document_text)
+        missing = _compute_missing_ranges(expected, len(final))
+        if missing:
+            print(
+                f"[Parse Chunking] 预估题目区约 {expected} 题，实际拆得 {len(final)} 题，"
+                f"疑似漏题区间: {missing}（已触发截断续拆 {truncated_blocks} 次/总重试 {total_retries} 次）",
+                flush=True,
+            )
+        return DocParseResult(
+            questions=final,
+            expected_count=expected,
+            parsed_count=len(final),
+            truncated_blocks=truncated_blocks,
+            missing_ranges=missing,
+            retries=total_retries,
+        )
+
+    print(f"[Parse Chunking] 文档较长，已切分为 {total} 段逐段解析。")
+    for idx, chunk in enumerate(chunks):
+        try:
+            qs = _process_chunk(chunk, idx, total)
             for q in qs:
                 sanitize_question_markdown(q)
             all_questions.extend(qs)
@@ -3852,7 +4013,56 @@ def _parse_chunks_to_questions(document_text, decision, system_instructions, gen
 
     if not all_questions:
         raise Exception("所有分块均解析失败，无法拆解试卷。")
-    return dedupe_questions(all_questions)
+    final = dedupe_questions(all_questions)
+    # L3 校验兜底：分批+续拆后仍比对「题目区预估题数」与「实际拆得题数」，
+    # 差异计入 missing_ranges，供前端徽章展示。
+    expected = _estimate_question_count(document_text)
+    missing = _compute_missing_ranges(expected, len(final))
+    if missing:
+        print(
+            f"[Parse Chunking] 预估题目区约 {expected} 题，实际拆得 {len(final)} 题，"
+            f"疑似漏题区间: {missing}（已触发截断续拆 {truncated_blocks} 次/总重试 {total_retries} 次）",
+            flush=True,
+        )
+    return DocParseResult(
+        questions=final,
+        expected_count=expected,
+        parsed_count=len(final),
+        truncated_blocks=truncated_blocks,
+        missing_ranges=missing,
+        retries=total_retries,
+    )
+
+
+def _compute_missing_ranges(expected: int, parsed: int) -> List[Tuple[int, int]]:
+    """根据 expected/parsed 估算 missing 题号区间（粗略，连续段合并）。
+
+    仅返回 ``[(from, to), ...]``，不去重已拆出的题号（dedupe 前已合并）。
+    当前简化版：若 expected > parsed，标记 [parsed+1, expected] 为单个区间。
+    零 token 成本，仅用于 L3 用户可见告警。
+
+    实际逻辑委托给 :func:`mathbank.paper_chunking.compute_missing_ranges`，
+    保证 main.py 顶层 OOM 时该函数仍可被独立测试。
+    """
+    from mathbank.paper_chunking import compute_missing_ranges as _impl
+    return _impl(expected, parsed)
+
+
+def _estimate_question_count(document_text: str) -> int:
+    """在「答案区锚点」之前估算题目区题数，供拆题后校验是否漏题。
+
+    - 分离式文档（题目在前、解析在后）：截到首个答案锚点，只统计题干区题号；
+    - 纯题目文档（无锚点）：统计全文题号。
+    用 :func:`_question_number_positions` 的「递增题号」识别，规避表格/选项干扰。
+    返回 0 表示无法可靠估算（此时不做漏题告警）。
+    """
+    if not document_text:
+        return 0
+    t = document_text
+    ans = _ANSWER_ZONE_ANCHORS.search(t)
+    if ans:
+        t = t[: ans.start()]
+    return len(_question_number_positions(t))
 
 
 # ---------------------------------------------------------------------------
@@ -3968,6 +4178,21 @@ def parse_paper_text_internal(
         formula_lock=formula_lock,
     )
 
+    # L3 任务级告警透传：把拆解质量写到调用方容器，供 DOCUMENT_TASKS 透传到前端。
+    # ⚠️ 解包必须无条件进行：``quality_out`` 只是可选的透传出口，不能反过来决定
+    # 返回值形态——否则调用方一旦不传 quality_out（如测试或新接入的链路），
+    # 就会拿到不可迭代的 DocParseResult，在下面 for 循环处抛 TypeError。
+    if isinstance(parsed_questions, DocParseResult):
+        if quality_out is not None:
+            quality_out[0] = {
+                "expected_count": parsed_questions.expected_count,
+                "parsed_count": parsed_questions.parsed_count,
+                "truncated_blocks": parsed_questions.truncated_blocks,
+                "missing_ranges": [list(r) for r in parsed_questions.missing_ranges],
+                "retries": parsed_questions.retries,
+            }
+        parsed_questions = parsed_questions.questions
+
     # 选项回溯补回：小参数模型拆题时常保留题干却丢弃 A/B/C/D 选项，
     # 此处用原文做确定性兜底（零 token），只补不覆盖，匹配不足则静默跳过。
     try:
@@ -4046,10 +4271,12 @@ def ai_parse_paper(
             get_current_curriculum(), generate_answers_bool, separated_mode=detected_separated
         )
 
-        parsed_questions = _parse_chunks_to_questions(
+        parsed = _parse_chunks_to_questions(
             model_source, decision, system_instructions, generate_answers_bool, detected_separated,
             formula_lock=True,
         )
+        # L2 改造：_parse_chunks_to_questions 现在返回 DocParseResult，这里取 .questions。
+        parsed_questions = parsed.questions if isinstance(parsed, DocParseResult) else parsed
         # 回退后更新实际使用的模型名（供 eval_decision 准确上报）
         model_name = decision["provider"].model_name
         provider_name = decision["provider"].provider_label
@@ -5422,13 +5649,18 @@ def run_pdf_parsing_task(
         detected_separated = detect_separated_mode(full_latex_content)
         DOCUMENT_TASKS.update(task_id, detected_separated=detected_separated)
 
+        # L3 任务级告警：parse_quality 用容器透传到 DOCUMENT_TASKS，供前端徽章展示。
+        _parse_quality_holder: List[Dict[str, Any]] = [{}]
         parsed_questions = parse_paper_text_internal(
             full_latex_content,
             generate_answers,
             separated_mode=detected_separated,
             progress_callback=_report_pdf_split_progress,
             formula_lock=False,
+            quality_out=_parse_quality_holder,
+            paper_title=paper_title,
         )
+        parse_quality = _parse_quality_holder[0] or None
         DOCUMENT_TASKS.check_cancelled(task_id)
         current_step = "post_process"
         DOCUMENT_TASKS.step_start(task_id, current_step)
@@ -5457,6 +5689,7 @@ def run_pdf_parsing_task(
             page_images=list(page_urls),
             temp_assets=list(temp_assets),
             document_type="pdf",
+            parse_quality=parse_quality,
         )
     except TaskCancelled:
         _delete_task_temp_assets(temp_assets)
@@ -5698,7 +5931,7 @@ def run_docx_parsing_task(
         full_markdown_content = docx_res["markdown"]
         img_count = docx_res.get("image_count", 0)
 
-        # Plan A：把插图长链接压成 [[IMGn]] 短占位符，拆题完成后再还原为真实链接，
+        # Plan A：把插图长链接压成 [插图待补: 图N] 短占位符，拆题完成后再还原为真实链接，
         # 避免「模型看不到图却被强制保留长链接」造成的输入/输出双向 token 浪费。
         compressed_markdown_content, docx_img_map = compress_docx_image_links(full_markdown_content)
         diagnostics = docx_res.get("diagnostics", {})
@@ -5742,10 +5975,10 @@ def run_docx_parsing_task(
         if docx_img_map:
             docx_image_note = (
                 "\n【Word 文档图片协议】:\n"
-                "本文 Word 试卷的图片在输入中以 [[IMG1]]、[[IMG2]]… 这样的占位符标注"
+                "本文 Word 试卷的图片在输入中以 [插图待补: 图1]、[插图待补: 图2]… 这样的占位符标注"
                 "（已替代原始长链接以节省篇幅，原图并未丢失）。你必须原样保留这些占位符："
-                "题干里图片出现的位置就写 [[IMGn]]，并且把对应的 [[IMGn]] 也列入该题目的 "
-                "referenced_images 数组。系统会在拆题后自动把 [[IMGn]] 还原为真实图片链接，"
+                "题干里图片出现的位置就写 [插图待补: 图N]，并且把对应的 [插图待补: 图N] 也列入该题目的 "
+                "referenced_images 数组。系统会在拆题后自动把 [插图待补: 图N] 还原为真实图片链接，"
                 "你切勿将其展开为 URL、也不要改写成其它形式。\n"
             )
         DOCUMENT_TASKS.check_cancelled(task_id)
@@ -5766,6 +5999,15 @@ def run_docx_parsing_task(
         detected_separated = detect_separated_mode(locked_markdown_content)
         DOCUMENT_TASKS.update(task_id, detected_separated=detected_separated)
 
+        # L3 任务级告警：parse_quality 用容器透传到 DOCUMENT_TASKS，供前端徽章展示。
+        _parse_quality_holder_docx: List[Dict[str, Any]] = [{}]
+        # Word 链路默认走付费拆解模型：免费模型对「公式锁 [[Mn]] 协议」遵守率明显
+        # 偏低（实测一份 19 题月考卷 math_locks_missing 达 116/255，且 answer_markdown
+        # 全部为空），付费模型的质量收益远大于成本。想改回自动路由可在 .env 设
+        # DOCX_FORCE_PAID_PARSE=false。
+        _docx_force_paid = os.getenv("DOCX_FORCE_PAID_PARSE", "true").strip().lower() not in {
+            "0", "false", "no", "off", ""
+        }
         parsed_questions = parse_paper_text_internal(
             locked_markdown_content,
             generate_answers,
@@ -5773,13 +6015,17 @@ def run_docx_parsing_task(
             progress_callback=_report_docx_split_progress,
             extra_system_note=docx_image_note,
             formula_lock=True,
+            quality_out=_parse_quality_holder_docx,
+            force_paid=_docx_force_paid,
+            paper_title=paper_title,
         )
+        parse_quality = _parse_quality_holder_docx[0] or None
         lock_report = restore_visible_math(parsed_questions, math_locks, strict=False)
         diagnostics.update(lock_report)
         if "warnings" in lock_report:
             diagnostics.setdefault("warnings", []).extend(lock_report["warnings"])
 
-        # Plan A：把 [[IMGn]] 占位符还原为真实图片链接，并校验是否丢失。
+        # Plan A：把 [插图待补: 图N] 占位符还原为真实图片链接，并校验是否丢失。
         if docx_img_map:
             img_warnings = decompress_docx_image_links_in_questions(parsed_questions, docx_img_map)
             if img_warnings:
@@ -5894,6 +6140,7 @@ def run_docx_parsing_task(
             diagnostics=diagnostics,
             temp_assets=list(temp_assets),
             page_images=list(page_images),
+            parse_quality=parse_quality,
         )
     except TaskCancelled:
         _delete_task_temp_assets(temp_assets)

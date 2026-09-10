@@ -1,7 +1,7 @@
 """Defensive parsing for structured JSON returned by AI providers."""
 
 import json
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 
 def _strip_markdown_fence(text: str) -> str:
@@ -303,6 +303,106 @@ def _repair_truncated_json_text(text: str) -> Any:
                 return json.loads(partial[:end + 1])
             except Exception:
                 pass
+    return None
+
+
+def detect_truncation_signals(text: str) -> Tuple[bool, Optional[int]]:
+    """检测 AI 输出文本是否含「被截断」的强信号。
+
+    三类信号：
+
+    1. **JSON 结构不闭合**：「questions」数组的最外层 ``[`` 找不到对应 ``]``。
+    2. **已完整解析**（raw_decode 成功）→ 一定不是截断，但仍返回末尾题号供续拆定位。
+    3. **末尾题号探测**：从已回收对象里取最大题号，给调用方做续拆起点。
+
+    返回 ``(was_truncated, last_q_no)``：
+    - ``last_q_no`` 是从可回收题中提取的最大题号，找不到时为 ``None``。
+    - 调用方应根据 ``was_truncated`` 决定是否触发自动续拆。
+    """
+    if not text or not text.strip():
+        return (True, None)
+
+    # 信号 1：原始文本能 JSONDecoder().raw_decode 成功 → 完整。
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text)
+        return (False, _extract_last_question_number(obj))
+    except Exception:
+        pass
+
+    # 信号 2：定位 questions:[ ，看 [ 是否在文本中有对应 ]（跳过字符串/转义）。
+    m = re.search(r'"questions"\s*:\s*\[', text)
+    array_open_idx = (m.end() - 1) if m else None
+    if array_open_idx is None:
+        array_open_idx = text.find("[")
+
+    if array_open_idx is None:
+        return (True, None)
+
+    depth_arr = 0
+    in_str = False
+    esc = False
+    array_closed = False
+    i = array_open_idx + 1
+    while i < len(text):
+        ch = text[i]
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if ch == "\\":
+            esc = True
+            i += 1
+            continue
+        if ch == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str:
+            i += 1
+            continue
+        if ch == "[":
+            depth_arr += 1
+        elif ch == "]":
+            if depth_arr == 0:
+                array_closed = True
+                break
+            depth_arr -= 1
+        i += 1
+
+    # 已回收的对象里取末尾题号（即便数组未闭合也有价值）
+    objs = _collect_complete_objects(text, array_open_idx)
+    last_q = _extract_last_question_number(objs)
+
+    if not array_closed:
+        return (True, last_q)
+    # 数组闭合但 raw_decode 仍失败（罕见）→ 仍视作可疑
+    return (False, last_q)
+
+
+def _extract_last_question_number(obj: Any) -> Optional[int]:
+    """从解析/回收出的对象里提取末尾题号，供续拆定位。"""
+    questions: List[Any]
+    if isinstance(obj, dict):
+        questions = obj.get("questions") or []
+    elif isinstance(obj, list):
+        questions = obj
+    else:
+        return None
+    if not questions:
+        return None
+    no_pat = re.compile(r"^\s*(\d{1,2})[\s.、．]")
+    for q in reversed(questions):
+        if not isinstance(q, dict):
+            continue
+        for key in ("content", "stem", "question"):
+            v = q.get(key)
+            if isinstance(v, str):
+                mm = no_pat.match(v)
+                if mm:
+                    try:
+                        return int(mm.group(1))
+                    except ValueError:
+                        return None
     return None
 
 

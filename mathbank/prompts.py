@@ -225,75 +225,57 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
     #    模型会把未锁定的公式 $ 误删导致公式丢失，故 PDF 须改为「主动用 $...$ 包裹」。
     if formula_lock:
         formula_lock_section = (
-            "2.1 公式锁定协议（极其重要，漏掉会导致整卷导入失败）：输入中所有公式都被包裹为 `<mathbank-math id=\"M1\">完整公式</mathbank-math>`（编号 M1、M2… 递增），标签内的公式仅用于你理解题意，是只读来源。你在输出 `content` 和 `answer_markdown` 时，必须将每个 `<mathbank-math id=\"M1\">$...$</mathbank-math>` 原样替换为且仅替换为一次对应的 `[[M1]]`，禁止输出公式本身的 LaTeX、禁止删除该标记、禁止改名、禁止把同一 id 放进多个题目。\n"
-            "2.1.1 示例：输入题干为\"全集 <mathbank-math id=\"M1\">$U=\\{1,2\\}$</mathbank-math> 已知...\"，则输出 `content` 必须是\"全集 [[M1]] 已知...\"，系统会自动把 [[M1]] 还原为原公式。你绝不能输出 $U=\\{1,2\\}$。\n"
-            "2.1.2 即使你觉得某个公式很简单，也绝不许把 `[[M1]]` 展开成 LaTeX；必须保持 `[[Mn]]` 形式，否则公式将丢失或串题。\n"
+            "5. 公式锁定：输入中 `<mathbank-math id=\"M1\">公式</mathbank-math>` 是只读公式标记，"
+            "输出时必须把每个标记替换为对应 `[[Mn]]`（M1→[[M1]]），严禁输出公式本体 LaTeX、删除/改名标记、或把一个 id 用两次。"
+            "示例：`全集 <mathbank-math id=\"M1\">$U=\\{1,2\\}$</mathbank-math>` → 输出 `全集 [[M1]]`。\n"
         )
     else:
         formula_lock_section = (
-            "2.1 公式直接包裹协议（极其重要，漏掉会导致公式丢失）：本卷（PDF 提取）公式**未做锁定标记**，原始公式以纯文本/Unicode 或零散 `$...$` 出现。你必须在输出 `content` 和 `answer_markdown` 时，把**每一个**数学公式、符号、变量与表达式用 LaTeX 数学模式完整包裹——行内公式用 `$...$`，独立成行的公式用 `$$...$$`。\n"
-            "2.1.1 必须原样保留公式本体（含 `$` 定界符），绝对禁止丢弃 `$`、禁止把公式写成纯中文/纯文本、禁止用 `[[Mn]]` 占位符（本卷无锁定标记，输出中不得出现任何 `[[Mn]]`）。\n"
-            "2.1.2 示例：输入题干为\"全集 U={1,2} 已知...\"，则输出 `content` 必须是\"全集 $U=\\{1,2\\}$ 已知...\"，公式必须带 `$` 包裹，且不得出现 `[[M1]]` 这类占位符。\n"
+            "5. 公式包裹：本卷公式未锁定，输出时必须把每个数学公式/符号用 `$...$`（行内）或 `$$...$$`（独立）完整包裹，"
+            "严禁丢 `$`、严禁写成纯中文、严禁用 `[[Mn]]` 占位。示例：`全集 U={1,2}` → 输出 `全集 $U=\\{1,2\\}$`。\n"
         )
 
     system_instructions = (
-        "你是一位资深高中数学教研专家与 LaTeX 排版大师。请阅读输入的试卷源码，智能切分为题目列表 JSON。\n\n"
-        "【可选教材范围与章节】:\n"
-        f"{curriculum_text}\n"
-        f"【学段 compulsory 受控取值 — 严格从此列表中选取，不得自创、改写或填章节/小节名】: {'、'.join(list(curriculum.keys())) if isinstance(curriculum, dict) else '（见上方教材范围顶层书名）'}\n"
-        "【核心拆题与分类规范】:\n"
-        "1. 字段分类：`compulsory` 必须是上方「学段受控取值」中的某一个**完整书名**（例如「必修一」），绝不可填章节名、小节名或自造词；`chapter` 必须是该学段下**精确的章节名**（须与上方教材范围完全一致，不得增删序号与字词）；题型 `question_type`（single_choice / multi_choice / fill_in_blank / detailed_answer）；难度 `difficulty`（easy_error / normal / challenge / qiangji）；剥离题号与出处信息（如 2024·全国·高考真题）填入 `source`；`source` 必须是「年份·卷期·学校」等可读出处字符串，**严禁是 LaTeX/TikZ 代码或伪代码**（如 `\\begin{tikzpicture}`），无法确定真实出处时返回空字符串 `\"\"`，不得用任何 LaTeX 片段填充。\n"
-        "1.0 题干纯净：`content` 是去掉原卷大题号后的纯净题干（系统会在组卷时统一编号）。\n"
-        "1.0.1 选项豁免（极重要，违反即判本次输出错误）：上面这条**只针对题干开头的大题号**，"
-        "**绝不适用于选择题的 A./B./C./D. 选项**。选择题的四个选项必须**全部、原样**保留在 `content` 中，"
-        "严禁把选项当成编号删掉、严禁把选项搬进 `answer_markdown`。\n"
-        "1.2 标签自动标注（重要）：必须为每道题额外产出 `knowledge_list`（字符串数组，列出本题涉及的**全部**细粒度知识点，如 [\"函数单调性\", \"导数应用\"]，可跨多个知识点）与 `solve_method`（单个字符串，给出本题**最贴切的核心解题方法/思想方法**，如 \"数形结合\"、\"分类讨论\"、\"换元法\"、\"待定系数法\"、\"反证法\"、\"归纳法\" 等，仅取最具代表性的一个）。\n"
-        "1.3 关联章节与主题标签（融合题重要）：对跨章节的融合题，额外产出 `related_chapters`（字符串数组，列出本题**关联**的其他学段/章节/小节，格式为 \"学段 / 章节 / 小节\"，如 \"必修一 / 集合与函数概念 / 函数的基本性质\"；主分类已填的章节不必重复；单章节题给空数组 []）；以及 `tags`（字符串数组，列出本题**主题/思想方法**标签，如 [\"数形结合\", \"转化与化归\"]，可多选；单题可留空 []）。\n"
-        f"1.1 {CLASSIFICATION_PRIORITY_RULE}\n"
-        "2. 文字与插图忠实保留：100% 完整保留题干所有汉字，绝对禁止删除“（如图）”、“如图所示”、“如右图所示”等几何指代描述！绝对保留 Markdown/LaTeX 原有的图片链接（如 `![](/static/uploads/...)` 或 `\\includegraphics{...}`），并将其 URL/文件名提取至 `referenced_images` 数组中。如输入中出现 `[公式待核对]`、`[公式结构待核对]`、`[特殊字符待核对]` 或“公式无法安全提取”，必须原样保留标记及紧随的预览图，绝不得猜测、补写或替换公式。\n"
+        "你是资深高中数学教研专家，把试卷源码切分为题目列表 JSON。\n\n"
+        f"【学段受控取值（compulsory 只能填这些完整书名）】: {'、'.join(list(curriculum.keys())) if isinstance(curriculum, dict) else '（见教材范围顶层书名）'}\n"
+        f"【教材范围（chapter 只能填以下章节名）】:\n{curriculum_text}\n"
+        "【拆题规范】\n"
+        "1. 字段：compulsory=学段受控取值中的完整书名；chapter=教材范围内精确章节名；question_type=single_choice/multi_choice/fill_in_blank/detailed_answer；difficulty=easy_error/normal/challenge/qiangji；source=题目来源，必须严格遵循下方【题目来源（source）命名规约】，无法确定填空字符串（严禁 LaTeX/TikZ 片段）。\n"
+        "2. 题干与选项：content 去掉开头大题号；选择题 A./B./C./D. 选项必须**全部原样**保留在 content，用 `\\begin{choices}\\item…\\end{choices}`，每项独立一行，严禁删选项或搬进 answer_markdown。\n"
+        "3. 标签：knowledge_list（知识点数组）、solve_method（核心解题方法一个）、tags（主题标签数组）、related_chapters（关联章节数组，单章题 []）。\n"
+        f"3.1 {CLASSIFICATION_PRIORITY_RULE}\n"
+        "4. 忠实保留：100% 保留题干汉字与「（如图）」等指代；图片链接原样保留并记入 referenced_images；`[公式待核对]` 等标记原样保留，不得猜测补写。\n"
         + formula_lock_section +
-        "3. 公式格式化与排版环境：选择题选项统一格式化为 `\\begin{choices} \\item ... \\end{choices}` 环境；**每个选项必须独立成行、以 \\item 开头，严禁将 A./B./C./D. 多个选项写在同一行内联（如 `A. $...$ B. $...$`）**；系统会自动为每个选项编号 A/B/C/D，故 \\item 内不得再写 A./B. 等显式标号；填空题下划线统一使用标准的 `\\fillin` 宏；文本加粗必须使用 `\\textbf{...}`（严禁双星号 `**`）；同时严禁用单个 `*` 把几何顶点、随机变量、参数等做成 Markdown 斜体（如 `*ABC*`、`*X*`、`*x_0*`），这类符号一律用 `$...$` 包裹（如 `$ABC$`、`$X$`、`$x_0$`）。\n"
-        "4. 符号与公式规范：仅对含义明确的 Unicode 数学字符与结构（如 √、∈、α、β以及分子/分母边界清晰的分式）规范化为等价 LaTeX 语法（如 `\\sqrt{...}`, `\\frac{...}{...}`, `\\in`, `\\alpha`）。不得将普通字母 `j`、`p` 等根据语境猜成希腊字母或分式；不得根据题意自行重建原文中已损坏、缺失或标记待核对的公式。\n"
-        "4.1 PDF 跨页协议：`<!-- MATHBANK_PDF_PAGE:N -->` 仅表示后续原文来自 PDF 第 N 页，用于来源追踪，不是题目边界，也不得出现在输出题干中。若一道题的题干、公式、表格、选项或解析跨越页标，必须按上下文合并为同一道完整题目，禁止按页拆成两题。\n"
-        "5. 换行与段落规范：不同小问（如 (1)、(2)、(i)、(ii)）、证明推导步骤与自然段落之间，必须使用双换行/空行（`\\n\\n`）分隔！\n"
-        "6. 题干净化与客观题答案：若题干/括号/下划线中夹带了答案，必须擦除还原为纯净的空占位符；客观题（选择题/填空题）必须在 `answer_markdown` 第一行醒目输出最终正确答案（如选项字母 A 或数值/表达式），再呈现解析。\n"
+        "6. 排版：填空题下划线用 `\\fillin`；加粗用 `\\textbf{}`（禁 `**`）；几何顶点/变量用 `$...$`（禁单个 `*` 斜体）；不同小问/步骤间空行分隔。\n"
+        "7. 符号与公式规范：仅对含义明确的 Unicode 数学字符与结构（如 √、∈、α、β 以及分子/分母边界清晰的分式）规范化为等价 LaTeX 语法（如 `\\sqrt{...}`、`\\frac{...}{...}`、`\\in`、`\\alpha`）。不得将普通字母 `j`、`p` 等按语境猜成希腊字母或分式；不得根据题意自行重建原文中已损坏、缺失或标记待核对的公式。\n"
+        "8. PDF 跨页协议：`<!-- MATHBANK_PDF_PAGE:N -->` 仅表示后续原文来自 PDF 第 N 页，用于来源追踪，不是题目边界，也不得出现在输出题干中。若一道题的题干、公式、表格、选项或解析跨越页标，必须按上下文合并为同一道完整题目，禁止按页拆成两题。\n"
+        "9. 客观题答案：answer_markdown 第一行先给最终答案（选项字母或数值）再给解析；题干夹带答案擦除为纯净占位。\n"
         f"{answer_rule}\n\n"
     )
 
+    # 题源规约：由 source_normalize 的单一事实源动态拼装，杜绝「代码里一套规约、
+    # 提示词里另一套」的漂移（历史上提示词曾要求模型删除分隔符，与规约相反）。
+    # 传入 paper_title 时明确要求各分段基于同一标题推导：分批拆解每 8 题一段，
+    # 每段各自猜测会让同一份试卷裂成多个来源。
+    system_instructions = system_instructions + "\n" + build_source_rule_prompt() + "\n"
+    if paper_title and str(paper_title).strip():
+        system_instructions += (
+            f"\n【本卷来源唯一依据】本次拆解的试卷标题是「{str(paper_title).strip()}」。\n"
+            "所有题目的 source 都必须**由这个标题推导**，且**每一题输出完全相同的值**："
+            "本卷会被切成多段分别处理，各段自行猜测会让同一份试卷裂成多个来源。\n"
+        )
+
     if separated_mode:
         separated_rule = (
-            "【分离式文档（题目在前、解析在后）强约束 — 必须严格遵守】:\n"
-            "1. 本文档为「题干区」与「解析区」物理分离结构：前半部分是全部题目的纯净题干（无答案），后半部分是按题号排列的参考答案与解析。\n"
-            "2. 你必须先完整提取前半部分的题号序列（如 1,2,3… 或 一,二,三…），建立「题号 → 题干」的映射。\n"
-            "3. 后半部分每段解析必须显式绑定其对应题号：在每道题的 JSON 中填写 `answer_belongs_to` 为该段解析对应的前文题号字符串（如 \"3\" 或 \"三\"）。严禁凭内容猜测、严禁把独立解析拆成新题、严禁把多段解析塞进同一题。\n"
-            "4. 若某题在解析区找不到对应段落，则其 `answer_markdown` 设为空字符串 \"\" 且 `answer_belongs_to` 为 null，并在该题目的 `source` 末尾追加标注「[缺解析]」。\n"
-            "5. 若解析区多出无法对应任何题号的段落，仍按题号顺序尽力配对最近的题目；实在无法配对的，将其内容填入 `answer_markdown` 并设 `answer_belongs_to` 为该段自身标注的题号。\n"
-            "6. 解析区通常带有显式题号（如「三、」「3.」），请以该显式题号为锚点进行配对，这是唯一权威依据。\n"
+            "【分离式文档（题目前、解析后）】: 前半是纯题干、后半是按题号排列的解析。先提取题干题号序列，"
+            "再把每段解析按题号绑定到对应题，填入 answer_belongs_to（题号字符串）；找不到对应段的题 answer_markdown 设为空、answer_belongs_to 为 null 并在 source 末尾加「[缺解析]」。\n"
         )
         system_instructions = system_instructions + separated_rule + "\n"
 
     system_instructions = system_instructions + (
-        "【输出约束与 JSON 格式】:\n"
-        "必须且只能输出严格合法的 JSON 对象，绝对不要包裹 ```json Markdown 代码块！字符串内部换行必须输出 JSON 转义序列 `\\n`（反斜杠+n），LaTeX 命令的反斜杠必须按 JSON 规范转义为双反斜杠 `\\\\`。\n"
-        "{\n"
-        '  "questions": [\n'
-        '    {\n'
-        '      "content": "纯净题干（包含 LaTeX 排版与图片标记）",\n'
-        '      "answer_markdown": "答案与解析",\n'
-        '      "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
-        '      "compulsory": "学段名称",\n'
-        '      "chapter": "章节名称",\n'
-        '      "difficulty": "easy_error / normal / challenge / qiangji",\n'
-        '      "source": "出处信息或空字符串（严禁 LaTeX/TikZ 片段，拿不准就填空字符串）",\n'
-        '      "knowledge_list": ["细粒度知识点1", "细粒度知识点2"],\n'
-        '      "solve_method": "核心解题方法 (如: 数形结合)",\n'
-        '      "related_chapters": ["关联章节 (如: 必修一 / 集合与函数概念 / 函数的基本性质)", "..."],\n'
-        '      "tags": ["主题标签 (如: 数形结合)", "..."],\n'
-        '      "referenced_images": ["/static/uploads/xxx.png"],\n'
-        '      "answer_belongs_to": "该题解析所对应前文题目的题号字符串（仅分离模式需要，如 \\"3\\" 或 \\"三\\"），若解析紧跟本题则为 null"\n'
-        '    }\n'
-        '  ]\n'
-        "}\n"
+        "【全量输出（防漏题）】无论分几段，必须把本段全部题目完整输出，禁止只输出前几题。\n\n"
+        "【输出】只输出严格合法 JSON（不要 ```json 代码块）；字符串内部换行必须输出 JSON 转义序列 `\\n`（反斜杠+n），LaTeX 命令的反斜杠必须按 JSON 规范转义为双反斜杠 `\\\\`。字段：\n"
+        '{"questions":[{"content":"","answer_markdown":"","question_type":"","compulsory":"","chapter":"","difficulty":"","source":"","knowledge_list":[],"solve_method":"","related_chapters":[],"tags":[],"referenced_images":[],"answer_belongs_to":null}]}\n'
     )
     return system_instructions
 

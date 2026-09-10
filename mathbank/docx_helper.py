@@ -1022,17 +1022,17 @@ def compress_docx_image_links(markdown: str):
         counter[0] += 1
         n = counter[0]
         mapping[n] = {"alt": m.group(1) or "", "url": m.group(2) or ""}
-        return f"[[IMG{n}]]"
+        return f"[插图待补: 图{n}]"
 
     compressed = _DOCX_IMG_LINK_RE.sub(_sub, markdown or "")
     return compressed, mapping
 
 
 def decompress_docx_image_links_in_questions(questions: list, mapping: dict) -> list:
-    """把题目 JSON 里的 ``[[IMGn]]`` 占位符还原为真实图片链接（就地修改）。
+    """把题目 JSON 里的 ``[插图待补: 图N]`` 占位符还原为真实图片链接（就地修改）。
 
-    - ``content`` 中的 ``[[IMGn]]`` → ``![alt](url)``
-    - ``referenced_images`` 中形如 ``[[IMGn]]`` 的元素 → 真实 ``url``
+    - ``content`` 中的 ``[插图待补: 图N]`` → ``![alt](url)``
+    - ``referenced_images`` 中形如 ``[插图待补: 图N]`` 的元素 → 真实 ``url``
     返回 warning 字符串列表（占位符丢失/模型改写时提示人工核对）。
     """
     warnings: list = []
