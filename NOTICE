@@ -1,0 +1,36 @@
+「小陈的数学宝藏」— NOTICE
+============================
+
+版权
+----
+
+Copyright (C) 2026 小陈
+
+本作品是 MathBank（https://github.com/JudgePeach/math-question-bank）的派生作品，
+原始作品版权归 JudgePeach 所有。原始作者的版权声明与许可协议已完整保留。
+
+许可
+----
+
+本作品依 GNU Affero General Public License v3.0 发布，协议全文见 LICENSE 文件
+（该文件为 FSF 发布的协议原文，未作任何修改）。
+
+依 AGPLv3 第 13 条：若通过网络向用户提供本作品的交互式服务，须向该用户提供
+完整对应的源码。本项目定位为本地单机工具，通常不触发该条款；如对外提供
+网络服务，请在服务页面给出源码获取链接。
+
+第三方组件
+----------
+
+本项目 static/lib/ 目录内含若干第三方库与字体（Tailwind CSS、Font Awesome、
+KaTeX、Inter / Outfit 字体等），以实现 100% 离线运行。各组件许可证类型与署名
+详见 static/lib/THIRD_PARTY_LICENSES.md。
+
+- PyMuPDF：GNU AGPL-3.0，与本项目协议兼容。
+- Font Awesome 6 图标：CC BY 4.0，使用中已保留「Font Awesome by Fonticons, Inc.」署名。
+
+题目数据
+--------
+
+本仓库**不包含任何题目数据**。用户题库数据库（*.db）、上传文件（static/uploads/）、
+个人来源映射（data/）与 API 密钥（.env）均已被 .gitignore 忽略，不会随仓库分发。
