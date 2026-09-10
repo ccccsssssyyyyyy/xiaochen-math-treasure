@@ -491,6 +491,11 @@ def test_parse_paper_flows_use_shared_provider_resolution(client):
         # 让本用例只验证共享 provider 解析与模型参数这一核心意图。
         "PREFER_FREE_PARSE_MODEL": "",
         "PREFER_FREE_CLASSIFY_MODEL": "",
+        # 同理关闭题源 AI 兜底归一：本用例的 paper_title 是「测试试卷」这类
+        # 无法规整的占位标题，兜底会额外发一次 LLM 调用（用于把来源加工成规约
+        # 写法），干扰本用例「只在验证共享 provider」的计数断言。该兜底链路本身
+        # 由 tests/test_source_ai_fallback.py 覆盖。
+        "SOURCE_AI_FALLBACK": "0",
     }
     with patch.dict(os.environ, provider_env):
         with patch("mathbank.ai_http.robust_request_post", side_effect=provider_response) as mock_post:

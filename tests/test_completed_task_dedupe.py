@@ -67,13 +67,17 @@ def test_handleParseTaskCompleted_dedupes_by_taskId() -> None:
         "handleParseTaskCompleted 应在确认是新 taskId 后立即加入集合"
     )
     # 必须 has 后早 return
+    # 注意：此处只锁定「命中即早返回」这一不变式，不要求守卫体内出现 console.log——
+    # 调试日志在 e1fa008「清理调试 console.log / 死代码」中已被有意移除，
+    # 旧正则硬编码 console.log 导致守卫本身合规却报错（测试脆弱，非代码缺陷）。
     has_return_after_has = re.search(
-        r"completedTaskIds\.has\([^)]*\)\s*\)\s*\{\s*console\.log[^\n]*\n\s*return\s*;",
+        r"completedTaskIds\.has\([^)]*\)\s*\)\s*\{[^{}]*?return\s*;",
         body,
+        re.DOTALL,
     )
     assert has_return_after_has, (
         "handleParseTaskCompleted 头部应存在 "
-        "`if (completedTaskIds.has(taskId)) { console.log(...); return; }`"
+        "`if (completedTaskIds.has(taskId)) { ...; return; }` 早返回守卫"
     )
 
 
