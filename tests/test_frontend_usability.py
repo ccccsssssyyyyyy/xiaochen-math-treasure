@@ -332,3 +332,35 @@ def test_generated_tailwind_classes_use_configured_scales():
         )
     }
     assert used_standard_steps <= standard_steps
+
+
+def test_card_image_badges_scroll_instead_of_wrapping():
+    """题卡底部配图徽章必须单行横滚，不得换行把操作按钮顶下去。
+
+    回归背景：
+        徽章容器原为 `flex flex-wrap ... max-w-[70%]`，插入多张配图后徽章换行、
+        撑高整个 footer；右侧按钮组 `items-center` 随之居中于多行徽章，视觉上
+        表现为「手动截图」掉到下一行、按钮区上下错位。
+    """
+    import_src = _read(STATIC_JS_DIR / "import.js")
+
+    m = re.search(r'<div class="([^"]*?)" id="card-images-badges-', import_src)
+    assert m, "未定位到题卡配图徽章容器"
+    classes = m.group(1)
+    assert "flex-nowrap" in classes, "徽章容器必须 flex-nowrap，否则多图换行撑高 footer"
+    assert "overflow-x-auto" in classes, "徽章容器必须可横向滚动，以容纳任意数量配图"
+    assert "min-w-0" in classes, "flex item 默认 min-width:auto，不置 0 就无法收缩出滚动区"
+
+    # 徽章自身必须 shrink-0：nowrap 容器里 flex item 默认收缩，会被压扁而非溢出滚动。
+    # 注意：文件里另有 refreshCropInsertTargetBadge 的 badge（截图弹窗插入目标提示），
+    # 与本容器无关，故必须限定在 appendSafeImageBadge 函数体内匹配。
+    start = import_src.find("function appendSafeImageBadge")
+    assert start > 0, "未找到 appendSafeImageBadge"
+    fn_body = import_src[start:start + 1200]
+    badge_m = re.search(r"badge\.className = '([^']*?)'", fn_body)
+    assert badge_m, "未在 appendSafeImageBadge 内找到徽章 class"
+    assert "shrink-0" in badge_m.group(1), "徽章需 shrink-0，否则被压缩而不是溢出滚动"
+
+    # 操作按钮组不得被徽章区挤压，必须永远固定在同一行
+    assert '<div class="flex items-center space-x-2 shrink-0">' in import_src, \
+        "按钮组需 shrink-0，保证任意配图数量下都停在底部同一行"

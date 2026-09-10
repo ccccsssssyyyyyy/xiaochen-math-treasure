@@ -1204,6 +1204,64 @@
         let rectTop = 0;
         let rectWidth = 0;
         let rectHeight = 0;
+
+        // 框选拖拽模式：'draw' 画新框 | 'move' 平移整框 | 'resize' 调整大小
+        // 约定：框选一旦完成即被"锁定"，再次 mousedown 不会重画，
+        // 必须先点「清除框选」（或按 ESC）才能重新画框，避免误点丢失已框好的区域。
+        let cropDragMode = null;
+        let cropResizeHandle = null;   // 'nw' | 'ne' | 'sw' | 'se'，resize 时被拖动的角
+        let cropMoveOffsetX = 0;       // move 模式下鼠标相对框左上角的偏移
+        let cropMoveOffsetY = 0;
+        const CROP_MIN_SIZE = 15;      // 最小框选边长，与 mouseup 的可用性阈值一致
+        const CROP_HANDLE_HIT = 10;    // 手柄命中半径(px)，用于 dataset 不可用时的坐标兜底
+
+        // 纯函数：按「被拖动的角 + 固定不动的对角锚点」重算选区矩形。
+        //   handle        'nw'|'ne'|'sw'|'se'，鼠标正拖动的那个角
+        //   anchorX/Y     固定不动的对角坐标（mousedown 时按 handle 算好）
+        //   curX/curY     当前鼠标位置（调用前已夹在容器可视范围内）
+        //   maxW/maxH     容器可视宽高
+        //   minSize       最小边长
+        // 约定「不翻越」：活动角最多贴到距锚点 minSize 处；鼠标越过锚点时框停在最小尺寸，
+        // 不会翻转到锚点另一侧（用户明确要求禁止翻转）。结果再夹进 [0,maxW]/[0,maxH]。
+        function computeCropResize(handle, anchorX, anchorY, curX, curY, maxW, maxH, minSize) {
+            let left;
+            let top;
+            let w;
+            let h;
+            // 注意顺序：必须先把「会移动的那条边」夹进 [0, 锚点-minSize]，再算宽高。
+            // 若先算 w=anchor-left 再夹 left 到 0，w 不会回缩，框会异常放大并越过锚点。
+            if (handle === 'nw') {
+                left = Math.max(0, Math.min(curX, anchorX - minSize));
+                top = Math.max(0, Math.min(curY, anchorY - minSize));
+                w = anchorX - left;
+                h = anchorY - top;
+            } else if (handle === 'ne') {
+                left = anchorX;
+                top = Math.max(0, Math.min(curY, anchorY - minSize));
+                w = Math.max(minSize, curX - anchorX);
+                h = anchorY - top;
+            } else if (handle === 'sw') {
+                left = Math.max(0, Math.min(curX, anchorX - minSize));
+                top = anchorY;
+                w = anchorX - left;
+                h = Math.max(minSize, curY - anchorY);
+            } else { // se
+                left = anchorX;
+                top = anchorY;
+                w = Math.max(minSize, curX - anchorX);
+                h = Math.max(minSize, curY - anchorY);
+            }
+            left = Math.max(0, left);
+            top = Math.max(0, top);
+            w = Math.min(w, maxW - left);
+            h = Math.min(h, maxH - top);
+            return {
+                left: left,
+                top: top,
+                width: Math.max(0, w),
+                height: Math.max(0, h)
+            };
+        }
         let activePageIndex = 0;
         let baseWidth = 0;
         let baseHeight = 0;
@@ -1351,7 +1409,7 @@
             // Show modal
             const modal = document.getElementById('pdfCropModal');
             modal.classList.remove('hidden');
-            window.MathBankModal.open(modal, { onEscape: closePdfCropModal });
+            window.MathBankModal.open(modal, { onEscape: handlePdfCropEscape });
             setTimeout(() => {
                 modal.classList.remove('opacity-0');
                 modal.querySelector('div').classList.remove('scale-95');
@@ -1367,6 +1425,16 @@
                     activeImg.onload();
                 }
             }, 50);
+        }
+
+        // ESC 分级：已有框选时先清除框选（弹窗保留），无框选才关闭弹窗。
+        // 与「清除框选」按钮等价的键盘入口，便于快速重画。
+        function handlePdfCropEscape() {
+            if (rectWidth > 0 && rectHeight > 0) {
+                clearPdfCropSelection();
+                return;
+            }
+            closePdfCropModal();
         }
 
         function closePdfCropModal() {
@@ -1490,55 +1558,131 @@
                 showToast('页面图加载失败，请重试', 'error');
             };
             
+            // 命中测试：坐标落在某个角手柄的方形范围内则返回 'nw'|'ne'|'sw'|'se'。
+            // 仅作为 data-handle 不可用时的兜底（例如手柄被 pointer-events 屏蔽）。
+            function hitCropHandle(x, y) {
+                if (rectWidth <= 0 || rectHeight <= 0) return null;
+                const corners = {
+                    nw: [rectLeft, rectTop],
+                    ne: [rectLeft + rectWidth, rectTop],
+                    sw: [rectLeft, rectTop + rectHeight],
+                    se: [rectLeft + rectWidth, rectTop + rectHeight]
+                };
+                const keys = Object.keys(corners);
+                for (let k = 0; k < keys.length; k++) {
+                    const c = corners[keys[k]];
+                    if (Math.abs(x - c[0]) <= CROP_HANDLE_HIT && Math.abs(y - c[1]) <= CROP_HANDLE_HIT) {
+                        return keys[k];
+                    }
+                }
+                return null;
+            }
+
+            function isInsideCropRect(x, y) {
+                return rectWidth > 0 && rectHeight > 0
+                    && x >= rectLeft && x <= rectLeft + rectWidth
+                    && y >= rectTop && y <= rectTop + rectHeight;
+            }
+
             // Bind drawing select listeners
+            //
+            // 三态分发（顺序敏感）：
+            //   1) 已有框 + 点在某角手柄     -> resize（拖动该角，对角锚定，不翻越）
+            //   2) 已有框 + 点在框内部       -> move（整框平移）
+            //   3) 已有框 + 点在框外部       -> 忽略：不重画也不清除，框被"锁定"
+            //   4) 无框                      -> draw（画新框）
+            // 清除框选只能通过「清除框选」按钮或 ESC，避免误点丢失已框好的区域。
             activeContainer.addEventListener('mousedown', (e) => {
                 if (e.button !== 0) return; // Only left click
-                isDrawing = true;
-                
-                const rect = activeContainer.getBoundingClientRect();
-                startX = e.clientX - rect.left;
-                startY = e.clientY - rect.top;
-                
-                rectLeft = startX;
-                rectTop = startY;
-                rectWidth = 0;
-                rectHeight = 0;
-                
-                activeOverlay.style.left = `${rectLeft}px`;
-                activeOverlay.style.top = `${rectTop}px`;
-                activeOverlay.style.width = '0px';
-                activeOverlay.style.height = '0px';
-                activeOverlay.classList.remove('hidden');
-                
                 e.preventDefault();
-            });
-            
-            window.addEventListener('mousemove', (e) => {
-                if (!isDrawing) return;
-                
+
                 const rect = activeContainer.getBoundingClientRect();
-                let currentX = e.clientX - rect.left;
-                let currentY = e.clientY - rect.top;
-                
-                currentX = Math.max(0, Math.min(currentX, rect.width));
-                currentY = Math.max(0, Math.min(currentY, rect.height));
-                
-                rectLeft = Math.min(startX, currentX);
-                rectTop = Math.min(startY, currentY);
-                rectWidth = Math.abs(startX - currentX);
-                rectHeight = Math.abs(startY - currentY);
-                
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                const hasSelection = rectWidth > 0 && rectHeight > 0;
+                // 优先取手柄自身的 data-handle（最可靠），取不到再退回坐标命中
+                let handle = null;
+                if (e.target && e.target.dataset) handle = e.target.dataset.handle || null;
+                if (!handle) handle = hitCropHandle(x, y);
+
+                if (hasSelection && handle) {
+                    cropDragMode = 'resize';
+                    cropResizeHandle = handle;
+                    // 锚点 = 被拖角的对角，整个拖动过程固定不动
+                    startX = (handle === 'nw' || handle === 'sw') ? rectLeft + rectWidth : rectLeft;
+                    startY = (handle === 'nw' || handle === 'ne') ? rectTop + rectHeight : rectTop;
+                } else if (hasSelection && isInsideCropRect(x, y)) {
+                    cropDragMode = 'move';
+                    cropMoveOffsetX = x - rectLeft;
+                    cropMoveOffsetY = y - rectTop;
+                } else if (hasSelection) {
+                    return; // 框外点击：保持原框不动
+                } else {
+                    cropDragMode = 'draw';
+                    startX = x;
+                    startY = y;
+                    rectLeft = x;
+                    rectTop = y;
+                    rectWidth = 0;
+                    rectHeight = 0;
+                    activeOverlay.style.left = `${rectLeft}px`;
+                    activeOverlay.style.top = `${rectTop}px`;
+                    activeOverlay.style.width = '0px';
+                    activeOverlay.style.height = '0px';
+                    activeOverlay.classList.remove('hidden');
+                }
+                isDrawing = true;
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                const rect = activeContainer.getBoundingClientRect();
+
+                if (!isDrawing) {
+                    // 悬停时光标提示：手柄由自身 CSS cursor 负责（子元素优先），
+                    // 这里只把「框内部」提示成可拖动，否则会一直显示 crosshair。
+                    const hoverX = e.clientX - rect.left;
+                    const hoverY = e.clientY - rect.top;
+                    activeContainer.style.cursor = isInsideCropRect(hoverX, hoverY) ? 'move' : 'crosshair';
+                    return;
+                }
+
+                const currentX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+                const currentY = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+
+                if (cropDragMode === 'resize') {
+                    const box = computeCropResize(
+                        cropResizeHandle, startX, startY, currentX, currentY,
+                        rect.width, rect.height, CROP_MIN_SIZE
+                    );
+                    rectLeft = box.left;
+                    rectTop = box.top;
+                    rectWidth = box.width;
+                    rectHeight = box.height;
+                } else if (cropDragMode === 'move') {
+                    // 整框平移，同样夹在图片内（保持宽高不变）
+                    rectLeft = Math.max(0, Math.min(currentX - cropMoveOffsetX, rect.width - rectWidth));
+                    rectTop = Math.max(0, Math.min(currentY - cropMoveOffsetY, rect.height - rectHeight));
+                } else {
+                    rectLeft = Math.min(startX, currentX);
+                    rectTop = Math.min(startY, currentY);
+                    rectWidth = Math.abs(startX - currentX);
+                    rectHeight = Math.abs(startY - currentY);
+                }
+
                 activeOverlay.style.left = `${rectLeft}px`;
                 activeOverlay.style.top = `${rectTop}px`;
                 activeOverlay.style.width = `${rectWidth}px`;
                 activeOverlay.style.height = `${rectHeight}px`;
             });
-            
+
             window.addEventListener('mouseup', () => {
                 if (!isDrawing) return;
                 isDrawing = false;
-                
-                if (rectWidth > 15 && rectHeight > 15) {
+                cropDragMode = null;
+                cropResizeHandle = null;
+
+                if (rectWidth >= CROP_MIN_SIZE && rectHeight >= CROP_MIN_SIZE) {
                     document.getElementById('pdfCropConfirmBtn').disabled = false;
                     document.getElementById('pdfCropClearBtn').disabled = false;
                     const ocrBtn = document.getElementById('pdfCropOcrBtn');
@@ -1558,7 +1702,12 @@
             }
             rectWidth = 0;
             rectHeight = 0;
-            
+
+            // 回到「可画新框」状态：清掉拖拽模式，否则下次 mousedown 会误判为 move/resize
+            cropDragMode = null;
+            cropResizeHandle = null;
+            isDrawing = false;
+
             const confirmBtn = document.getElementById('pdfCropConfirmBtn');
             if (confirmBtn) confirmBtn.disabled = true;
             
@@ -3840,7 +3989,8 @@
             filename = window.MathBankSafe.sanitizePlainText(filename);
 
             const badge = document.createElement('div');
-            badge.className = 'flex items-center space-x-1 px-2 py-0.5 bg-slate-100 border rounded-full text-[9px] font-semibold text-slate-500 hover:bg-white transition-colors cursor-pointer select-none';
+            // shrink-0：横滚容器里 flex item 默认会收缩，不加会把徽章压扁而不是溢出滚动
+            badge.className = 'flex items-center space-x-1 px-2 py-0.5 bg-slate-100 border rounded-full text-[9px] font-semibold text-slate-500 hover:bg-white transition-colors cursor-pointer select-none shrink-0';
             const icon = document.createElement('i');
             icon.className = 'fa-solid fa-image text-slate-400';
             const label = document.createElement('span');
@@ -4040,14 +4190,17 @@
                     </div>
 
                     <!-- Card Actions Footer -->
-                    <div class="flex justify-between items-center border-t border-slate-100 pt-3 shrink-0">
-                        <div class="flex flex-wrap gap-1.5 items-center max-w-[70%]" id="card-images-badges-${index}">
+                    <div class="flex justify-between items-center gap-2 border-t border-slate-100 pt-3 shrink-0">
+                        <!-- 配图徽章：一律单行横向滚动，不换行。
+                             换行会把 footer 撑高，右侧操作按钮被顶到下一行（视觉上像「手动截图」掉行）。
+                             min-w-0 是必需的：flex item 默认 min-width:auto，不置 0 就无法收缩出滚动区。 -->
+                        <div class="flex flex-nowrap gap-1.5 items-center min-w-0 flex-1 overflow-x-auto overflow-y-hidden whitespace-nowrap custom-scrollbar py-0.5" id="card-images-badges-${index}">
                             <!-- Thumbnail labels of images selected -->
                         </div>
-                        <div class="flex items-center space-x-2">
+                        <div class="flex items-center space-x-2 shrink-0">
                             <input type="checkbox" data-index="${index}" class="card-select-checkbox h-5 w-5 rounded border-slate-300 text-brand-600 focus:ring-brand-500 cursor-pointer transition-colors" ${q.saved ? 'disabled opacity-50' : 'checked'} onclick="event.stopPropagation()" title="${q.saved ? '本题已入库，无需勾选' : '勾选此题加入本次批量导入'}">
                             ${questionHasCropPages(index) ? `
-                                <button onclick="openPdfCropModalForQuestion(${index})" class="glass-btn text-amber-700 font-bold px-3 py-1.5 rounded-lg text-[10px] flex items-center space-x-1" title="查看原卷页面并拖拽框选截图">
+                                <button onclick="openPdfCropModalForQuestion(${index})" class="glass-btn text-amber-700 font-bold px-3 py-1.5 rounded-lg text-[10px] flex items-center space-x-1 shrink-0" title="查看原卷页面并拖拽框选截图">
                                     <i class="fa-solid fa-scissors"></i>
                                     <span>手动截图</span>
                                 </button>

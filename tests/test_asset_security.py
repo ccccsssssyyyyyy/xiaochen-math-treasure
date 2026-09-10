@@ -338,6 +338,44 @@ def test_manual_pdf_crop_requires_a_real_uuid_task_and_bounded_coordinates(
         main.DOCUMENT_TASKS.remove(task_id)
 
 
+def test_manual_crop_pdf_supports_docx_tasks(client, tmp_path):
+    """回归：Word（docx）任务的手动截图此前因 document_type 判死 pdf 被 404 拒绝。"""
+    import main
+
+    headers = {"X-Local-Token": LOCAL_TOKEN}
+    task_id = str(uuid.uuid4())
+    upload_dir = tmp_path / "uploads"
+    temp_dir = upload_dir / "tmp"
+    temp_dir.mkdir(parents=True)
+    page_image = temp_dir / f"docx_page_{task_id}_0.png"
+    page_image.write_bytes(_png_bytes((100, 100)))
+    main.DOCUMENT_TASKS.create(
+        task_id, document_type="docx", temp_assets=[], status="completed"
+    )
+
+    try:
+        with patch("main.UPLOAD_DIR", str(upload_dir)), patch(
+            "main.TMP_UPLOAD_DIR", str(temp_dir)
+        ), patch("main.UPLOAD_DIR_REL", "static/uploads"):
+            valid = client.post(
+                "/api/ai/manual-crop-pdf",
+                json={
+                    "task_id": task_id,
+                    "page_index": 0,
+                    "xmin": 10,
+                    "ymin": 10,
+                    "xmax": 80,
+                    "ymax": 80,
+                },
+                headers=headers,
+            )
+        assert valid.status_code == 200
+        crop_name = Path(valid.json()["image_path"]).name
+        assert (temp_dir / crop_name).is_file()
+    finally:
+        main.DOCUMENT_TASKS.remove(task_id)
+
+
 def test_cancel_endpoint_does_not_delete_assets_when_worker_wins_race(
     client, monkeypatch
 ):

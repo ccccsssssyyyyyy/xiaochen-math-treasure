@@ -4670,13 +4670,14 @@ def manual_crop_pdf(payload: dict):
         except (ValueError, AttributeError) as exc:
             raise ValueError("任务 ID 格式不正确。") from exc
         task = DOCUMENT_TASKS.snapshot(task_id)
-        if not task or task.get("document_type") != "pdf":
+        doc_type = (task or {}).get("document_type")
+        if not task or doc_type not in ("pdf", "docx"):
             return JSONResponse(
-                content={"status": "error", "message": "未找到对应的 PDF 任务！"},
+                content={"status": "error", "message": "未找到对应的 PDF/Word 任务！"},
                 status_code=404,
             )
         if task.get("status") in {"cancelled", "error"}:
-            raise ValueError("已取消或失败的 PDF 任务不能再裁剪。")
+            raise ValueError("已取消或失败的文档任务不能再裁剪。")
         page_index = int(payload.get("page_index", 0))
         if page_index < 0 or page_index >= MAX_PDF_TASK_PAGES:
             raise ValueError("页码越界。")
@@ -4693,12 +4694,15 @@ def manual_crop_pdf(payload: dict):
         ):
             raise ValueError("裁剪坐标必须位于 0–100，且框选区域不能为空。")
 
-        img_filename = f"pdf_page_{task_id}_{page_index}.png"
+        # 页图文件名前缀随文档类型：PDF 直提为 pdf_page_，Word 转 PDF 后为 docx_page_
+        # （_render_pdf_bytes_to_page_images 生成），此前只认 pdf_page_ 导致 Word 手动截图 404。
+        img_prefix = "docx_page_" if doc_type == "docx" else "pdf_page_"
+        img_filename = f"{img_prefix}{task_id}_{page_index}.png"
         img_filepath = Path(TMP_UPLOAD_DIR) / img_filename
         
         if not img_filepath.is_file() or img_filepath.is_symlink():
             return JSONResponse(
-                content={"status": "error", "message": "未找到对应的 PDF 页面图片！"},
+                content={"status": "error", "message": "未找到对应的页面图片！"},
                 status_code=404
             )
             

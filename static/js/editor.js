@@ -2172,6 +2172,10 @@ let bankQuestionsRetryTimer = null;
                                .replace(/\\item\s*\\\\/g, '\\item');
 
             // Process choices environment (exam-zh-choices)
+            // 选项正文里残留的显式标号（A. / （A） / A、 / A)）——与 normalizeChoiceOptions 的
+            // LABEL_PREFIX_RE 同源。若不剥离，自动编号 + 残留标号会渲染成「A. A. 8π/5」。
+            // 数学占位符 @@MATH_PLACEHOLDER_n@@ 不含「字母紧邻 .、)）」结构，不会误伤公式。
+            const CHOICES_ITEM_LABEL_RE = /^\s*(?:（\s*[A-Ea-e]\s*）|\(?\s*[A-Ea-e]\s*[\.、)）])\s*/;
             tempText = tempText.replace(/\\begin\{choices\}([\s\S]*?)\\end\{choices\}/g, function(match, inner) {
                 const items = inner.split(/\\item/).map(item => item.trim()).filter(item => item.length > 0);
                 const labels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
@@ -2194,9 +2198,12 @@ let bankQuestionsRetryTimer = null;
                 let html = `<div class="grid ${gridCols} gap-2 my-2 select-none choices-grid items-baseline" data-preferred-columns="${preferredColumns}">`;
                 items.forEach((item, idx) => {
                     const label = labels[idx] || (idx + 1);
-                    let cleanItem = item;
+                    // 先剥离残留标号再做数学包裹，否则「A.」会被一并塞进 $...$ 数学模式
+                    let cleanItem = item.replace(CHOICES_ITEM_LABEL_RE, '').trim();
                     // Auto-wrap LaTeX math macros (e.g. \dfrac{5}{2}) in choices option if missing $
-                    if (/\\(dfrac|frac|sqrt|cdot|times|pm|le|ge|ne|in|vec|mathbf|mathrm|text|alpha|beta|gamma|delta|theta|pi|varphi|omega)\b/.test(cleanItem) && !/\$/.test(cleanItem)) {
+                    // 数学已被占位符保护时说明原本就有 $...$，不再重复包裹
+                    const hasProtectedMath = /@@MATH_PLACEHOLDER_\d+@@/.test(cleanItem);
+                    if (!hasProtectedMath && /\\(dfrac|frac|sqrt|cdot|times|pm|le|ge|ne|in|vec|mathbf|mathrm|text|alpha|beta|gamma|delta|theta|pi|varphi|omega)\b/.test(cleanItem) && !/\$/.test(cleanItem)) {
                         cleanItem = '$' + cleanItem + '$';
                     }
                     html += `<div class="choices-item flex items-baseline"><span class="choices-label font-bold mr-1.5 text-slate-800 shrink-0">${label}.</span><span class="choices-content flex-1 [&>p]:m-0 [&>p]:inline">${cleanItem}</span></div>`;
