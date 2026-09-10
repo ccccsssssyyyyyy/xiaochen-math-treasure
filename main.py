@@ -3391,7 +3391,8 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
         difficulty = normalize_difficulty(result.get("difficulty", ""))
 
         # 来源：自动归一（与一次性批量归一、手动保存共用同一映射表）
-        source = normalize_source(result.get("source"))
+        # allow_ai：本就在 AI 链路上，规则无力规整的全新来源交给 LLM 按规约加工一次
+        source = normalize_source(result.get("source"), allow_ai=True)
 
         # 学段 / 章节：校验必须存在于 curriculum，否则回退到第一个可用学段/章节
         # 兼容模型可能输出的旧字段名 category_compulsory / category_chapter
@@ -3930,12 +3931,18 @@ def parse_paper_text_internal(
     progress_callback=None,
     extra_system_note: str = "",
     formula_lock: bool = True,
+    quality_out=None,
+    force_paid: bool = False,
+    paper_title: str = "",
 ) -> list:
     """内部通用函数：调用选定的 LLM 接口，将 LaTeX 试卷内容解析拆分为结构化 JSON 卡片
 
     progress_callback: 可选回调 (done, total)，逐段回报分块解析进度，供调用方刷新任务进度。
+    force_paid: True 时跳过免费/付费难度评估，直接使用付费拆解模型（Word 链路默认开）。
+    paper_title: 试卷标题。传入后会写进提示词作为「本卷来源的唯一依据」——分批拆解
+        每 8 题一段，各段独立调 LLM，若让每段自行猜测来源，同一份卷会裂成多个来源。
     """
-    decision = decide_parse_model(latex_content)
+    decision = decide_parse_model(latex_content, force_paid=force_paid)
     provider = decision["provider"]
     api_key = provider.api_key
     api_base = provider.api_base
@@ -3947,7 +3954,7 @@ def parse_paper_text_internal(
 
     system_instructions = build_pdf_parse_system_prompt(
         get_current_curriculum(), generate_answers_bool, separated_mode=separated_mode,
-        formula_lock=formula_lock,
+        formula_lock=formula_lock, paper_title=paper_title,
     )
     if extra_system_note:
         system_instructions = system_instructions + extra_system_note
@@ -4126,7 +4133,7 @@ def ai_parse_paper(
                 content_str = re.sub(r'^[\s、\.．]+', '', content_str)
                 q["content"] = content_str
                 
-            q["source"] = normalize_source(extracted_source or paper_title, fallback_title=paper_title)
+            q["source"] = normalize_source(extracted_source or paper_title, fallback_title=paper_title, allow_ai=True)
             
             # Clean up double-escaped literal \n in fields
             for field in ["content", "answer_markdown"]:
@@ -5101,7 +5108,7 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
 
     # 4. 对每个题目卡片进行字段修补、占位符替换与资源晋升准备
     for q in parsed_questions:
-        q["source"] = normalize_source(q.get("source") or paper_title, fallback_title=paper_title)
+        q["source"] = normalize_source(q.get("source") or paper_title, fallback_title=paper_title, allow_ai=True)
 
         # 规范化 AI 自动打标的知识点 / 解题方法多标签（受控词表映射 + 去重）
         q["knowledge_list"] = normalize_tag_list(q.get("knowledge_list"), field="knowledge_list")

@@ -154,3 +154,88 @@ def test_zhoulian_canonical_values_are_idempotent():
         "高三上 · 周练 · 第一中学 · 2027-2028学年",
     ]:
         assert normalize_source(value) == value
+
+
+# ---------------------------------------------------------------------------
+# 新增规约：模拟 / 联考 / 教辅 与 分隔符幂等（2026-09-10 规约扩展）
+# ---------------------------------------------------------------------------
+
+def test_mock_exam_and_liankao_normalized():
+    """模拟 / 联考此前无规约，只能以 2 段裸写式入库；现自动贴合规约。"""
+    assert normalize_source("2025 · 江苏盐城模拟") == "2025 · 江苏盐城 · 模拟"
+    assert normalize_source("2025 · 江苏模拟") == "2025 · 江苏 · 模拟"
+    assert normalize_source("2025 · T8联考") == "2025 · T8 · 联考"
+    assert normalize_source("2024 · 九省联考") == "2024 · 九省 · 联考"
+    assert normalize_source("2024 · 全国模拟") == "2024 · 全国 · 模拟"
+
+
+def test_mock_exam_output_is_idempotent():
+    """本层产出的规约终态必须幂等（实时钩子会重复调用）。"""
+    for value in ["2025 · 江苏盐城 · 模拟", "2025 · T8 · 联考", "2024 · 九省 · 联考"]:
+        assert normalize_source(value) == value
+
+
+def test_zhoulian_tolerates_repeated_zhou_character():
+    """真实文件名存在「第三周周练」（周字重复）写法，规则须一并覆盖。"""
+    assert normalize_source("第一中学高2028届高一上第三周周练") == "高一上 · 第三周练 · 第一中学 · 2025-2026学年"
+    # 既有的单「周」写法行为不变
+    assert normalize_source("第一中学高2028届高一上第三周练") == "高一上 · 第三周练 · 第一中学 · 2025-2026学年"
+
+
+def test_gaokao_both_separator_forms_are_idempotent():
+    """高考真题的两种分隔符均合规，归一时不互改（否则同卷会裂成两条来源）。"""
+    from mathbank.source_normalize import is_canonical_source
+    for value in ["2023·全国甲卷·高考真题", "2023 · 全国甲卷 · 高考真题"]:
+        assert is_canonical_source(value), f"应判合规: {value!r}"
+        assert normalize_source(value) == value
+
+
+def test_is_canonical_source_covers_all_six_rules():
+    """六类规约各取一例判合规，游离写法判不合规。"""
+    from mathbank.source_normalize import is_canonical_source
+    canonical = [
+        "高一上 · 12月月考 · 成都七中 · 2023-2024学年",
+        "2023·全国甲卷·高考真题",
+        "2025 · 江苏盐城 · 模拟",
+        "2026 · 四川高三第一次教学质量联合测评 · 联考",
+        "高考 · 专题汇编 · 数列",
+        "教辅 · 一数必刷100题",
+        "未知",
+        # 空值归一后即「未知」，故同样不计为违规残留
+        "", None,
+    ]
+    for v in canonical:
+        assert is_canonical_source(v), f"应判合规: {v!r}"
+
+    non_canonical = [
+        "2023-2024学年四川省成都七中高一（上）月考",  # 原始文件名
+        "2025 · 江苏盐城模拟",                        # 2 段裸写式
+        "高一集合运算小测",                            # 教辅未加前缀
+        "2024 · 全国甲卷",                             # 高考漏后缀
+    ]
+    for v in non_canonical:
+        assert not is_canonical_source(v), f"应判不合规: {v!r}"
+
+
+def test_all_db_sources_are_canonical():
+    """库内题源必须全部符合规约（回归防线：归一化脚本改动 / 新来源入库后自查）。
+
+    仅当数据库文件存在时执行，避免在无 DB 的 CI 环境误报失败。
+    """
+    import sqlite3
+    from pathlib import Path
+
+    from mathbank.source_normalize import is_canonical_source
+
+    db = Path(__file__).resolve().parent.parent / "math_question_bank.db"
+    if not db.is_file():
+        pytest.skip("本地题库不存在，跳过库内合规校验")
+
+    con = sqlite3.connect(str(db))
+    try:
+        sources = [r[0] for r in con.execute("SELECT DISTINCT source FROM questions")]
+    finally:
+        con.close()
+
+    offenders = [s for s in sources if not is_canonical_source(s)]
+    assert not offenders, f"库内存在不符合规约的题源: {offenders}"

@@ -2,6 +2,8 @@
 
 import json
 
+from mathbank.source_normalize import build_source_rule_prompt
+
 
 COMMON_OCR_PROMPT = (
     "请精确识别并提取图像中的所有文字与数学公式（不得遗漏方括号与题目来源），直接输出转录结果，严禁包含任何前言或解释。\n"
@@ -54,7 +56,8 @@ def build_classification_system_prompt(curriculum: dict) -> str:
         f"3. {CLASSIFICATION_PRIORITY_RULE}\n"
         "4. 判定细粒度题型 `question_type`，取值只能是如下之一：单选题为 `single_choice`，多选题为 `multi_choice`，填空题为 `fill_in_blank`，解答题为 `detailed_answer`。通过题干判断单选/多选（如题干含\"多选题\"、\"(多选)\"、要求选出多个选项等）。题干出现 `\\fillin` 时判为 `fill_in_blank`，出现 `\\begin{choices}` 时判为选择题；无法可靠判断时默认为 `single_choice`。\n"
         "5. 判定难度 `difficulty`：易错题为 `easy_error`，常规题为 `normal`，挑战题为 `challenge`，强基题为 `qiangji`；无法判断时默认为 `normal`（常规题）。\n"
-        "6. 从题干开头剥离出处信息填入 `source`，例如 \"2024·全国·高考真题\" 清洗为 \"2024全国高考真题\"（去掉 \"·\"、\"•\" 等分隔符与多余空格，合并连续空白）。无出处则为空字符串。\n"
+        "6. 从题干开头剥离出处信息填入 `source`。题干里形如「（2023·全国甲卷）」的括注即为出处；无出处则填空字符串。\n"
+        f"{build_source_rule_prompt(with_examples=True)}\n"
         "7. `compulsory` 必须是上方「学段受控取值」中的某一个**完整书名**（例如「必修一」），绝不可填章节名、小节名或自造词；`chapter` 必须是该学段下**精确的章节名**（须与上方教材范围完全一致，不得增删序号与字词）；`category_knowledge` 必须是可选小节中的精确字符串，不存在则给最接近的章节名。\n"
         "8. `knowledge_list` 与 `solve_method` 均为字符串数组：knowledge_list 为本题知识点文本标签（如 [\"函数单调性\",\"导数应用\"]），solve_method 为本题解题方法文本标签（如 [\"导数法\",\"分类讨论\"]）。\n"
         "9. 综合题/融合题常跨越多个章节。除主分类（compulsory/chapter/category_knowledge）外，若本题确实还涉及教材范围内其他章节，请在 `related_chapters` 中以数组给出这些【额外】章节，每个元素为 {\"compulsory\": \"学段\", \"chapter\": \"章节\", \"knowledge\": \"小节\"}（小节可省略或给最接近章节名，必须是上面教材范围内的精确字符串）。若本题仅属于单一章节，则 `related_chapters` 给空数组 []。\n"
@@ -211,10 +214,10 @@ def build_answer_rule(generate_answers_bool: bool) -> str:
     )
 
 
-def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False, formula_lock: bool = True) -> str:
+def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool, separated_mode: bool = False, formula_lock: bool = True, paper_title: str = "") -> str:
     curriculum_text = build_curriculum_text(curriculum)
     answer_rule = build_answer_rule(generate_answers_bool)
-    
+
     # 公式协议分支：
     #  - DOCX / TeX 路径在调用 parse 前已用 lock_visible_math 将公式锁定为
     #    <mathbank-math id="M1"> 标记，模型须输出 [[M1]] 占位符，服务端再还原；
@@ -299,6 +302,7 @@ def build_import_parse_system_prompt(
     curriculum: dict,
     generate_answers_bool: bool = False,
     separated_mode: bool = False,
+    paper_title: str = "",
 ) -> str:
     """Prompt for pasted and uploaded single-file TeX paper parsing.
 
@@ -310,6 +314,7 @@ def build_import_parse_system_prompt(
         curriculum,
         generate_answers_bool=generate_answers_bool,
         separated_mode=separated_mode,
+        paper_title=paper_title,
     ) + (
         "\n【单文件 TeX 源码专项规则】:\n"
         "1. 输入已由本地预处理器提取 document 正文并清除普通注释；不得把 documentclass、usepackage、页眉页脚或宏定义上下文当成题目。\n"

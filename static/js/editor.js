@@ -2524,7 +2524,8 @@ let bankQuestionsRetryTimer = null;
             // 无则退化为裸「周练」，对无周次来源零影响。
             // 注意：无周次时「周」字仍存在（高一上*周*练），必须由备选分支消耗，
             // 否则规则只匹配带「第N」的写法。
-            var ZHOULIAN_RE = /^(.+?)高(\d{4})(级|届)高([一二三])([上下])(?:第([一二三四五六七八九十百\d]+)周|周)练(?:习)?$/;
+            // 「第N周」后的「周」字可重复：真实文件名存在「第三周周练」写法。
+            var ZHOULIAN_RE = /^(.+?)高(\d{4})(级|届)高([一二三])([上下])(?:第([一二三四五六七八九十百\d]+)周周?|周)练(?:习)?$/;
             var LEVEL_NUM = { '一': 1, '二': 2, '三': 3 };
             // 学校别名展开：别名表来自后端注入（SOURCE_ALIASES），未加载则原样返回，
             // 与后端 mathbank.source_normalize.SCHOOL_ALIASES 同源，杜绝前后端别名不一致。
@@ -2571,14 +2572,60 @@ let bankQuestionsRetryTimer = null;
                 return '高' + m[4] + m[5] + ' · ' + examType + ' · ' + school + ' · ' + start + '-' + (start + 1) + '学年';
             }
 
+            // 规约判定（Tier 1.2 幂等保护 / 脚本残留报告），与后端
+            // mathbank.source_normalize._SOURCE_PATTERNS 完全对应。
+            // 高考真题例外：无空格分隔符（2023·全国甲卷·高考真题）同样合规，
+            // 否则库内既有的同一份卷会被改写成带空格形式，裂成两条来源。
+            var SOURCE_PATTERNS = [
+                /^高[一二三][上下] · [^·]+ · [^·]+ · \d{4}-\d{4}学年$/,
+                /^\d{4}(?: · |·)[^·]+(?: · |·)高考真题$/,
+                /^\d{4} · [^·]+ · 模拟$/,
+                /^\d{4} · [^·]+ · 联考$/,
+                /^高考 · 专题汇编 · [^·]+$/,
+                /^教辅 · [^·]+$/
+            ];
+            function isCanonicalSource(str) {
+                if (str === null || str === undefined) return false;
+                var t = String(str).trim();
+                if (!t || t === '未知') return true;
+                for (var i = 0; i < SOURCE_PATTERNS.length; i++) {
+                    if (SOURCE_PATTERNS[i].test(t)) return true;
+                }
+                return false;
+            }
+
+            // 「模拟 / 联考」结构识别（Tier 1.6），与后端 _match_mock_exam 对应：
+            //   2025 · 江苏盐城模拟  ->  2025 · 江苏盐城 · 模拟
+            //   2024 · 九省联考      ->  2024 · 九省 · 联考
+            // 这类来源此前无对应规约，只能以 2 段裸写式入库而游离于规约之外。
+            var MOCK_EXAM_RE = /^(\d{4})\s*·\s*(.+?)\s*(模拟|联考)$/;
+            function matchMockExam(rawStr) {
+                if (!rawStr) return null;
+                var t = String(rawStr).replace(/\s+/g, ' ').trim();
+                var m = MOCK_EXAM_RE.exec(t);
+                if (!m) return null;
+                var subject = m[2].replace(/^·|·$/g, '').trim();
+                if (!subject) return null;
+                return m[1] + ' · ' + subject + ' · ' + m[3];
+            }
+
             // Tier 1: 精确别名表（与后端 mathbank.source_normalize.CANONICAL_MAP 一致）
             if (SOURCE_CANONICAL_MAP && Object.prototype.hasOwnProperty.call(SOURCE_CANONICAL_MAP, s)) {
                 return SOURCE_CANONICAL_MAP[s];
             }
 
+            // Tier 1.2: 幂等保护 —— 已符合规约的来源原样返回。
+            // 关键：高考真题的两种分隔符均判合规，否则无空格式会被 Tier 2 加空格，
+            // 与库内既有的同一份卷裂成两条来源。
+            if (isCanonicalSource(s)) return s;
+
             // Tier 1.5: 通用「周练」裸写式结构识别
             var zhouLian = matchZhouLian(s);
             if (zhouLian) return zhouLian;
+
+            // Tier 1.6: 通用「模拟 / 联考」结构识别
+            var mockExam = matchMockExam(s);
+            if (mockExam) return mockExam;
 
             // Tier 2: 结构兜底（best-effort，针对全新输入）
             // 学校别名
@@ -2610,6 +2657,10 @@ let bankQuestionsRetryTimer = null;
             // Tier 2.5: 清理后重试通用规则（容忍「…第三周练数学试题」这类尾缀噪声）
             zhouLian = matchZhouLian(s);
             if (zhouLian) return zhouLian;
+
+            // Tier 2.6: 清理后重试模拟 / 联考
+            mockExam = matchMockExam(s);
+            if (mockExam) return mockExam;
 
             return s || '未知';
         }
