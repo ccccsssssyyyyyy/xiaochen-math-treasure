@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 import secrets
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request, Response, Header
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
