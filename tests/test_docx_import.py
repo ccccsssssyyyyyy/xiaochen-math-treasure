@@ -460,6 +460,32 @@ def test_docx_preserves_run_scripts_underlined_blank_and_emphasis():
     assert result["diagnostics"]["underlines_converted"] == 2
 
 
+def test_docx_ascii_emphasis_becomes_math_mode():
+    """回归：Word 数学变量（斜体 x）与符号（粗体 R）应转 $...$ 数学模式。
+
+    成都七中高新校区月考卷的变量用斜体（x/m/xy）、集合符号用粗体（R/N 表
+    ℝ/ℕ）。此前转成裸 \\textit{}/\\textbf{}，KaTeX auto-render 只认 $...$ 分隔，
+    导致拆题页渲染出原始 "textit" 字样。纯 ASCII 的斜体/粗体应进数学模式。
+    """
+    body = """
+    <w:p>
+      <w:r><w:rPr><w:i/></w:rPr><w:t>x</w:t></w:r>
+      <w:r><w:t>∈</w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>R</w:t></w:r>
+      <w:r><w:t>，5</w:t></w:r>
+      <w:r><w:rPr><w:i/></w:rPr><w:t>xy</w:t></w:r>
+    </w:p>
+    """
+    result = extract_docx_markdown(_create_docx_package(body))
+    md = result["markdown"]
+    assert "$x$" in md
+    assert r"$\mathbf{R}$" in md
+    assert "$xy$" in md
+    # 不再产生裸 \textit / \textbf（会被 KaTeX 忽略而显示原始字样）
+    assert r"\textit{" not in md
+    assert r"\textbf{" not in md
+
+
 def test_docx_keeps_text_inside_word_text_box():
     body = """
     <w:p><w:r><w:pict><w:txbxContent>

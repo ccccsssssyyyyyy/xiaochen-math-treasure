@@ -539,6 +539,19 @@ def _word_property_enabled(props, tag: str) -> bool:
     return _word_attr(prop, "val", "true").lower() not in {"0", "false", "none", "off"}
 
 
+def _is_math_run(value: str) -> bool:
+    """判断 Word 斜体/粗体 run 是否为数学变量/符号（纯 ASCII，无中文等 CJK）。
+
+    Word 里数学变量（x、m、xy）用斜体、数学符号（R、N 表 ℝ/ℕ）用粗体，
+    但中文标题/题干也用粗体。纯 ASCII 视为数学、应转 ``$...$`` 数学模式；
+    含 CJK 视为文本强调、保留 ``\\textit{}/\\textbf{}``。
+    """
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return all(ord(ch) < 128 for ch in stripped)
+
+
 def _script_latex(value: str) -> str:
     stripped = value.strip()
     if stripped.startswith("$") and stripped.endswith("$") and stripped.count("$") == 2:
@@ -613,10 +626,18 @@ def _parse_run(
     # blocks because those contain their own Markdown/LaTeX boundaries.
     can_wrap_text = "\n![" not in value and "[公式待核对" not in value
     if can_wrap_text and _word_property_enabled(props, "i"):
-        value = rf"\textit{{{value}}}"
+        if _is_math_run(value):
+            # 数学变量（斜体）：直接进数学模式，KaTeX 可渲染（此前 \textit 裸命令无法渲染）
+            value = f"${value}$"
+        else:
+            value = rf"\textit{{{value}}}"
         diagnostics["text_styles_converted"] += 1
     if can_wrap_text and _word_property_enabled(props, "b"):
-        value = rf"\textbf{{{value}}}"
+        if _is_math_run(value):
+            # 数学符号（粗体，如 R/N 表 ℝ/ℕ）：粗体数学模式
+            value = rf"$\mathbf{{{value}}}$"
+        else:
+            value = rf"\textbf{{{value}}}"
         diagnostics["text_styles_converted"] += 1
     return value
 
@@ -1002,15 +1023,18 @@ def extract_docx_markdown(
 # 抽取出的 Markdown 里，每张插图都是形如 `![](url)` 的长链接。模型既看不到图
 # （HTTP 层不会把 `![]()` 转成 base64 图片），又被系统提示强制「100% 保留并写
 # 入 referenced_images」，于是链接在输入与输出里双向计费、纯属死重。
-# 这里在喂给模型前把链接替换成 `[[IMGn]]` 短占位符并建立映射，拆题完成后再还原。
+# 这里在喂给模型前把链接替换成占位符并建立映射，拆题完成后再还原。
+#
+# 占位符用 `[插图待补: 图N]` 而不是 `[[IMGn]]`：纯文本模型对「人话」占位符的
+# 保留率远高于冷僻的 `[[IMGn]]`（实测后者会被从题干里整段丢弃、只留 referenced_images）。
 # ---------------------------------------------------------------------------
 
 _DOCX_IMG_LINK_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
-_DOCX_IMG_TOKEN_RE = re.compile(r"\[\[IMG(\d+)\]\]")
+_DOCX_IMG_TOKEN_RE = re.compile(r"\[插图待补\s*[:：]\s*图\s*(\d+)\s*\]")
 
 
 def compress_docx_image_links(markdown: str):
-    """把 Markdown 中的图片链接替换为 ``[[IMGn]]`` 短占位符。
+    """把 Markdown 中的图片链接替换为 ``[插图待补: 图N]`` 占位符。
 
     返回 ``(compressed_markdown, mapping)``，``mapping`` 为 ``{n: {"alt":..., "url":...}}``，
     用于拆题后把占位符还原为真实图片链接。无图片时 mapping 为空字典，调用方应跳过还原。
