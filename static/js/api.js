@@ -550,7 +550,7 @@
 
         let systemPreferEngine = 'siliconflow';
         let systemPreferSolveModel = 'deepseek-v4-pro';
-        let systemPreferParseModel = 'deepseek-v4-flash';
+        let systemPreferParseModel = 'deepseek-flash';
 
         // Fetch Environment Config Settings Status
         function fetchConfigStatus() {
@@ -560,7 +560,7 @@
                 .then(settings => {
                     systemPreferEngine = settings.prefer_engine || 'siliconflow';
                     systemPreferSolveModel = settings.prefer_solve_model || 'deepseek-v4-pro';
-                    systemPreferParseModel = settings.prefer_parse_model || 'deepseek-v4-flash';
+                    systemPreferParseModel = settings.prefer_parse_model || 'deepseek-flash';
                     
                     // Update main page model selector to match preference
                     const mainModelSelect = document.getElementById('aiModelSelect');
@@ -573,21 +573,21 @@
                     updateOcrPlaceholder('answer');
 
                     // Populate settings modal selectors on start as well
-                    const solveCfg = parseModelConfig(settings.prefer_solve_model, 'deepseek', 'deepseek-v4-flash');
+                    const solveCfg = parseModelConfig(settings.prefer_solve_model, 'deepseek', 'deepseek-flash');
                     const solveProv = document.getElementById('solveModelProvider');
                     if (solveProv) {
                         solveProv.value = solveCfg.provider;
                         renderModelSelector('solve', solveCfg.provider, solveCfg.model);
                     }
                     
-                    const parseCfg = parseModelConfig(settings.prefer_parse_model, 'deepseek', 'deepseek-v4-flash');
+                    const parseCfg = parseModelConfig(settings.prefer_parse_model, 'deepseek', 'deepseek-flash');
                     const parseProv = document.getElementById('parseModelProvider');
                     if (parseProv) {
                         parseProv.value = parseCfg.provider;
                         renderModelSelector('parse', parseCfg.provider, parseCfg.model);
                     }
                     
-                    const classifyCfg = parseModelConfig(settings.prefer_classify_model, 'deepseek', 'deepseek-v4-flash');
+                    const classifyCfg = parseModelConfig(settings.prefer_classify_model, 'deepseek', 'deepseek-flash');
                     const classifyProv = document.getElementById('classifyModelProvider');
                     if (classifyProv) {
                         classifyProv.value = classifyCfg.provider;
@@ -691,7 +691,7 @@
         // 默认预设模型列表
         const MODEL_PRESETS = {
             deepseek: [
-                "deepseek-v4-flash",
+                "deepseek-flash",
                 "deepseek-v4-pro"
             ],
             siliconflow: [
@@ -968,7 +968,7 @@
                 else if (provider === 'bailian') defVal = "qwen-plus";
                 else if (provider === 'deepseek') defVal = "deepseek-chat";
                 else defVal = "";
-            } else if (provider === 'deepseek') defVal = "deepseek-v4-flash";
+            } else if (provider === 'deepseek') defVal = "deepseek-flash";
             else if (provider === 'siliconflow') {
                 defVal = typeKey === 'ocr' ? "Qwen/Qwen3-VL-8B-Instruct" : "deepseek-ai/DeepSeek-V4-Flash";
             } else if (provider === 'bailian') {
@@ -1016,17 +1016,17 @@
                     document.getElementById('settingsZhongzhanClaudeBaseUrl').value = settings.zhongzhan_claude_base_url || '';
                     
                     // 1. AI 智能解题模型
-                    const solveCfg = parseModelConfig(settings.prefer_solve_model, 'deepseek', 'deepseek-v4-flash');
+                    const solveCfg = parseModelConfig(settings.prefer_solve_model, 'deepseek', 'deepseek-flash');
                     document.getElementById('solveModelProvider').value = solveCfg.provider;
                     renderModelSelector('solve', solveCfg.provider, solveCfg.model);
                     
                     // 2. 试卷智能拆解模型
-                    const parseCfg = parseModelConfig(settings.prefer_parse_model, 'deepseek', 'deepseek-v4-flash');
+                    const parseCfg = parseModelConfig(settings.prefer_parse_model, 'deepseek', 'deepseek-flash');
                     document.getElementById('parseModelProvider').value = parseCfg.provider;
                     renderModelSelector('parse', parseCfg.provider, parseCfg.model);
                     
                     // 3. 题目智能分类模型
-                    const classifyCfg = parseModelConfig(settings.prefer_classify_model, 'deepseek', 'deepseek-v4-flash');
+                    const classifyCfg = parseModelConfig(settings.prefer_classify_model, 'deepseek', 'deepseek-flash');
                     document.getElementById('classifyModelProvider').value = classifyCfg.provider;
                     renderModelSelector('classify', classifyCfg.provider, classifyCfg.model);
                     

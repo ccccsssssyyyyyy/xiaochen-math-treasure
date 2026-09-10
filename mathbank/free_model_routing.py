@@ -100,6 +100,25 @@ def _difficulty_severity(level: str) -> int:
     return {"simple": 0, "medium": 1, "hard": 2}.get(level, 1)
 
 
+# 直接判 hard（走付费模型）的字符数门槛。
+#
+# 数据依据（2026-09-09 实测桌面 119 份真实数学 PDF，其中有文本层 110 份）：
+# 长度分布 3662 ~ 99634 字符；正规月考/期中/期末卷几乎全部 >= 10000，
+# <= 8000 的仅 6 份且多为小测/周练。原阈值 15000 只有 52% 的真卷走付费，
+# 10846 字符的《四川省大数据智学领航联盟高三联测评》落在 medium 档被判给免费模型，
+# 免费模型全部返回空导致整卷「所有块均解析失败」。下调至 10000 后覆盖率约 88%。
+#
+# 注意：只有 hard 才会走付费，medium 与 simple 行为一致（都走免费），
+# 因此这条线才是真正的「付费线」，调整它等价于重新划分免费/付费边界。
+HARD_LENGTH_THRESHOLD = 10000
+
+# 默认付费拆解模型的模型名（不含 provider 前缀）。
+# DeepSeek V4.1 Flash（2026-09-10 发布）的官方模型 ID 为 deepseek-flash，
+# 经 GET /models 实测确认；旧版 V4-Flash 的官方模型名已下线，仅临时兼容路由，
+# 随时可能撤掉导致 404，故全仓统一引用此常量，禁止再硬编码旧名。
+PAID_PARSE_MODEL_DEFAULT = "deepseek-flash"
+
+
 def _length_based_difficulty(text: str) -> str:
     """仅凭文档规模（字数 + 图片/公式密度）粗判难度，避免大文档被误判为简单。
 
@@ -109,25 +128,28 @@ def _length_based_difficulty(text: str) -> str:
     """
     length = len(text or "")
     img_markers = (text or "").count("![](") + (text or "").count("\\includegraphics")
-    # 经验阈值：免费模型（SiliconFlow 等）对大文档响应极慢、易超时，
-    # 故 1.5 万字符以上（或图片极多）直接判 hard 走付费，从源头规避超时。
-    if length > 15000 or img_markers > 18:
+    # 门槛由 HARD_LENGTH_THRESHOLD 决定，取值依据见其定义处的实测数据说明。
+    if length > HARD_LENGTH_THRESHOLD or img_markers > 18:
         return "hard"
     if length > 8000 or img_markers > 8:
         return "medium"
     return "simple"
 
 
-def decide_parse_model(latex_content: str) -> dict:
+def decide_parse_model(latex_content: str, force_paid: bool = False) -> dict:
     """根据免费模型难度评估，决定本次拆解使用免费还是付费模型。
 
     返回 {"raw_model", "provider", "paid_raw_model", "paid_provider",
           "difficulty", "reason", "used_free"}。
     provider 为本次实际选用的 TextProviderConfig；paid_provider 恒为付费模型，
     供调用方在免费模型超时时自动回退使用。
+
+    force_paid: 为 True 时跳过所有难度评估与免费路由，直接使用付费模型。
     """
 
-    paid_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv("DEEPSEEK_PARSE_MODEL", "deepseek-v4-flash")
+    paid_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv(
+        "DEEPSEEK_PARSE_MODEL", PAID_PARSE_MODEL_DEFAULT
+    )
     paid_provider = resolve_text_provider(paid_model)
     free_model = os.getenv("PREFER_FREE_PARSE_MODEL") or ""
 
@@ -141,6 +163,14 @@ def decide_parse_model(latex_content: str) -> dict:
             "reason": reason,
             "used_free": False,
         }
+
+    # 强制付费短路：跳过免费评估与路由，直接用付费模型。
+    # 由 DOCX_FORCE_PAID_PARSE 环境变量控制（默认开启），Word 链路调用方传入。
+    if force_paid:
+        return _paid_result(
+            None,
+            "该文档按配置强制使用付费拆解模型，跳过免费模型难度评估与路由",
+        )
 
     if not free_model:
         return _paid_result(None, "未配置免费拆解模型，使用付费模型")
@@ -196,7 +226,7 @@ def decide_classify_model(use_free: bool) -> dict:
         os.getenv("PREFER_CLASSIFY_MODEL")
         or os.getenv("DEEPSEEK_CLASSIFY_MODEL")
         or os.getenv("PREFER_PARSE_MODEL")
-        or "deepseek-v4-flash"
+        or PAID_PARSE_MODEL_DEFAULT
     )
     default_provider = resolve_text_provider(default_model)
 

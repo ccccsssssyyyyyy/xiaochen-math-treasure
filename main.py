@@ -1254,8 +1254,8 @@ def get_settings():
     sf_model = os.getenv("SILICONFLOW_OCR_MODEL", "Qwen/Qwen3-VL-8B-Instruct")
     ali_model = os.getenv("ALI_BAILIAN_OCR_MODEL", "qwen3.7-flash")
     prefer_solve_model = os.getenv("PREFER_SOLVE_MODEL", "deepseek-v4-pro")
-    prefer_parse_model = os.getenv("PREFER_PARSE_MODEL", "deepseek-v4-flash")
-    prefer_classify_model = os.getenv("PREFER_CLASSIFY_MODEL") or os.getenv("DEEPSEEK_CLASSIFY_MODEL", "deepseek-v4-flash")
+    prefer_parse_model = os.getenv("PREFER_PARSE_MODEL", "deepseek-flash")
+    prefer_classify_model = os.getenv("PREFER_CLASSIFY_MODEL") or os.getenv("DEEPSEEK_CLASSIFY_MODEL", "deepseek-flash")
     prefer_draw_model = os.getenv("PREFER_DRAW_MODEL", "Qwen/Qwen3-VL-32B-Instruct")
     prefer_free_parse_model = os.getenv("PREFER_FREE_PARSE_MODEL", "")
     prefer_free_classify_model = os.getenv("PREFER_FREE_CLASSIFY_MODEL", "")
@@ -1320,8 +1320,8 @@ def save_settings(
     siliconflow_model: str = Form("Qwen/Qwen3-VL-8B-Instruct"),
     ali_bailian_model: str = Form("qwen3.7-flash"),
     prefer_solve_model: str = Form("deepseek-v4-pro"),
-    prefer_parse_model: str = Form("deepseek-v4-flash"),
-    prefer_classify_model: str = Form("deepseek-v4-flash"),
+    prefer_parse_model: str = Form("deepseek-flash"),
+    prefer_classify_model: str = Form("deepseek-flash"),
     prefer_draw_model: str = Form("Qwen/Qwen3-VL-32B-Instruct"),
     prefer_free_parse_model: str = Form(""),
     prefer_free_classify_model: str = Form(""),
@@ -6701,7 +6701,7 @@ def explain_latex_compile_error(log_text: str, tex_content: str) -> dict:
     """Explain one compile failure locally, then enrich it with the parse model."""
     diagnostic = build_local_latex_diagnostic(log_text, tex_content)
     parse_model = os.getenv("PREFER_PARSE_MODEL") or os.getenv(
-        "DEEPSEEK_PARSE_MODEL", "deepseek-v4-flash"
+        "DEEPSEEK_PARSE_MODEL", "deepseek-flash"
     )
     provider = resolve_text_provider(parse_model)
     if not provider.api_key:
