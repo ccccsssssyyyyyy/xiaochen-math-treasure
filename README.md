@@ -185,12 +185,10 @@ flowchart LR
 
 ### 方式二：源码运行
 
-1. **获取项目**（建议先 Fork 原项目，再克隆你自己的 Fork）：
+1. **获取项目**：
    ```bash
-   git clone <你的仓库地址>
-   cd math-question-bank
-   # 可选：跟踪上游，方便同步更新
-   git remote add upstream https://github.com/JudgePeach/math-question-bank.git
+   git clone https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure.git
+   cd xiaochen-math-treasure
    ```
 2. **装依赖**（Python 3.10+）：
    ```bash
@@ -227,7 +225,7 @@ flowchart LR
 ### 2. 公式识图 OCR（必须用多模态 VLM）
 
 - **必须用多模态模型**：识图要读图像，DeepSeek 纯文本模型干不了 OCR。
-- **国内模型**：推荐通义千问 (Qwen-VL) 或 MIMO 系列。经 [硅基流动专属链接](https://cloud.siliconflow.cn/i/hkgjSWrg) 注册实名可领 16 元代金券；或去 [阿里云百炼](https://bailian.console.aliyun.com/)（3 个月免费额度）。硅基流动用 `Qwen/Qwen3-VL-8B-Instruct`；阿里百炼常规 OCR / 拆卷 / 分类用 `qwen3.7-flash`，解答与绘图用 `qwen3.7-plus`。
+- **国内模型**：推荐通义千问 (Qwen-VL) 或 MIMO 系列。可在 [硅基流动](https://cloud.siliconflow.cn/) 注册（实名可领代金券），或去 [阿里云百炼](https://bailian.console.aliyun.com/)（3 个月免费额度）。硅基流动用 `Qwen/Qwen3-VL-8B-Instruct`；阿里百炼常规 OCR / 拆卷 / 分类用 `qwen3.7-flash`，解答与绘图用 `qwen3.7-plus`。
 - **海外 / 中转站**：有渠道的话**强烈推荐 `GPT-5.6 Luna`**——近期大幅降价，公式提取与精度超多数模型，成本甚至低于千问，是识图首选。
 
 ### 3. TikZ 几何绘图模型（`PREFER_DRAW_MODEL`）
@@ -239,8 +237,8 @@ flowchart LR
 > **第三方中转站声明**  
 > 下方两个中转站链接仅因开发者日常在用，**不对其稳定性、模型真实度或数据隐私作任何担保**。中转站可能存在泄露、掺水、换模型等风险，请谨慎评估：
 >
-> - **中转站 A（GPT 系）**：[RightCodes 注册](https://www.rightapi.ai/register?aff=f7656b31)，实惠的 `gpt-5.6-luna` 系列。
-> - **中转站 B（Claude / 阿里系）**：[PackyAPI 注册](https://www.packyapi.com/register?aff=5yyF)。
+> - **中转站 A（GPT 系）**：[RightCodes](https://www.rightapi.ai/)，实惠的 `gpt-5.6-luna` 系列。
+> - **中转站 B（Claude / 阿里系）**：[PackyAPI](https://www.packyapi.com/)。
 
 > [!IMPORTANT]  
 > **TikZ 重绘与 LaTeX 依赖**  
@@ -366,7 +364,6 @@ python3 -m scripts.restore <快照.zip> --apply --yes  # 实际恢复（须先�
 ├── 启动题库系统.bat            # Windows 一键启动脚本
 ├── 启动题库系统.command        # macOS 一键启动脚本
 ├── README.md                   # 中文说明文档
-├── README_EN.md                # 英文说明文档
 ├── requirements.txt            # Python 依赖包清单
 ├── requirements-dev.txt        # 开发与测试依赖
 └── .env.example                # 环境变量配置模板
