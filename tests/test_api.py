@@ -631,6 +631,72 @@ def test_version_and_update_check_api(client):
         mathbank.GITHUB_REPO = original_repo
 
 
+def test_check_update_picks_the_macos_package_for_the_local_chip(client):
+    """macOS 从 2.2.1 起按芯片分包，一键升级必须给本机架构的那个包。
+
+    同时守住一个坑：校验和文件的名字里也含 "macOS"，
+    若不过滤后缀，界面上的下载按钮会指向 .sha256 而不是安装包。
+    """
+    import main
+    import mathbank
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "tag_name": "v9.9.9",
+        "name": "Release 9.9.9",
+        "body": "Mocked changelog",
+        "html_url": "https://example.com/release",
+        "published_at": "2026-08-09T00:00:00Z",
+        "assets": [
+            {
+                "name": "MathBank-macOS-AppleSilicon.zip.sha256",
+                "size": 128,
+                "download_count": 0,
+                "browser_download_url": "https://example.com/mac-arm.sha256",
+            },
+            {
+                "name": "MathBank-macOS-AppleSilicon.zip",
+                "size": 55 * 1024 * 1024,
+                "download_count": 12,
+                "browser_download_url": "https://example.com/mac-arm.zip",
+            },
+            {
+                "name": "MathBank-macOS-Intel.zip",
+                "size": 52 * 1024 * 1024,
+                "download_count": 7,
+                "browser_download_url": "https://example.com/mac-intel.zip",
+            },
+            {
+                "name": "MathBank-Windows-x64.zip",
+                "size": 60 * 1024 * 1024,
+                "download_count": 30,
+                "browser_download_url": "https://example.com/win.zip",
+            },
+        ],
+    }
+
+    original_repo = mathbank.GITHUB_REPO
+    mathbank.GITHUB_REPO = "ccccsssssyyyyyy/xiaochen-math-treasure"
+    try:
+        with patch("mathbank.ai_http.requests.get", return_value=mock_resp), patch(
+            "main.local_macos_architecture", return_value="arm64"
+        ):
+            data = client.get("/api/version/check-update").json()
+        assert data["assets"]["macOS"]["name"] == "MathBank-macOS-AppleSilicon.zip"
+        assert data["assets"]["macOS"]["host_arch"] == "arm64"
+        assert data["assets"]["Windows"]["name"] == "MathBank-Windows-x64.zip"
+
+        with patch("mathbank.ai_http.requests.get", return_value=mock_resp), patch(
+            "main.local_macos_architecture", return_value="x86_64"
+        ):
+            data = client.get("/api/version/check-update").json()
+        assert data["assets"]["macOS"]["name"] == "MathBank-macOS-Intel.zip"
+        assert data["assets"]["macOS"]["host_arch"] == "x86_64"
+    finally:
+        mathbank.GITHUB_REPO = original_repo
+
+
 def test_check_update_short_circuits_on_localfork(client):
     """GITHUB_REPO 为 `localfork/` 占位时 → 不向上游发请求，直接返回 info。
 

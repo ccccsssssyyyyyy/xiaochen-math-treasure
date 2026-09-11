@@ -1,6 +1,7 @@
 import os
 import atexit
 import io
+import platform
 import sys
 import uuid
 import json
@@ -1565,6 +1566,29 @@ def parse_version_tuple(v_str: str):
         parts.append(0)
     return tuple(parts[:3])
 
+
+def macos_asset_architecture(asset_name: str) -> str:
+    """Return the chip an installer name targets: 'arm64', 'x86_64' or ''.
+
+    Releases from 2.2.1 ship two macOS packages, so the download link must be
+    chosen by chip.  '' means a single-package release (2.2.0 and earlier).
+    """
+    lowered = (asset_name or "").lower()
+    if any(token in lowered for token in ("applesilicon", "apple-silicon", "arm64", "aarch64")):
+        return "arm64"
+    if any(token in lowered for token in ("intel", "x86_64", "amd64")):
+        return "x86_64"
+    return ""
+
+
+def local_macos_architecture() -> str:
+    """Return this machine's chip family, matching macos_asset_architecture()."""
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    return "x86_64"
+
+
 @app.get("/api/version")
 def get_version_info():
     """Return local version info."""
@@ -1623,16 +1647,40 @@ def check_version_update():
             
             has_update = latest_tuple > current_tuple
             
+            # 2.2.1 起 macOS 按芯片分包。这里必须显式选本机架构对应的包：
+            # 若只按名字里的 "macOS" 匹配，后匹配的会覆盖先匹配的，会取错架构。
+            host_arch = local_macos_architecture()
             assets_map = {}
+            macos_candidates = []
             for asset in data.get("assets", []):
                 name = asset.get("name", "")
+                # 校验和文件的名字里也含 "macOS"/"Windows"，必须先排除，
+                # 否则一键升级会下载到 .sha256 而不是安装包。
+                if not name or name.lower().endswith((".sha256", ".sha256sum", ".txt", ".json", ".sig")):
+                    continue
                 download_url = asset.get("browser_download_url", "")
                 size_mb = round(asset.get("size", 0) / (1024 * 1024), 1)
                 download_count = asset.get("download_count", 0)
-                if "macOS" in name or "mac" in name.lower() or "darwin" in name.lower():
-                    assets_map["macOS"] = {"name": name, "url": download_url, "size_mb": size_mb, "downloads": download_count}
-                elif "Windows" in name or "win" in name.lower():
-                    assets_map["Windows"] = {"name": name, "url": download_url, "size_mb": size_mb, "downloads": download_count}
+                entry = {
+                    "name": name,
+                    "url": download_url,
+                    "size_mb": size_mb,
+                    "downloads": download_count,
+                }
+                lowered_name = name.lower()
+                if "macos" in lowered_name or "mac" in lowered_name or "darwin" in lowered_name:
+                    entry["arch"] = macos_asset_architecture(name)
+                    macos_candidates.append(entry)
+                elif "windows" in lowered_name or "win" in lowered_name:
+                    assets_map.setdefault("Windows", entry)
+
+            if macos_candidates:
+                matched = next(
+                    (item for item in macos_candidates if item["arch"] == host_arch),
+                    macos_candidates[0],
+                )
+                matched["host_arch"] = host_arch
+                assets_map["macOS"] = matched
             
             result.update({
                 "latest_version": latest_tag,
