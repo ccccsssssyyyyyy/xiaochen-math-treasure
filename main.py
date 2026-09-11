@@ -2323,6 +2323,168 @@ def _strip_leading_question_number(content: str) -> str:
     return cleaned.strip() if cleaned else content
 
 
+# PDF / DOCX 拆题后的答案区识别 + 题号回填。
+# ──────────────────────────────────────────────────────────────────────────────
+# 历史问题：原卷在题号区之后往往另起一节集中放出参考答案（如 `7. D\n解析：…`，
+# 按题号递增排），但 LLM 按 8 题一段切片时，跨段引用容易断，客观题答案就被静默清空。
+# 这里在拆题后用零 token 的正则扫描全部 OCR 页面文本，按题号建索引，再回填
+# `_orig_seq_int` 与 `answer_markdown` —— 与 AI 拆出来的 content 完全解耦。
+# 答案区起点必须出现以下之一：
+#   ① 浓郁眉批式 header（「一数 高考数学核心方法」、「【参考答案】」）；
+#   ② 页面首次出现「题号. 答案 \n 解析：」全格式密集排列；
+# 进入答案区后，按题号切段，每段第一行除题号外为答案，其余为解析。
+_PDF_ANSWER_HEADER_RE = re.compile(
+    r"(?:^|\n)\s*(?:"
+    r"[【\[（(]\s*(?P<header>[^】\]）)\n]{2,40}?)\s*[】\]）)]"
+    r"|"
+    r"(?P<header2>[一数]?\s*高考数学核心方法[^\n]*?答案\s*[区页]?)"
+    r")",
+    re.MULTILINE,
+)
+# 答案行的「题号. 答案」开头 pattern（用于定位题号起点与答案起始处）。
+# 必须从行首开头，ans 至少一字符（避免惰性匹配全部吃掉答案），且只接受
+# 中文 / 字母 / 数字 / LaTeX 符号起点 —— 否则 OCR 误把含 `9. 解：…` 这种
+# 段落里的点识别为题号。
+_PDF_ANSWER_HEAD_RE = re.compile(
+    r"(?m)^(?P<num>[0-9]{1,3})\s*[.、．)）]\s*"
+    r"(?P<ans>\$?[A-D一-鿿\$0-9])[^\n]*?$"   # ans 起点必须为非空标识符
+)
+# 答案段的「解析：<文本>」拆分点
+_PDF_ANSWER_EXPL_RE = re.compile(r"\n\s*解析\s*[：:]\s*")
+
+
+def _extract_pdf_answer_zone(ocr_results):
+    """扫描全部 OCR 页面文本，提取按题号排列的原卷答案。
+
+    返回 ``dict[int, dict]``：``题号 -> {"answer": ..., "explanation": ..., "page_index": ...}``。
+    """
+    answer_zone: dict[int, dict] = {}
+    if not ocr_results:
+        return answer_zone
+
+    # 1. 串联全文，同时维护「绝对偏移 -> page_index」映射，便于回查答案所在物理页
+    text_offsets: list[tuple[int, int]] = []
+    full_text_parts: list[str] = []
+    cursor = 0
+    for page_index, page_text in enumerate(ocr_results):
+        body = (page_text or "").strip()
+        if not body:
+            continue
+        cleaned = re.sub(r"<!--\s*MATHBANK_PDF_PAGE:\d+\s*-->", "", body)
+        text_offsets.append((page_index, cursor))
+        full_text_parts.append(cleaned)
+        cursor += len(cleaned) + 1
+    full_text = "\n".join(full_text_parts)
+    if not full_text:
+        return answer_zone
+
+    # 2. 找答案区起点
+    zone_start = -1
+    for header_match in _PDF_ANSWER_HEADER_RE.finditer(full_text):
+        probe_window = full_text[header_match.end(): header_match.end() + 200]
+        if re.search(
+            r"(?m)^\s*[0-9]{1,3}\s*[.、．)）]\s*[A-D一-鿿][^\n]*\s*\n\s*解析",
+            probe_window,
+        ):
+            zone_start = header_match.end()
+            break
+    if zone_start < 0:
+        # 退化路径：找第一处「题号. 答案 \n 解析：」密集出现的起点。
+        # ans 首字符容忍：选项字母 A-D / LaTeX 符号 $ / 中文 / 数字 / 数学符号，
+        # 否则像 `1. $\dfrac{3}{2}$ \n 解析` 这种纯 LaTeX 答案也会被错过。
+        first_item = re.search(
+            r"(?m)^(?P<num>[0-9]{1,3})\s*[.、．)）]\s*"
+            r"(?:[A-D]|\$|\$?[一-鿿]|\\[a-z]{2,}|\(|=-|\.|[0-9])[^\n]*\s*\n\s*解析",
+            full_text,
+        )
+        if first_item:
+            zone_start = first_item.start()
+        else:
+            return answer_zone
+
+    zone_text = full_text[zone_start:]
+    # 退出条件：遇到反思 / 章节标题 / 总结 → 答案区结束
+    end_match = re.search(
+        r"\n\s*(?:【反思】|反思\s|考点\s|学科\s【|第\s*[一二三四五六七八九十]+\s*章)",
+        zone_text,
+    )
+    if end_match:
+        zone_text = zone_text[: end_match.start()]
+
+    # 3. 找所有「题号. 答案」开头。每个题号边界即为上一题的结束。
+    heads: list[tuple[int, int, int]] = []  # (题号, 答案起始处 start, 答案文本 group("ans") 的 absolute start)
+    for m in _PDF_ANSWER_HEAD_RE.finditer(zone_text):
+        try:
+            n = int(m.group("num"))
+        except (TypeError, ValueError):
+            continue
+        # 答案必须仅占一行 + 后面紧跟 \n 解析：, 否则视为题干跳号（防止把「4. (2025)」误识别为答案）
+        tail = zone_text[m.end(): m.end() + 200]
+        if not re.search(r"\n\s*解析", tail):
+            continue
+        heads.append((n, m.start(), m.start("ans")))
+    if not heads:
+        return answer_zone
+
+    # 4. 按切片解析 答案+解析
+    for i, (n, start, ans_start) in enumerate(heads):
+        end = heads[i + 1][1] if i + 1 < len(heads) else len(zone_text)
+        block = zone_text[start:end]
+        # 答案文本 = ans_start 到 block 内第一个换行
+        ans_text_in_block = block[ans_start - start:].split("\n", 1)[0].strip()
+        # 解析文本 = block 第一个「解析：」之后到末尾
+        expl_split = _PDF_ANSWER_EXPL_RE.search(block)
+        explanation = ""
+        if expl_split:
+            explanation = block[expl_split.end():].strip()
+        page_index = 0
+        abs_start = zone_start + start
+        for page_idx, offset in text_offsets:
+            if offset <= abs_start:
+                page_index = page_idx
+        answer_zone[n] = {
+            "answer": ans_text_in_block,
+            "explanation": explanation,
+            "page_index": page_index,
+        }
+    return answer_zone
+
+
+def _apply_pdf_answer_zone(parsed_questions, answer_zone):
+    """把答区按题号回填到每题 ``answer_markdown``，仅在 AI 漏填时注入。
+
+    设计上保持「AI 写出来的不覆盖，AI 未填才补」的原则，避免把单题多问互救到的
+    干干字答案抹掉。补的内容使用一致的「答案 → 解析」开头格式，保留 LLM 后来替
+    补后的连贯。
+    """
+    if not answer_zone:
+        return 0
+    filled = 0
+    for q in parsed_questions:
+        orig_seq = q.pop("_orig_seq_int", None)
+        if not orig_seq:
+            continue
+        hit = answer_zone.get(orig_seq)
+        if not hit:
+            continue
+        existing = (q.get("answer_markdown") or "").strip()
+        # 本题在拆题阶段 AI 没出来有意义的答案时才填空
+        if existing and len(existing) >= 2:
+            continue
+        ans_text = hit["answer"]
+        explanation = hit["explanation"]
+        body_parts = ["[EXTRACTED_ORIGINAL]", ans_text]
+        if explanation:
+            body_parts.append(explanation)
+        q["answer_markdown"] = "\n\n".join(body_parts).strip()
+        # 复查字段后仅在 source 还未能从 answer 内容推导出时同步补
+        if "page_index" in hit:
+            q.setdefault("_answer_page_index", hit["page_index"])
+        filled += 1
+    return filled
+
+
+
 def committed_question_response(
     db: Session,
     db_question: Question,
@@ -5326,9 +5488,36 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
     import glob
 
     # 0. 规范化所有拆解题目的填空下划线为 \fillin 宏，并剥离残留原卷题号
+    #    先在剥离前抽两件关键信息：
+    #    ① 题源括注（如 (2025·天津卷·★)），没有它的话 AI 输出 source 经常错位，
+    #       而 PDF 路径不像 DOCX 走 lock_visible_math，AI 容易把题源直接写进 content 不进 source；
+    #    ② 原卷题号，用于后段“答案区题号精确匹配”回填 answer_markdown。
+    #    这两个信号剥离后即用即抛，不进数据库。
     for q in parsed_questions:
         if q.get("content"):
             q["content"] = normalize_fillin_macro(q.get("content", ""))
+            raw_content = q["content"]
+            # ② 题号：从开头 "1." "13)" "7."等跳到题干开始提取一次（只取第一个）。
+            seq_match = re.match(
+                r"^\s*(\d{1,3})(?=[\.、．\)）\s])",
+                raw_content,
+            )
+            if seq_match:
+                try:
+                    q["_orig_seq_int"] = int(seq_match.group(1))
+                except ValueError:
+                    pass
+            # ① 题源括注：紧跟题号的 (…/全角…)，与 DOCX 路径一致。
+            # group(1) 题号前缀, group(2) 左括号, group(3) 出处, group(4) 右括号。
+            src_match = re.match(
+                r"^(\s*(?:\d{1,3}[\.、\s]*)?)([\(（])([^\(（\)）\s]{4,})([\)）])",
+                raw_content,
+            )
+            if src_match and not q.get("source"):
+                q["_pdf_source_extracted"] = src_match.group(3).strip()
+                # 从 content 删去 该括注 + 前面可能的题号前缀，让题干纯净。
+                to_remove = src_match.group(1) + src_match.group(2) + src_match.group(3) + src_match.group(4)
+                q["content"] = raw_content.replace(to_remove, "", 1).strip()
             q["content"] = _strip_leading_question_number(q["content"])
             q["content"] = normalize_choice_options_to_latex(q["content"])
 
@@ -5344,6 +5533,17 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
 
     # 1. 搜集该 PDF 任务在 tmp 文件夹中生成的所有物理裁剪图片，按生成时间（mtime）进行排序
     task_crop_urls = []
+    # 1.5 抽答案区：按题号重新匹配原卷自带答案，回填到 answer_markdown（仅 AI 未填时）。
+    #    OCR 文本前置牄潌后这里 receipt 在同一趟 reduce 中使用，
+    #    避免后面推理时重复扫 OCR。
+    pdf_answer_zone = _extract_pdf_answer_zone(ocr_results)
+    if pdf_answer_zone:
+        filled = _apply_pdf_answer_zone(parsed_questions, pdf_answer_zone)
+        if filled:
+            print(
+                f"[PDF PostProcess] 从原卷答案区按题号回填了 {filled}/{len(parsed_questions)} 道题的 answer_markdown。",
+                flush=True,
+            )
     if task_id:
         crop_pattern = os.path.join(TMP_UPLOAD_DIR, f"pdf_crop_{task_id}_*.png")
         crop_files = glob.glob(crop_pattern)
@@ -5386,8 +5586,15 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
         print(f"[PDF PostProcess] 成功建立占位符修复映射: {mapping}")
 
     # 4. 对每个题目卡片进行字段修补、占位符替换与资源晋升准备
+    # 4.0 题源兜底：AI 没填 source 时优先用正则在题干开头抽到的括注（_pdf_source_extracted）。
+    #    仅当这个抽出的能过 normalize_source 才使用；避免把 (A) 这种选项括号误判。
     for q in parsed_questions:
-        q["source"] = normalize_source(q.get("source") or paper_title, fallback_title=paper_title, allow_ai=True)
+        extracted = (q.pop("_pdf_source_extracted", None) or "").strip()
+        ai_source = (q.get("source") or "").strip()
+        chosen_source = ai_source
+        if not chosen_source and extracted:
+            chosen_source = extracted
+        q["source"] = normalize_source(chosen_source or paper_title, fallback_title=paper_title, allow_ai=True)
 
         # 规范化 AI 自动打标的知识点 / 解题方法多标签（受控词表映射 + 去重）
         q["knowledge_list"] = normalize_tag_list(q.get("knowledge_list"), field="knowledge_list")

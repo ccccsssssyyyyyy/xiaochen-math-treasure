@@ -120,7 +120,9 @@ NOISE_TOKENS = [
     "（1）", "(1)", "（2）", "(2)", "（3）", "(3)",
     "（5月份）", "(5月份)", "（10月份）", "(10月份)",
     "（六）", "(六)",
+    "★", "☆",
 ]
+
 
 # 学校别名（运行时加载，初始为空；详见模块底部 _load_user_canonical_map）
 SCHOOL_ALIASES: dict[str, str] = {}
@@ -317,6 +319,8 @@ def _normalize_separators(s: str) -> str:
     # 规范化为 ' · '（两侧空格），再折叠多余空白
     s = s.replace("·", " · ")
     s = re.sub(r"\s+", " ", s).strip()
+    # 去掉末尾因噪声剥离留下的孤立分隔符（如 "天津卷 · ★" 去 ★ 后变成 "天津卷 ·"）
+    s = re.sub(r"\s*·\s*$", "", s).strip()
     return s
 
 
@@ -382,16 +386,62 @@ def _match_zhoulian(raw: str):
     return f"高{level}{term} · {exam_type} · {school} · {start}-{start + 1}学年"
 
 
+# 已知高考真题卷种（从已录入规范式自动派生；也包含 OCR 常见裸写变体）
+_GAOKAO_VOLUME_NAMES = frozenset(
+    # 从既有规范映射抽取卷种/地区名
+    v.split(" · ")[1]
+    for v in set(_BASE_CANONICAL_MAP.values())
+    if isinstance(v, str) and v.endswith(" · 高考真题")
+) | {
+    # OCR / 模型输出常见裸写变体
+    "全国甲卷", "全国乙卷",
+    "全国一卷", "全国二卷", "全国三卷",
+    "新高考全国Ⅰ卷", "新高考全国Ⅱ卷", "新高考全国Ⅲ卷",
+    "新课标Ⅰ卷", "新课标Ⅱ卷", "新课标Ⅲ卷",
+    "新高考Ⅰ卷", "新高考Ⅱ卷", "新高考Ⅲ卷",
+    "北京", "北京卷", "上海", "上海卷", "天津", "天津卷",
+    "浙江", "浙江卷", "江苏", "江苏卷", "山东", "山东卷",
+    "广东", "广东卷", "四川", "四川卷", "湖北", "湖北卷",
+    "湖南", "湖南卷", "福建", "福建卷", "河北", "河北卷",
+    "河南", "河南卷", "安徽", "安徽卷", "江西", "江西卷",
+    "辽宁", "辽宁卷", "黑龙江", "黑龙江卷", "陕西", "陕西卷",
+    "重庆", "重庆卷", "山西", "山西卷", "云南", "云南卷",
+}
+
+
+def _match_gaokao_exam(raw: str):
+    """识别「年份·卷种」类高考真题并补全为规约写法。
+
+    例：``2025 · 天津卷`` -> ``2025 · 天津卷 · 高考真题``
+    已带 ``·高考真题`` 后缀的输入原样返回。
+    """
+    if not raw:
+        return None
+    s = re.sub(r"\s+", " ", str(raw)).strip()
+    # 容忍已经带后缀的写法
+    m = re.match(r"^(\d{4})\s*·\s*(.+?)\s*(?:·\s*高考真题)?$", s)
+    if not m:
+        return None
+    year, volume = m.group(1), m.group(2).strip().strip("·").strip()
+    if volume in _GAOKAO_VOLUME_NAMES:
+        return f"{year} · {volume} · 高考真题"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tier 1.6：通用「模拟 / 联考」结构识别
 # ---------------------------------------------------------------------------
-# 形如「{年份} · {地区或考试名}{模拟|联考}」，例：
+# 形如「{年份} · {地区或考试名}{模拟|联考|一模|二模|三模|一调|二调|调研|诊断|质检}」：
 #   2025 · 江苏盐城模拟  ->  2025 · 江苏盐城 · 模拟
+#   2025 · 辽宁沈阳三模  ->  2025 · 辽宁沈阳 · 模拟
+#   2024 · 广东惠州二调  ->  2024 · 广东惠州 · 模拟
 #   2024 · 九省联考      ->  2024 · 九省 · 联考
 #
 # 这类来源此前无对应规约，只能以 2 段裸写式入库（游离于规约之外）。
 # 本层让它们自动贴合规约，后续新录入的同类来源无需再手工补映射。
-_MOCK_EXAM_RE = re.compile(r"^(?P<year>\d{4})\s*·\s*(?P<subject>.+?)\s*(?P<kind>模拟|联考)$")
+_MOCK_EXAM_RE = re.compile(
+    r"^(?P<year>\d{4})\s*·\s*(?P<subject>.+?)\s*(?P<kind>模拟|联考|一[模调]|二[模调]|三[模调]|四[模调]|五[模调]|调研|诊断|质检|适应性(?:考试)?)$"
+)
 
 
 def _match_mock_exam(raw: str):
@@ -405,7 +455,10 @@ def _match_mock_exam(raw: str):
     subject = m.group("subject").strip().strip("·").strip()
     if not subject:
         return None
-    return f"{m.group('year')} · {subject} · {m.group('kind')}"
+    kind = m.group("kind")
+    # 所有「X模/X调/调研/诊断/质检/适应性」统一归为「模拟」；仅「联考」保留。
+    normalized_kind = "联考" if kind == "联考" else "模拟"
+    return f"{m.group('year')} · {subject} · {normalized_kind}"
 
 
 def normalize_source(raw, fallback_title=None, allow_ai=False):
@@ -450,7 +503,12 @@ def normalize_source(raw, fallback_title=None, allow_ai=False):
     if hit:
         return hit
 
-    # Tier 1.6: 通用「模拟 / 联考」结构识别
+    # Tier 1.6: 通用「高考真题」结构识别（年份 · 卷种，自动补 · 高考真题）
+    hit = _match_gaokao_exam(s)
+    if hit:
+        return hit
+
+    # Tier 1.7: 通用「模拟 / 联考」结构识别
     hit = _match_mock_exam(s)
     if hit:
         return hit
@@ -470,7 +528,10 @@ def normalize_source(raw, fallback_title=None, allow_ai=False):
     if hit:
         return hit
 
-    # Tier 2.6: 清理后重试模拟 / 联考
+    # Tier 2.6: 清理后重试高考真题 / 模拟 / 联考
+    hit = _match_gaokao_exam(s2)
+    if hit:
+        return hit
     hit = _match_mock_exam(s2)
     if hit:
         return hit
