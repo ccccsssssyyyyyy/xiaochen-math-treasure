@@ -361,21 +361,33 @@ def _reconcile_old(root, previous, current_entries, current_protected, platform)
     return deleted, protected
 
 
-def _reconcile_windows_python(root, current_entries, protected):
+def _reconcile_portable_runtime(root, current_entries, protected, platform):
+    """Delete runtime files the incoming release does not list.
+
+    Both portables ship a pinned interpreter under ``python/``.  Anything else
+    found there — payloads from an older release, or ``__pycache__`` written at
+    runtime — is not part of the release and must be removed.
+    """
     python_root = root / "python"
+    if platform != "windows-x64" and not python_root.exists():
+        # macOS releases before 2.3.0 used the host interpreter and shipped no
+        # runtime; there is nothing to reconcile until one is installed.
+        return []
+    label = "windows python" if platform == "windows-x64" else "macOS python"
     _require(
         python_root.is_dir() and not python_root.is_symlink(),
-        "windows python runtime is not a regular directory",
+        f"{label} runtime is not a regular directory",
     )
     resolved_root = python_root.resolve()
-    _require(_same_location(python_root, resolved_root), "windows python runtime is linked")
+    _require(_same_location(python_root, resolved_root), f"{label} runtime is linked")
+    normalize = str.casefold if platform == "windows-x64" else str
     expected = {
-        name.casefold() for name in current_entries if name.startswith("python/")
+        normalize(name) for name in current_entries if name.startswith("python/")
     }
     deleted, directories = [], []
 
     def fail_walk(exc):
-        raise ReleaseOverlayError("cannot inspect the windows python runtime") from exc
+        raise ReleaseOverlayError(f"cannot inspect the {label} runtime") from exc
 
     for directory, subdirectories, filenames in os.walk(
         python_root, topdown=True, followlinks=False, onerror=fail_walk
@@ -384,8 +396,8 @@ def _reconcile_windows_python(root, current_entries, protected):
         try:
             directory.resolve().relative_to(resolved_root)
         except ValueError as exc:
-            raise ReleaseOverlayError("windows python directory escapes runtime") from exc
-        _require(_same_location(directory, directory.resolve()), "windows runtime is linked")
+            raise ReleaseOverlayError(f"{label} directory escapes runtime") from exc
+        _require(_same_location(directory, directory.resolve()), f"{label} runtime is linked")
         for name in list(subdirectories):
             child = directory / name
             relative = PurePosixPath(child.relative_to(root).as_posix())
@@ -397,12 +409,12 @@ def _reconcile_windows_python(root, current_entries, protected):
                     raise ReleaseOverlayError(f"cannot delete runtime link: {relative}") from exc
                 deleted.append(relative.as_posix())
             else:
-                _require(_same_location(child, child.resolve()), "windows runtime is linked")
+                _require(_same_location(child, child.resolve()), f"{label} runtime is linked")
                 directories.append((child, relative))
         for name in filenames:
             child = directory / name
             relative = PurePosixPath(child.relative_to(root).as_posix())
-            if relative.as_posix().casefold() in expected or _is_protected(relative, protected):
+            if normalize(relative.as_posix()) in expected or _is_protected(relative, protected):
                 continue
             try:
                 child.unlink()
@@ -451,8 +463,7 @@ def _apply_locked(root, platform, state):
     deleted, protections = _reconcile_old(
         root, previous, entries, protected, platform
     )
-    if platform == "windows-x64":
-        deleted.extend(_reconcile_windows_python(root, entries, protections))
+    deleted.extend(_reconcile_portable_runtime(root, entries, protections, platform))
     try:
         _atomic_write(state / INSTALLED_MANIFEST_NAME, manifest_content)
         _atomic_write(state / INSTALLED_DIGEST_NAME, (digest + "\n").encode("ascii"))

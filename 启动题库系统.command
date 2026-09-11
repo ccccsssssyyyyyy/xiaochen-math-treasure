@@ -45,6 +45,24 @@ find_supported_python() {
     return 1
 }
 
+# Apple 芯片上通过 Rosetta 运行本脚本时 uname -m 会返回 x86_64，
+# sysctl 才是判断真实机型可靠依据。
+host_machine() {
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+        printf 'arm64\n'
+    else
+        printf 'x86_64\n'
+    fi
+}
+
+recommended_macos_package() {
+    if [ "$1" = "arm64" ]; then
+        printf 'MathBank-macOS-AppleSilicon.zip\n'
+    else
+        printf 'MathBank-macOS-Intel.zip\n'
+    fi
+}
+
 process_cwd() {
     lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | sed -n '1p'
 }
@@ -53,8 +71,21 @@ process_executable() {
     lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | sed -n '1p'
 }
 
-expected_python_executable() {
-    "$PYTHON_BIN" -c '
+# 本次启动可能用到的解释器：安装包内置运行时，以及旧版本创建的 venv。
+# 停止旧实例发生在选择解释器之前，所以这里同时接受两者，否则升级后
+# 第二次双击会被"无法验证身份"挡住。
+project_python_candidates() {
+    for candidate_python in \
+        "$SCRIPT_DIR/python/bin/python3.12" \
+        "$SCRIPT_DIR/venv/bin/python"; do
+        [ -x "$candidate_python" ] && printf '%s\n' "$candidate_python"
+    done
+    return 0
+}
+
+expected_python_executables() {
+    project_python_candidates | while IFS= read -r candidate_python; do
+        "$candidate_python" -c '
 import os
 from pathlib import Path
 import sys
@@ -65,6 +96,7 @@ framework_executable = (
 candidate = framework_executable if framework_executable.is_file() else Path(sys._base_executable)
 print(os.path.realpath(candidate))
 ' 2>/dev/null
+    done
 }
 
 is_mathbank_project_root() {
@@ -161,8 +193,17 @@ is_owned_server() {
     esac
 
     server_executable=$(process_executable "$server_pid") || return 1
-    expected_executable=$(expected_python_executable) || return 1
-    [ -n "$server_executable" ] && [ "$server_executable" = "$expected_executable" ] || return 1
+    [ -n "$server_executable" ] || return 1
+    executable_matched=0
+    while IFS= read -r expected_executable; do
+        if [ "$server_executable" = "$expected_executable" ]; then
+            executable_matched=1
+            break
+        fi
+    done <<EOF
+$(expected_python_executables)
+EOF
+    [ "$executable_matched" -eq 1 ] || return 1
 
     # lsof is available on supported macOS versions. Confirming cwd protects
     # against PID reuse by another project with a similar command line.
@@ -197,31 +238,60 @@ stop_previous_owned_server || fail "无法安全停止上一次服务，请查�
 stop_verified_legacy_mathbank_listeners
 
 LEGACY_VENV_BACKUP=""
-if [ ! -d "$SCRIPT_DIR/venv" ]; then
-    HOST_PYTHON=$(find_supported_python) || \
-        fail "未检测到 Python 3.10 或更高版本，请先安装后重试。"
-    echo "检测到首次运行，正在使用 $HOST_PYTHON 创建 Python 虚拟环境..."
-    "$HOST_PYTHON" -m venv "$SCRIPT_DIR/venv" || \
-        fail "创建虚拟环境失败，请检查目录权限与 Python 安装。"
-elif [ ! -x "$PYTHON_BIN" ] || ! python_is_supported "$PYTHON_BIN"; then
-    HOST_PYTHON=$(find_supported_python) || \
-        fail "现有虚拟环境低于 Python 3.10，且未找到可用于自动重建的 Python 3.10+。请先安装新版 Python。"
-    LEGACY_VENV_BACKUP="$SYSTEM_DIR/venv-python-legacy-$$"
-    echo "检测到旧版 Python 虚拟环境，正在使用 $HOST_PYTHON 自动重建..."
-    mv "$SCRIPT_DIR/venv" "$LEGACY_VENV_BACKUP" || \
-        fail "无法备份旧虚拟环境，自动重建已取消。"
-    if ! "$HOST_PYTHON" -m venv "$SCRIPT_DIR/venv"; then
-        [ ! -e "$SCRIPT_DIR/venv" ] || \
-            mv "$SCRIPT_DIR/venv" "$SYSTEM_DIR/venv-rebuild-failed-$$" 2>/dev/null || true
-        mv "$LEGACY_VENV_BACKUP" "$SCRIPT_DIR/venv" 2>/dev/null || true
-        fail "自动重建虚拟环境失败；旧环境已保留，请检查目录权限与 Python 安装。"
-    fi
+PORTABLE_RUNTIME=0
+PORTABLE_PYTHON="$SCRIPT_DIR/python/bin/python3.12"
+PORTABLE_RUNTIME_ARCH=""
+if [ -f "$SCRIPT_DIR/python/RUNTIME-ARCH.txt" ]; then
+    PORTABLE_RUNTIME_ARCH=$(tr -d '[:space:]' <"$SCRIPT_DIR/python/RUNTIME-ARCH.txt" 2>/dev/null)
 fi
 
-PYTHON_BIN="$SCRIPT_DIR/venv/bin/python"
-[ -x "$PYTHON_BIN" ] || fail "虚拟环境不完整：缺少 venv/bin/python。"
-python_is_supported "$PYTHON_BIN" || \
-    fail "虚拟环境仍低于 Python 3.10，无法启动。"
+if [ -f "$PORTABLE_PYTHON" ]; then
+    # 安装包自带 Python 运行时：不依赖本机 Python，也不创建虚拟环境。
+    PORTABLE_RUNTIME=1
+    PYTHON_BIN="$PORTABLE_PYTHON"
+    [ -x "$PYTHON_BIN" ] || chmod +x "$PYTHON_BIN" 2>/dev/null || true
+    [ -x "$PYTHON_BIN" ] || \
+        fail "内置运行时缺少执行权限：python/bin/python3.12。请重新完整解压安装包。"
+    if ! "$PYTHON_BIN" -c 'import sys' >/dev/null 2>&1; then
+        HOST_MACHINE=$(host_machine)
+        fail "内置 Python 运行时（${PORTABLE_RUNTIME_ARCH:-未知}）无法在本机（$HOST_MACHINE）执行。请到 Release 页面下载 $(recommended_macos_package "$HOST_MACHINE") 后重新解压。"
+    fi
+    HOST_MACHINE=$(host_machine)
+    if [ -n "$PORTABLE_RUNTIME_ARCH" ] && [ "$PORTABLE_RUNTIME_ARCH" != "$HOST_MACHINE" ]; then
+        echo "⚠️ 本安装包内置 $PORTABLE_RUNTIME_ARCH 运行时，本机为 $HOST_MACHINE（当前经兼容层运行）。"
+        echo "   若出现异常，请改用 $(recommended_macos_package "$HOST_MACHINE")。"
+    fi
+    if [ -d "$SCRIPT_DIR/venv" ]; then
+        echo "ℹ️ 检测到旧版本创建的 venv 目录；内置运行时已不再需要它，可自行删除以释放空间。"
+    fi
+    echo "已启用内置 Python 运行时 $("$PYTHON_BIN" -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)，无需本机安装 Python。"
+else
+    if [ ! -d "$SCRIPT_DIR/venv" ]; then
+        HOST_PYTHON=$(find_supported_python) || \
+            fail "未检测到 Python 3.10 或更高版本，请先安装后重试。"
+        echo "检测到首次运行，正在使用 $HOST_PYTHON 创建 Python 虚拟环境..."
+        "$HOST_PYTHON" -m venv "$SCRIPT_DIR/venv" || \
+            fail "创建虚拟环境失败，请检查目录权限与 Python 安装。"
+    elif [ ! -x "$PYTHON_BIN" ] || ! python_is_supported "$PYTHON_BIN"; then
+        HOST_PYTHON=$(find_supported_python) || \
+            fail "现有虚拟环境低于 Python 3.10，且未找到可用于自动重建的 Python 3.10+。请先安装新版 Python。"
+        LEGACY_VENV_BACKUP="$SYSTEM_DIR/venv-python-legacy-$$"
+        echo "检测到旧版 Python 虚拟环境，正在使用 $HOST_PYTHON 自动重建..."
+        mv "$SCRIPT_DIR/venv" "$LEGACY_VENV_BACKUP" || \
+            fail "无法备份旧虚拟环境，自动重建已取消。"
+        if ! "$HOST_PYTHON" -m venv "$SCRIPT_DIR/venv"; then
+            [ ! -e "$SCRIPT_DIR/venv" ] || \
+                mv "$SCRIPT_DIR/venv" "$SYSTEM_DIR/venv-rebuild-failed-$$" 2>/dev/null || true
+            mv "$LEGACY_VENV_BACKUP" "$SCRIPT_DIR/venv" 2>/dev/null || true
+            fail "自动重建虚拟环境失败；旧环境已保留，请检查目录权限与 Python 安装。"
+        fi
+    fi
+
+    PYTHON_BIN="$SCRIPT_DIR/venv/bin/python"
+    [ -x "$PYTHON_BIN" ] || fail "虚拟环境不完整：缺少 venv/bin/python。"
+    python_is_supported "$PYTHON_BIN" || \
+        fail "虚拟环境仍低于 Python 3.10，无法启动。"
+fi
 
 if [ -f "$SCRIPT_DIR/RELEASE-MANIFEST.json" ]; then
     echo "正在校验并完成 Release 覆盖升级..."
@@ -230,13 +300,22 @@ if [ -f "$SCRIPT_DIR/RELEASE-MANIFEST.json" ]; then
 fi
 
 [ -f "$SCRIPT_DIR/requirements.txt" ] || fail "缺少 requirements.txt，无法校验运行依赖。"
+
+echo "正在检查运行环境依赖是否完整..."
+if [ "$PORTABLE_RUNTIME" -eq 1 ]; then
+    # 内置运行时已在打包阶段预装全部依赖，这里只做完整性校验，不做联网安装。
+    if ! "$PYTHON_BIN" -c \
+        "import fastapi, uvicorn, sqlalchemy, greenlet, colorama, multipart, dotenv, requests, PIL, fitz, docx, lxml, defusedxml, olefile, exceptiongroup, sniffio; import pdf_inspector" \
+        >/dev/null 2>&1; then
+        fail "内置运行时的依赖不完整。请重新下载并完整解压安装包；覆盖升级时需先把新版全部内容合并覆盖到原目录后再试。"
+    fi
+else
 REQUIREMENTS_STAMP="$SYSTEM_DIR/requirements.sha256"
 REQUIREMENTS_HASH=$("$PYTHON_BIN" -c \
     'import hashlib, pathlib; print(hashlib.sha256(pathlib.Path("requirements.txt").read_bytes()).hexdigest())' \
     2>/dev/null) || fail "无法计算 requirements.txt 摘要。"
 INSTALLED_HASH=$(cat "$REQUIREMENTS_STAMP" 2>/dev/null || true)
 
-echo "正在检查运行环境依赖是否完整..."
 NEEDS_DEPENDENCY_INSTALL=0
 [ "$INSTALLED_HASH" = "$REQUIREMENTS_HASH" ] || NEEDS_DEPENDENCY_INSTALL=1
 if ! "$PYTHON_BIN" -c \
@@ -259,6 +338,7 @@ if [ "$NEEDS_DEPENDENCY_INSTALL" -eq 1 ]; then
         fail "无法写入依赖锁摘要。"
     mv -f "$STAMP_TEMP" "$REQUIREMENTS_STAMP" || \
         fail "无法原子更新依赖锁摘要。"
+fi
 fi
 
 # === 配置 macOS LibreOffice 中文字体 fallback（数学宝藏项目）===

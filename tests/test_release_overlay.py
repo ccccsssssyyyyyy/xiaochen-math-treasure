@@ -471,3 +471,100 @@ def test_tampered_installed_manifest_is_not_trusted_for_deletion(tmp_path):
         release_overlay.apply_release_overlay(tmp_path, "macos")
 
     assert (tmp_path / "mathbank" / "old.py").exists()
+
+
+def test_macos_runtime_is_reconciled_exactly(tmp_path):
+    runtime = _write(tmp_path, "python/bin/python3.12", b"interpreter")
+    current_dependency = _write(
+        tmp_path, "python/lib/python3.12/site-packages/fastapi/__init__.py", "current"
+    )
+    obsolete_dependency = _write(
+        tmp_path, "python/lib/python3.12/site-packages/old.py", "obsolete"
+    )
+    obsolete_cache = _write(
+        tmp_path, "python/lib/python3.12/site-packages/pkg/__pycache__/old.pyc", b"pyc"
+    )
+    obsolete_empty = tmp_path / "python" / "empty-old"
+    obsolete_empty.mkdir()
+    outside_custom = _write(tmp_path, "scripts/teacher-helper.py", "keep")
+    _install_manifest(
+        tmp_path,
+        "macos",
+        [
+            "python/bin/python3.12",
+            "python/lib/python3.12/site-packages/fastapi/__init__.py",
+        ],
+    )
+
+    result = release_overlay.apply_release_overlay(tmp_path, "macos")
+
+    assert runtime.exists()
+    assert current_dependency.exists()
+    assert not obsolete_dependency.exists()
+    assert not obsolete_cache.exists()
+    assert not obsolete_empty.exists()
+    assert outside_custom.exists()
+    assert result["deleted"] == [
+        "python/lib/python3.12/site-packages/old.py",
+        "python/lib/python3.12/site-packages/pkg/__pycache__/old.pyc",
+    ]
+
+
+def test_macos_runtime_is_case_sensitive_and_unlinks_symlinks(tmp_path):
+    outside = _write(tmp_path, "outside-runtime/user-data.txt", "keep")
+    _write(tmp_path, "python/bin/python3.12", "interpreter")
+    mixed_case = _write(tmp_path, "python/lib/Python3.12/site-packages/kept.py", "kept")
+    (tmp_path / "python" / "linked").symlink_to(
+        outside.parent, target_is_directory=True
+    )
+    _install_manifest(
+        tmp_path,
+        "macos",
+        ["python/bin/python3.12", "python/lib/Python3.12/site-packages/kept.py"],
+    )
+
+    result = release_overlay.apply_release_overlay(tmp_path, "macos")
+
+    # macOS 区分大小写：清单里的大小写就是唯一答案，不得按 Windows 方式折叠比较。
+    assert mixed_case.exists()
+    assert "python/linked" in result["deleted"]
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_pre_runtime_macos_install_upgrades_without_a_python_directory(tmp_path):
+    _write(tmp_path, "main.py", "2.2.0 application")
+    obsolete = _write(tmp_path, "mathbank/obsolete.py", "old release file")
+    # 2.2.0 及更早的 macOS 包用宿主 Python + venv，清单里没有 python/ 目录。
+    _install_manifest(
+        tmp_path, "macos", ["main.py", "mathbank/obsolete.py"], version="2.2.0"
+    )
+    release_overlay.apply_release_overlay(tmp_path, "macos")
+
+    _write(tmp_path, "main.py", "2.2.1 application")
+    _install_manifest(tmp_path, "macos", ["main.py"], version="2.2.1")
+
+    # 覆盖升级必须继续可用：不能因为缺少运行时目录而报错，也不该把它记成已删除。
+    result = release_overlay.apply_release_overlay(tmp_path, "macos")
+
+    assert result["status"] == "updated"
+    assert not obsolete.exists()
+    assert "python" not in result["deleted"]
+
+
+def test_macos_runtime_walk_error_fails_without_recording_success(tmp_path, monkeypatch):
+    _write(tmp_path, "python/bin/python3.12", "interpreter")
+    _install_manifest(tmp_path, "macos", ["python/bin/python3.12"])
+
+    def inaccessible_walk(*_args, **kwargs):
+        kwargs["onerror"](PermissionError("runtime directory is inaccessible"))
+        return iter(())
+
+    monkeypatch.setattr(release_overlay.os, "walk", inaccessible_walk)
+    with pytest.raises(release_overlay.ReleaseOverlayError, match="cannot inspect"):
+        release_overlay.apply_release_overlay(tmp_path, "macos")
+
+    assert not (
+        tmp_path
+        / release_overlay.STATE_DIRECTORY
+        / release_overlay.INSTALLED_MANIFEST_NAME
+    ).exists()

@@ -606,8 +606,11 @@ def test_clean_directories_preserves_unrelated_dist_artifacts(tmp_path, monkeypa
     unrelated.write_text("keep", encoding="utf-8")
     build_dir = dist / "mathbank-windows"
     wheels_dir = dist / "wheels"
-    macos_dir = dist / "mathbank-macos"
-    for directory in (build_dir, wheels_dir, macos_dir):
+    macos_dirs = {
+        architecture: dist / f"mathbank-macos-{architecture}"
+        for architecture in build_release.MACOS_RUNTIME_BUILDS
+    }
+    for directory in (build_dir, wheels_dir, *macos_dirs.values()):
         directory.mkdir()
         (directory / "old").write_text("remove", encoding="utf-8")
     (dist / "MathBank-macOS.zip").write_bytes(b"old")
@@ -615,7 +618,11 @@ def test_clean_directories_preserves_unrelated_dist_artifacts(tmp_path, monkeypa
     monkeypatch.setattr(build_release, "DIST_DIR", str(dist))
     monkeypatch.setattr(build_release, "BUILD_DIR", str(build_dir))
     monkeypatch.setattr(build_release, "WHEELS_DIR", str(wheels_dir))
-    monkeypatch.setattr(build_release, "MACOS_BUILD_DIR", str(macos_dir))
+    monkeypatch.setattr(
+        build_release,
+        "MACOS_BUILD_DIRS",
+        {architecture: str(path) for architecture, path in macos_dirs.items()},
+    )
     monkeypatch.setattr(build_release, "PYTHON_DIR", str(build_dir / "python"))
     monkeypatch.setattr(
         build_release,
@@ -627,6 +634,7 @@ def test_clean_directories_preserves_unrelated_dist_artifacts(tmp_path, monkeypa
 
     assert unrelated.read_text(encoding="utf-8") == "keep"
     assert not (dist / "MathBank-macOS.zip").exists()
+    assert not any((directory / "old").exists() for directory in macos_dirs.values())
     assert (build_dir / "python" / "site-packages").is_dir()
 
 
@@ -718,7 +726,10 @@ def test_launchers_require_python_310_and_only_stop_verified_mathbank_processes(
     assert "find_verified_mathbank_owner" in mac_launcher
     assert "is_mathbank_project_root" in mac_launcher
     assert "process_executable" in mac_launcher
-    assert "expected_python_executable" in mac_launcher
+    assert "expected_python_executables" in mac_launcher
+    # 内置运行时与旧 venv 都必须被认作本项目的解释器，否则升级后重启会被身份校验挡住。
+    assert '"$SCRIPT_DIR/python/bin/python3.12"' in mac_launcher
+    assert '"$SCRIPT_DIR/venv/bin/python"' in mac_launcher
     assert 'Path(sys.base_prefix) / "Resources" / "Python.app"' in mac_launcher
     assert 'case " $inspected_command "' in mac_launcher
     assert 'rechecked_owner=$(find_verified_mathbank_owner "$verified_owner")' in mac_launcher

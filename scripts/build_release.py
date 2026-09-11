@@ -9,10 +9,13 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import urllib.parse
 import urllib.request
@@ -32,7 +35,6 @@ WHEELS_DIR = os.path.join(DIST_DIR, "wheels")
 SITE_PACKAGES = os.path.join(PYTHON_DIR, "site-packages")
 CACHE_DIR = str(BUILD_CACHE_DIR)
 CACHE_WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
-MACOS_BUILD_DIR = os.path.join(DIST_DIR, "mathbank-macos")
 
 PYTHON_ZIP_URL = (
     "https://www.python.org/ftp/python/3.10.11/"
@@ -45,12 +47,81 @@ NUGET_ZIP_URL = (
 )
 NUGET_ZIP_SHA256 = "7c6f99b160a36a7e09492dfcff2b0a3a60bb5229ca44cdcc3ecb32871a6144d0"
 
+# macOS ships a full portable CPython so Apple users no longer need a system
+# Python.  The runtime is pinned by release tag and per-architecture SHA-256;
+# see scripts/README-macos-runtime.md for the pruning contract.
+MACOS_RUNTIME_PYTHON_VERSION = "3.12"
+MACOS_RUNTIME_RELEASE = "20260901"
+MACOS_RUNTIME_BASE_URL = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/"
+    f"{MACOS_RUNTIME_RELEASE}"
+)
+MACOS_RUNTIME_ROOT = "python"
+MACOS_RUNTIME_ARCH_FILE = "python/RUNTIME-ARCH.txt"
+_MACOS_CPU_TYPE_ARM64 = 0x0100000C
+_MACOS_CPU_TYPE_X86_64 = 0x01000007
+MACOS_RUNTIME_BUILDS = {
+    "apple-silicon": {
+        "asset": (
+            f"cpython-{MACOS_RUNTIME_PYTHON_VERSION}.14+{MACOS_RUNTIME_RELEASE}"
+            "-aarch64-apple-darwin-install_only.tar.gz"
+        ),
+        "sha256": "3ee3ee547cedfeb7c2b16b2b7156039f7b470bb8f857e226fd3d2eb11db83c76",
+        "host_machine": "arm64",
+        "cpu_type": _MACOS_CPU_TYPE_ARM64,
+        "wheel_platforms": ("macosx_11_0_arm64", "macosx_11_0_universal2"),
+        "output_stem": "MathBank-macOS-AppleSilicon",
+    },
+    "intel": {
+        "asset": (
+            f"cpython-{MACOS_RUNTIME_PYTHON_VERSION}.14+{MACOS_RUNTIME_RELEASE}"
+            "-x86_64-apple-darwin-install_only.tar.gz"
+        ),
+        "sha256": "2e31b23f3f1319f707d0e620b48847a0046577541d357276821f9f1b5492e0ba",
+        "host_machine": "x86_64",
+        "cpu_type": _MACOS_CPU_TYPE_X86_64,
+        "wheel_platforms": (
+            "macosx_10_15_x86_64",
+            "macosx_10_15_universal2",
+            "macosx_11_0_x86_64",
+            "macosx_11_0_universal2",
+        ),
+        "output_stem": "MathBank-macOS-Intel",
+    },
+}
+MACOS_BUILD_DIRS = {
+    architecture: os.path.join(DIST_DIR, f"mathbank-macos-{architecture}")
+    for architecture in MACOS_RUNTIME_BUILDS
+}
+# The portable runtime binary lives at python/bin/python3.12 and resolves
+# site-packages relative to sys.prefix, i.e. python/lib/python3.12/.
+_MACOS_RUNTIME_BIN = f"bin/python3.{MACOS_RUNTIME_PYTHON_VERSION[2:]}"
+MACOS_RUNTIME_SITE_PACKAGES = os.path.join(
+    MACOS_RUNTIME_ROOT,
+    "lib",
+    f"python{MACOS_RUNTIME_PYTHON_VERSION}",
+    "site-packages",
+)
+# Imported by the runtime smoke check and by the macOS launcher.
+MACOS_RUNTIME_REQUIRED_SITE_PACKAGES = (
+    "PIL",
+    "docx",
+    "fastapi",
+    "greenlet",
+    "lxml",
+    "pdf_inspector",
+    "pymupdf",
+    "sqlalchemy",
+    "uvicorn",
+)
+
 ROOT_FILE_ALLOWLIST = (
     "main.py",
     ".env.example",
     "覆盖升级说明.txt",
     "requirements.txt",
     "README.md",
+    "一键安装指令.md",
     "LICENSE",
 )
 STATIC_ALLOWLIST = (
@@ -63,7 +134,9 @@ STATIC_ALLOWLIST = (
     "js",
     "lib",
 )
-HIDDEN_FILE_ALLOWLIST = {".env.example", ".gitkeep", ".rels"}
+# `.dylibs` is the delocate layout wheel-builders use to vendor macOS native
+# libraries (Pillow ships libjpeg/libpng there); without it Pillow cannot load.
+HIDDEN_FILE_ALLOWLIST = {".dylibs", ".env.example", ".gitkeep", ".rels"}
 FORBIDDEN_RELEASE_PARTS = {
     ".DS_Store",
     ".git",
@@ -90,6 +163,11 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_OUTPUT_NAMES = (
     "MathBank-Windows-x64.zip",
     "MathBank-Windows-x64.zip.sha256",
+    "MathBank-macOS-AppleSilicon.zip",
+    "MathBank-macOS-AppleSilicon.zip.sha256",
+    "MathBank-macOS-Intel.zip",
+    "MathBank-macOS-Intel.zip.sha256",
+    # Legacy 2.2.0 name, kept so a stale package in dist/ is always purged.
     "MathBank-macOS.zip",
     "MathBank-macOS.zip.sha256",
 )
@@ -101,6 +179,62 @@ DEPENDENCY_TEST_PATHS = (
     Path("colorama", "tests"),
     Path("fastapi", ".agents"),
     Path("greenlet", "tests"),
+)
+# Reviewed, non-runtime payloads of the macOS dependency set.  Both are C header
+# trees for compiling against the libraries, not runtime data.
+MACOS_DEPENDENCY_PRUNE_PATHS = (
+    Path("lxml", "includes"),
+    Path("pymupdf", "mupdf-devel"),
+)
+# Everything below is present in the pinned macOS runtime but unused by the
+# application.  Removing it takes the extracted runtime from 67 MB to 44 MB and
+# is what allows the release to ship without a single symbolic link.
+MACOS_RUNTIME_PRUNE_PATHS = (
+    # Developer-facing launchers; only bin/python3.12 is executed.  The python3
+    # and python entries are symbolic links that a ZIP would store as three
+    # extra 18 MB copies of the interpreter.
+    "bin/2to3",
+    "bin/2to3-3.12",
+    "bin/idle3",
+    "bin/idle3.12",
+    "bin/pip",
+    "bin/pip3",
+    "bin/pip3.12",
+    "bin/pydoc3",
+    "bin/pydoc3.12",
+    "bin/python",
+    "bin/python3",
+    "bin/python3-config",
+    "bin/python3.12-config",
+    # Headers, pkg-config files and man pages.
+    "include",
+    "lib/pkgconfig",
+    "share",
+    # Tcl/Tk and its helper binding: only tkinter would load them.
+    "lib/itcl4.3.8",
+    "lib/libtcl9.0.dylib",
+    "lib/libtcl9tk9.0.dylib",
+    "lib/tcl9",
+    "lib/tcl9.0",
+    "lib/thread3.0.6",
+    "lib/tk9.0",
+    # libpython is only needed for embedding; bin/python3.12 is linked
+    # statically and no extension module references it (verified with otool).
+    "lib/libpython3.12.dylib",
+    # Build configuration left behind by install_only.
+    "lib/python3.12/config-3.12-darwin",
+    "lib/python3.12/lib-dynload/.empty",
+    # Bootstrappers and developer tooling.  The release installs dependencies at
+    # build time, so pip/ensurepip/venv must never appear in the package.
+    "lib/python3.12/ensurepip",
+    "lib/python3.12/idlelib",
+    "lib/python3.12/lib2to3",
+    "lib/python3.12/tkinter",
+    "lib/python3.12/turtledemo",
+    "lib/python3.12/venv",
+    # install_only seeds pip here; the release replaces it with the pinned
+    # application dependencies.
+    "lib/python3.12/site-packages",
 )
 OVERLAY_PROTECTED_PATHS = (
     ".env",
@@ -118,6 +252,7 @@ OVERLAY_MANAGED_ROOTS = (
     "覆盖升级说明.txt",
     "requirements.txt",
     "README.md",
+    "一键安装指令.md",
     "LICENSE",
     "mathbank",
     "scripts",
@@ -160,13 +295,32 @@ def validate_zip(path, label="archive"):
         raise RuntimeError(f"{label} contains a corrupt member: {corrupt_member}")
 
 
+def validate_tar_gz(path, label="archive"):
+    """Check tar.gz readability and reject unsafe member paths or link targets."""
+    try:
+        with tarfile.open(path, "r:gz") as tar_ref:
+            members = tar_ref.getmembers()
+    except (OSError, EOFError, tarfile.TarError) as exc:
+        raise RuntimeError(f"{label} is not a valid tar.gz archive") from exc
+    if not members:
+        raise RuntimeError(f"{label} is an empty tar.gz archive")
+    for member in members:
+        member_path = PurePosixPath(member.name)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise RuntimeError(f"unsafe tar member path: {member.name}")
+        if member.issym() or member.islnk():
+            link_path = PurePosixPath(member.linkname)
+            if link_path.is_absolute() or ".." in link_path.parts:
+                raise RuntimeError(f"unsafe tar link target: {member.name}")
+
+
 def _validate_https_url(url, label):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise RuntimeError(f"{label} download URL must use HTTPS")
 
 
-def download_verified(url, cache_path, expected_sha256, label):
+def download_verified(url, cache_path, expected_sha256, label, validator=validate_zip):
     """Return a verified cache file, downloading atomically when necessary."""
     _validate_https_url(url, label)
     expected = str(expected_sha256).strip().lower()
@@ -178,7 +332,7 @@ def download_verified(url, cache_path, expected_sha256, label):
     if os.path.isfile(cache_path):
         try:
             verify_sha256(cache_path, expected, label)
-            validate_zip(cache_path, label)
+            validator(cache_path, label)
             print(f"💾 Using verified cached {label}...")
             return cache_path
         except RuntimeError as exc:
@@ -205,7 +359,7 @@ def download_verified(url, cache_path, expected_sha256, label):
             shutil.copyfileobj(response, target, length=1024 * 1024)
 
         verify_sha256(temporary_path, expected, label)
-        validate_zip(temporary_path, label)
+        validator(temporary_path, label)
         os.replace(temporary_path, cache_path)
     finally:
         if os.path.exists(temporary_path):
@@ -278,7 +432,7 @@ def _remove_release_outputs():
 def clean_directories():
     print("🧹 Cleaning old directories...")
     os.makedirs(DIST_DIR, exist_ok=True)
-    for path in (BUILD_DIR, WHEELS_DIR, MACOS_BUILD_DIR):
+    for path in (BUILD_DIR, WHEELS_DIR, *MACOS_BUILD_DIRS.values()):
         shutil.rmtree(path, ignore_errors=True)
     _remove_release_outputs()
     os.makedirs(PYTHON_DIR, exist_ok=True)
@@ -425,6 +579,225 @@ def _prune_dependency_test_artifacts(site_packages):
         shutil.rmtree(root / relative_path, ignore_errors=True)
 
 
+def _remove_release_path(target):
+    """Delete a file, link or directory; return True when something was removed."""
+    if target.is_symlink():
+        target.unlink()
+        return True
+    if target.is_dir():
+        shutil.rmtree(target)
+        return True
+    if target.exists():
+        target.unlink()
+        return True
+    return False
+
+
+def prune_macos_dependency_payloads(site_packages):
+    """Drop reviewed C header trees that macOS wheels ship for downstream builds."""
+    root = Path(site_packages)
+    removed = []
+    for relative_path in MACOS_DEPENDENCY_PRUNE_PATHS:
+        if _remove_release_path(root / relative_path):
+            removed.append(relative_path.as_posix())
+    return removed
+
+
+def sweep_release_bytecode(root):
+    """Delete compiled caches, links and macOS metadata the allowlist forbids."""
+    root = Path(root)
+    removed = []
+    for directory, subdirectories, filenames in os.walk(root, topdown=True):
+        directory = Path(directory)
+        for name in list(subdirectories):
+            child = directory / name
+            if child.is_symlink() or name == "__pycache__":
+                subdirectories.remove(name)
+                if _remove_release_path(child):
+                    removed.append(child.relative_to(root).as_posix())
+        for name in filenames:
+            if name.endswith((".pyc", ".pyo")) or name == ".DS_Store":
+                child = directory / name
+                if _remove_release_path(child):
+                    removed.append(child.relative_to(root).as_posix())
+    return removed
+
+
+def prune_macos_runtime(runtime_root):
+    """Reduce the pinned runtime to the reviewed minimum needed to serve the app."""
+    root = Path(runtime_root)
+    removed = []
+    for relative_name in MACOS_RUNTIME_PRUNE_PATHS:
+        if _remove_release_path(root.joinpath(*PurePosixPath(relative_name).parts)):
+            removed.append(relative_name)
+    removed.extend(sweep_release_bytecode(root))
+    return removed
+
+
+def extract_macos_runtime(archive_path, destination):
+    """Extract the pinned runtime into its staging directory without any links."""
+    destination = Path(destination)
+    extracted = 0
+    with tarfile.open(archive_path, "r:gz") as tar_ref:
+        for member in tar_ref.getmembers():
+            parts = PurePosixPath(member.name).parts
+            if not parts or parts[0] != MACOS_RUNTIME_ROOT or len(parts) == 1:
+                continue
+            # Links are dropped on purpose: python/bin/python3.12 is the only
+            # entry point, and a ZIP would store each link as a full 18 MB copy
+            # of the interpreter.
+            if member.issym() or member.islnk() or member.isdev():
+                continue
+            target = destination.joinpath(*parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = tar_ref.extractfile(member)
+            if source is None:
+                raise RuntimeError(f"runtime member is unreadable: {member.name}")
+            with source, open(target, "wb") as handle:
+                shutil.copyfileobj(source, handle, length=1024 * 1024)
+            os.chmod(target, member.mode & 0o755)
+            extracted += 1
+    if extracted == 0:
+        raise RuntimeError("macOS runtime archive contains no python/ payload")
+    return extracted
+
+
+def write_macos_runtime_arch_file(root, architecture):
+    """Record the target architecture so the launcher can reject a mismatched Mac."""
+    build = MACOS_RUNTIME_BUILDS[architecture]
+    path = Path(root, MACOS_RUNTIME_ARCH_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, build["host_machine"] + "\n")
+    return path
+
+
+def download_macos_wheels(architecture, wheels_dir):
+    """Resolve every pinned macOS dependency wheel for one architecture."""
+    validate_target_requirements()
+    build = MACOS_RUNTIME_BUILDS[architecture]
+    os.makedirs(wheels_dir, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "download",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "--python-version",
+        MACOS_RUNTIME_PYTHON_VERSION,
+        "--implementation",
+        "cp",
+        "--abi",
+        f"cp{MACOS_RUNTIME_PYTHON_VERSION.replace('.', '')}",
+    ]
+    for wheel_platform in build["wheel_platforms"]:
+        cmd.extend(("--platform", wheel_platform))
+    cmd.extend(
+        (
+            "--dest",
+            wheels_dir,
+            "--find-links",
+            CACHE_WHEELS_DIR,
+            "--requirement",
+            os.path.join(BASE_DIR, "requirements-windows.txt"),
+        )
+    )
+    print(f"Running command: {subprocess.list2cmdline(cmd)}")
+    subprocess.check_call(cmd, cwd=BASE_DIR)
+
+    wheel_paths = sorted(Path(wheels_dir).glob("*.whl"))
+    if not wheel_paths:
+        raise RuntimeError(f"pip did not resolve any macOS wheels for {architecture}")
+    for wheel_path in wheel_paths:
+        validate_zip(wheel_path, wheel_path.name)
+    return wheel_paths
+
+
+def extract_macos_dependencies(wheel_paths, site_packages):
+    """Install the pinned wheels into the runtime's own site-packages."""
+    destination = Path(site_packages)
+    shutil.rmtree(destination, ignore_errors=True)
+    destination.mkdir(parents=True, exist_ok=True)
+    for wheel_path in wheel_paths:
+        with zipfile.ZipFile(wheel_path, "r") as zip_ref:
+            zip_ref.extractall(destination, members=_safe_zip_members(zip_ref))
+    _prune_dependency_test_artifacts(destination)
+    prune_macos_dependency_payloads(destination)
+    sweep_release_bytecode(destination)
+
+
+def _macho_cpu_type(path):
+    """Return the Mach-O CPU type of *path*, or None when it is not Mach-O."""
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(8)
+    except OSError:
+        return None
+    if len(header) < 8 or struct.unpack("<I", header[:4])[0] != 0xFEEDFACF:
+        return None
+    return struct.unpack("<i", header[4:8])[0]
+
+
+def validate_macos_runtime(root, architecture):
+    """Verify the staged macOS runtime, executing it on a matching host."""
+    root = Path(root)
+    build = MACOS_RUNTIME_BUILDS[architecture]
+    runtime = root / MACOS_RUNTIME_ROOT
+    executable = runtime.joinpath(*PurePosixPath(_MACOS_RUNTIME_BIN).parts)
+    arch_file = root / MACOS_RUNTIME_ARCH_FILE
+    site_packages = root.joinpath(*PurePosixPath(MACOS_RUNTIME_SITE_PACKAGES).parts)
+
+    required = [executable, arch_file]
+    required.extend(
+        site_packages / name for name in MACOS_RUNTIME_REQUIRED_SITE_PACKAGES
+    )
+    missing = [path.relative_to(root).as_posix() for path in required if not path.exists()]
+    if missing:
+        raise RuntimeError(f"macOS runtime smoke check is missing: {missing}")
+
+    if arch_file.read_text(encoding="utf-8").strip() != build["host_machine"]:
+        raise RuntimeError("macOS runtime architecture marker does not match its target")
+
+    links = sorted(
+        path.relative_to(root).as_posix()
+        for path in runtime.rglob("*")
+        if path.is_symlink()
+    )
+    if links:
+        raise RuntimeError(f"macOS runtime must not contain symbolic links: {links[:5]}")
+
+    if _macho_cpu_type(executable) != build["cpu_type"]:
+        raise RuntimeError(
+            "macOS runtime binary architecture does not match "
+            f"{build['host_machine']}: {executable.relative_to(root).as_posix()}"
+        )
+
+    if platform.system() == "Darwin" and platform.machine() == build["host_machine"]:
+        environment = os.environ.copy()
+        # A build must never leave bytecode behind: the staging tree is checked
+        # against FORBIDDEN_RELEASE_SUFFIXES right after this call.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        subprocess.check_call(
+            [
+                str(executable),
+                "-c",
+                (
+                    "import sqlite3, ssl; "
+                    "import fastapi, uvicorn, sqlalchemy, greenlet, colorama; "
+                    "import pdf_inspector, pymupdf, PIL, lxml, docx; "
+                    "import mathbank.ai_json"
+                ),
+            ],
+            cwd=root,
+            env=environment,
+        )
+
+
 def _release_ignore(_directory, names):
     ignored = set()
     for name in names:
@@ -464,7 +837,7 @@ def _overlay_managed_roots(platform_name):
     if platform_name == "windows-x64":
         roots.extend(("启动题库系统.bat", "python"))
     elif platform_name == "macos":
-        roots.append("启动题库系统.command")
+        roots.extend(("启动题库系统.command", MACOS_RUNTIME_ROOT))
     else:
         raise RuntimeError(f"unknown release platform: {platform_name}")
     return roots
@@ -957,21 +1330,54 @@ def zip_release():
     )
 
 
-def zip_macos_release():
-    print("🤐 Zipping macOS release package...")
-    macos_build_dir = MACOS_BUILD_DIR
-    copy_app_files(macos_build_dir, "启动题库系统.command")
-    launcher_path = os.path.join(macos_build_dir, "启动题库系统.command")
-    os.chmod(launcher_path, 0o755)
+def build_macos_release(architecture):
+    """Stage, verify and archive one macOS portable release."""
+    build = MACOS_RUNTIME_BUILDS[architecture]
+    staging = Path(MACOS_BUILD_DIRS[architecture])
+    shutil.rmtree(staging, ignore_errors=True)
+    print(f"🤐 Building macOS {architecture} package ({build['host_machine']})...")
+
+    copy_app_files(staging, "启动题库系统.command")
+    os.chmod(staging / "启动题库系统.command", 0o755)
+
+    runtime_archive = download_verified(
+        f"{MACOS_RUNTIME_BASE_URL}/{build['asset']}",
+        os.path.join(CACHE_DIR, build["asset"]),
+        build["sha256"],
+        f"macOS {build['host_machine']} portable Python "
+        f"{MACOS_RUNTIME_PYTHON_VERSION}",
+        validator=validate_tar_gz,
+    )
+    print("📦 Extracting portable Python runtime...")
+    extract_macos_runtime(runtime_archive, staging)
+    prune_macos_runtime(staging / MACOS_RUNTIME_ROOT)
+    write_macos_runtime_arch_file(staging, architecture)
+
+    wheels_dir = os.path.join(DIST_DIR, "wheels", f"macos-{architecture}")
+    wheel_paths = download_macos_wheels(architecture, wheels_dir)
+    print(f"📦 Installing {len(wheel_paths)} wheels into the runtime...")
+    extract_macos_dependencies(
+        wheel_paths, staging.joinpath(*PurePosixPath(MACOS_RUNTIME_SITE_PACKAGES).parts)
+    )
+    validate_macos_runtime(staging, architecture)
+
     try:
         return _build_archive(
-            macos_build_dir,
-            os.path.join(DIST_DIR, "MathBank-macOS"),
+            staging,
+            os.path.join(DIST_DIR, build["output_stem"]),
             "macos",
             "启动题库系统.command",
         )
     finally:
-        shutil.rmtree(macos_build_dir, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(wheels_dir, ignore_errors=True)
+
+
+def zip_macos_release():
+    print("🤐 Zipping macOS release packages...")
+    return [
+        build_macos_release(architecture) for architecture in MACOS_RUNTIME_BUILDS
+    ]
 
 
 def cleanup_temp():
