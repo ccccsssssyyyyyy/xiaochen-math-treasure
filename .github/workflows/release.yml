@@ -30,9 +30,10 @@ jobs:
       - name: Install locked dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      # 构建脚本会下载固定 SHA-256 的 Windows 嵌入版 Python 与全部 win_amd64 wheel。
-      # 非 Windows 平台上 validate_windows_runtime 的 os.name 分支自动跳过运行时
-      # smoke check，因此 Linux runner 可以完整产出两个平台的包。
+      # 构建脚本会下载固定 SHA-256 的 Windows 嵌入版 Python、macOS 双架构便携
+      # Python 运行时与全部目标平台 wheel。非对应平台上运行时 smoke check 自动
+      # 跳过真实执行，只做布局与 Mach-O 架构校验，因此 Linux runner 可以完整
+      # 产出三个包。
       - name: Build Windows and macOS packages
         run: python -m scripts.build_release
 
@@ -40,8 +41,11 @@ jobs:
         run: |
           set -euo pipefail
           test -f dist/MathBank-Windows-x64.zip
-          test -f dist/MathBank-macOS.zip
-          ls -lh dist/MathBank-Windows-x64.zip dist/MathBank-macOS.zip
+          test -f dist/MathBank-macOS-AppleSilicon.zip
+          test -f dist/MathBank-macOS-Intel.zip
+          # 2.2.0 的单架构 macOS 包名已废弃，构建失败时不得回落到旧产物。
+          test ! -f dist/MathBank-macOS.zip
+          ls -lh dist/MathBank-*.zip
 
       - name: Publish GitHub Release
         env:
@@ -52,11 +56,13 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               dist/MathBank-Windows-x64.zip \
-              dist/MathBank-macOS.zip --clobber
+              dist/MathBank-macOS-AppleSilicon.zip \
+              dist/MathBank-macOS-Intel.zip --clobber
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes-file .github/release-notes.md \
               dist/MathBank-Windows-x64.zip \
-              dist/MathBank-macOS.zip
+              dist/MathBank-macOS-AppleSilicon.zip \
+              dist/MathBank-macOS-Intel.zip
           fi

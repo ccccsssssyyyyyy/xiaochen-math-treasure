@@ -6,8 +6,13 @@
 
 | 平台 | 文件 | 启动方式 |
 |---|---|---|
-| Windows | `MathBank-Windows-x64.zip` | 解压到普通文件夹，双击 `启动题库系统.bat`（自带 Python，解压即跑） |
-| macOS | `MathBank-macOS.zip` | 需本机先装 Python 3.10+，解压后双击 `启动题库系统.command` |
+| Windows | `MathBank-Windows-x64.zip` | 解压到普通文件夹，双击 `启动题库系统.bat` |
+| macOS（Apple 芯片） | `MathBank-macOS-AppleSilicon.zip` | 解压到普通文件夹，双击 `启动题库系统.command` |
+| macOS（Intel 芯片） | `MathBank-macOS-Intel.zip` | 解压到普通文件夹，双击 `启动题库系统.command` |
+
+三个包都**自带 Python 运行时**：不需要预先安装 Python，也不需要联网安装依赖，解压双击即跑。
+
+Mac 不确定自己是哪种芯片：左上角  →「关于本机」，「芯片」一行写着 Apple M* 就下 AppleSilicon 版，写着 Intel 就下 Intel 版。下错了启动器会提示该换哪个包。
 
 启动后浏览器打开 <http://127.0.0.1:8000>。
 
