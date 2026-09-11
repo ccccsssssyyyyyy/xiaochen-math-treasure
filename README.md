@@ -8,7 +8,7 @@
 
 **小陈的数学宝藏** 是给中学数学老师用的本地题库与组卷备课工具，数据全在自己电脑上，无需联网。在原项目（MathBank）基础上，针对"个人备课"做了二次开发：题库 / 组卷双工作台、受控标签、统一难度、拆卷进度可视化等。
 
-无需前端编译：Windows 便携包自带 Python，解压即跑；macOS 版需本机装好 Python 3.10+，启动器会自动建好隔离 `venv`。支持公式与几何图形秒级预览，内置一键组卷、A4 仿真排版、高考级 PDF 导出、DeepSeek 解题与 OCR 识题。
+无需前端编译：Windows 与 macOS 便携包都自带 Python 运行时，解压双击即跑，不需要先装 Python 或联网装依赖。支持公式与几何图形秒级预览，内置一键组卷、A4 仿真排版、高考级 PDF 导出、DeepSeek 解题与 OCR 识题。
 
 ![题库工作台](docs/images/Clipboard_Screenshot.png)
 
@@ -171,6 +171,11 @@ flowchart LR
 
 ## 快速开始
 
+> [!TIP]  
+> **完全不懂命令行？** 复制 [`一键安装指令.md`](一键安装指令.md) 里的那段话，粘贴给能操作你电脑的 AI 助手（WorkBuddy 等），它会自动完成「下载 → 装环境 → 装依赖 → 启动」，你全程不用敲命令。
+>
+> 想自己动手，走下面两个方式。
+
 > [!IMPORTANT]  
 > **首次运行前，先配置你自己的 API Key**（程序不内置、不代填）：
 >
@@ -181,7 +186,19 @@ flowchart LR
 
 ### 方式一：下载便携包（非技术用户首选）
 
-不熟悉命令行的，用内置 `python3 -m scripts.build_release` 生成对应系统便携包（构建器校验运行时哈希与白名单）。Windows 包自带 Python 3.10；macOS 包需本机先装 Python 3.10+。两个启动器只会停掉本项目记录的旧服务；端口 8000 被占用会安全退出，健康检查失败不自动开浏览器。
+到 [Releases](https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases/latest) 下载对应系统的包，**完整解压到普通文件夹**后双击启动器：
+
+| 平台 | 下载文件 | 启动方式 |
+|---|---|---|
+| Windows | `MathBank-Windows-x64.zip` | 自带 Python，解压后双击 `启动题库系统.bat` |
+| macOS（Apple 芯片 M1/M2/M3/M4） | `MathBank-macOS-AppleSilicon.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
+| macOS（Intel 芯片） | `MathBank-macOS-Intel.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
+
+**不确定 Mac 是哪种芯片**：左上角  →「关于本机」看「芯片」一行——写着 Apple M* 就下 AppleSilicon 版，写着 Intel 就下 Intel 版。下错了启动器会直接提示该换哪个包，不会静默失败。
+
+两个平台包都**自带 Python 运行时**，解压双击即跑，不需要先装 Python、也不会联网装依赖。两个启动器只会停掉本项目记录的旧服务；端口 8000 被占用会安全退出，健康检查失败不自动开浏览器。
+
+> 只有**改过代码、要自己打包**时才用 `python3 -m scripts.build_release`（构建器校验运行时哈希与白名单），产物只保存在本地 `dist/`，不会上传。
 
 ### 方式二：源码运行
 

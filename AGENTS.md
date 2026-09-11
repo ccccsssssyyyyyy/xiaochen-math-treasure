@@ -1,5 +1,18 @@
 # AGENTS.md - 本地化数学题库管理系统 开发与 AI 代理指南
 
+## 0. 用户说「帮我装好并启动」时怎么做
+
+面向非技术用户的安装入口是仓库根目录的 [`一键安装指令.md`](一键安装指令.md)——该文件就是设计给用户整段复制、转发给 AI 助手执行的。当用户给出仓库地址并要求安装时按它执行，要点：
+
+- **下载**：优先用稳定地址 `https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases/latest/download/<asset>`；国内直连 GitHub 经常失败（实测返回 502），失败即前置 `https://gh-proxy.com/` 重试，并告知用户最终用了哪个地址。Release 资源名为 `MathBank-Windows-x64.zip` / `MathBank-macOS-AppleSilicon.zip` / `MathBank-macOS-Intel.zip`。
+- **选对 macOS 包**：2.2.1 起 macOS 按芯片分包，必须先判断芯片再下载。`uname -m` 输出 `arm64` 用 AppleSilicon 包，`x86_64` 用 Intel 包；Rosetta 下 `uname -m` 会误报 `x86_64`，以 `sysctl -n hw.optional.arm64` 是否为 `1` 为准。下错包启动器会直接提示该换哪个，不会静默失败。
+- **不再需要 Python 与 pip**：三个便携包都内置 Python 运行时，解压双击即跑。**不要**再执行 `pip install`、`python -m venv` 或要求用户安装 Python；如果脚本报「内置运行时无法运行」，那是包与机器不匹配或解压不完整，按提示换包或重新解压。
+- **启动必须脱离 agent 进程树**：macOS 用 `open "启动题库系统.command"`，Windows 用 `start "" "启动题库系统.bat"`。**禁止**在前台运行 `uvicorn`——会话结束后进程会被回收，用户只会看到「网页打不开」。
+- **失败处理**：把完整报错原文交给用户，禁止静默重试、禁止跳过失败步骤继续。
+- **禁止**代替用户申请或填写 API Key，只负责引导到网页「设置 → API 配置」。
+
+修改下载地址、启动方式或安装步骤时，必须同步更新 `一键安装指令.md`、README「快速开始」与本节，三处不得出现不一致说法。
+
 ## 1. 项目概述
 本项目是一个本地运行的半自动化数学题库管理工作台。核心目标是通过极简的本地化部署，实现高质量图文混排数学题目（尤其是高中及更高阶数学内容）的收集、标签化管理、OCR 识别以及 AI 辅助生成解析。
 
