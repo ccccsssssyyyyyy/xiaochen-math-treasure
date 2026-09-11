@@ -1598,7 +1598,7 @@ def check_version_update():
         "is_git_repo": is_git_repo
     }
 
-    # 本地定制 fork（GITHUB_REPO 仍是 `localfork/...` 占位）→ 不向上游查询更新。
+    # 防御：若 GITHUB_REPO 被设回 `localfork/...` 占位，则不向上游查询更新。
     # 防止 UI 推荐上游覆盖升级清空本地所有定制，并避免在 GitHub API 留下无效查询日志。
     if GITHUB_REPO.startswith("localfork/"):
         result["status"] = "info"

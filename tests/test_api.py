@@ -588,8 +588,8 @@ def test_version_and_update_check_api(client):
     assert data_ver["repo"] == mathbank.GITHUB_REPO
 
     # 3. Test GET /api/version/check-update with mocked GitHub response
-    # 当前默认是 fork（localfork/...），会在请求前短路返回；这里临时把 repo 改成上游名
-    # 模拟「未 fork 的纯净上游场景」，确保上游发布解析、版本比较、资源映射都仍工作。
+    # 显式把 repo 设为非 localfork 名，模拟「已指向真实仓库」的场景，
+    # 确保 release 解析、版本比较、资源映射都仍工作。
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
@@ -632,26 +632,32 @@ def test_version_and_update_check_api(client):
 
 
 def test_check_update_short_circuits_on_localfork(client):
-    """本地 fork（GITHUB_REPO 以 `localfork/` 开头）→ 不向上游发请求，直接返回 info。
+    """GITHUB_REPO 为 `localfork/` 占位时 → 不向上游发请求，直接返回 info。
 
-    防止 UI 推荐上游覆盖升级清空本地所有定制。
+    防止 UI 推荐上游覆盖升级清空本地所有定制。占位场景改为 monkey-patch 构造，
+    使本测试不再依赖当前常量的具体取值。
     """
     from unittest.mock import patch
     import mathbank
 
-    # 断言当前常量就是 fork 占位（避免上游误改后本测试失去意义）
-    assert mathbank.GITHUB_REPO.startswith("localfork/")
+    # 当前常量应指向本派生自有仓库，不再使用 localfork 占位
+    assert not mathbank.GITHUB_REPO.startswith("localfork/")
 
-    # 用 side_effect 触发即抛异常：若真去请求，本测试会捕获到 RuntimeError
+    # 用 side_effect 触发即抛异常：若真去请求，本测试会捕获到 AssertionError
     def _explode(*args, **kwargs):
         raise AssertionError(
             "check_version_update should NOT call requests.get when GITHUB_REPO is a localfork placeholder"
         )
 
-    with patch("mathbank.ai_http.requests.get", side_effect=_explode):
-        res = client.get("/api/version/check-update")
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "info"
-        assert "本地定制派生" in data["message"]
-        assert data["has_update"] is False
+    original_repo = mathbank.GITHUB_REPO
+    mathbank.GITHUB_REPO = "localfork/math-question-bank"
+    try:
+        with patch("mathbank.ai_http.requests.get", side_effect=_explode):
+            res = client.get("/api/version/check-update")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "info"
+            assert "本地定制派生" in data["message"]
+            assert data["has_update"] is False
+    finally:
+        mathbank.GITHUB_REPO = original_repo
