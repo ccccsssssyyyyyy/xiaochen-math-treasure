@@ -107,3 +107,6 @@ classify_uncategorized_ai_report.csv
 node_modules/
 package-lock.json
 
+# 16. 忽略 pytest 在项目内重定向的临时目录（沙箱下 --basetemp=.tmp/pyt 用）
+.tmp/
+
