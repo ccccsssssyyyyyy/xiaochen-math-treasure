@@ -225,7 +225,10 @@ def test_xelatex_commands_disable_shell_escape_and_restrict_kpathsea(tmp_path):
         paper_calls.append((cmd, cwd, kwargs))
         return SimpleNamespace(returncode=1, stdout="failure", stderr="")
 
-    with patch("mathbank.paper_helper.subprocess.run", side_effect=fail_paper):
+    # 与下方 TikZ 分支保持一致：屏蔽 xelatex 存在性预检，使本用例不依赖真实 TeX。
+    with patch("shutil.which", return_value="/usr/bin/xelatex"), patch(
+        "mathbank.paper_helper.subprocess.run", side_effect=fail_paper
+    ):
         pdf_bytes, _ = compile_tex_to_pdf("unique shell escape security test")
     assert pdf_bytes is None
     paper_cmd, paper_cwd, paper_kwargs = paper_calls[0]

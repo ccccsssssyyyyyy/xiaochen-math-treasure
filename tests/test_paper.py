@@ -57,9 +57,15 @@ def test_paper_api_flow(client):
     assert tex_res.headers.get("content-type") == "application/zip"
 
     # 4b. Export Full Bundle Zip (TeX + PDF)
+    # 该端点在服务端真实调用 xelatex 编译 PDF。未安装排版工具链（或宏包不全）时，
+    # 端点按设计**优雅降级**为结构化提示而非 500（见 main.py 的 export_paper_bundle）。
+    # 两种结果都做断言：有工具链必须是 zip，没有则必须是 warning 提示。
     bundle_res = client.post("/api/paper/export/bundle", json=paper_payload, headers=headers)
     assert bundle_res.status_code == 200
-    assert bundle_res.headers.get("content-type") == "application/zip"
+    if bundle_res.headers.get("content-type") != "application/zip":
+        body = bundle_res.json()
+        assert body.get("status") == "warning", f"缺少排版工具链时应优雅降级为 warning，实际: {body}"
+        assert "xelatex" in body.get("message", "")
 
     # 5. AI Paper Selection
     ai_res = client.post("/api/paper/ai-select", json={"prompt": "函数", "limit": 5}, headers=headers)

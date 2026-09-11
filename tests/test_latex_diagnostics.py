@@ -174,7 +174,11 @@ def test_compile_rejects_error_even_if_xelatex_leaves_a_pdf():
             stderr="",
         )
 
-    with patch("mathbank.paper_helper.subprocess.run", side_effect=fake_run):
+    # 必须同时屏蔽 xelatex 存在性预检（paper_helper.py 的 shutil.which 快检），
+    # 否则在没有装 TeX 的 CI 上会被提前拦下，走不到下面被 mock 的编译流程。
+    with patch("shutil.which", return_value="/usr/bin/xelatex"), patch(
+        "mathbank.paper_helper.subprocess.run", side_effect=fake_run
+    ):
         pdf_bytes, error = compile_tex_to_pdf("unique invalid tex for return-code test")
 
     assert pdf_bytes is None
@@ -199,7 +203,10 @@ def test_compile_auto_loads_known_missing_package():
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     tex = "\n".join([r"\documentclass{article}", r"\begin{document}", r"$\cancel{x}$", r"\end{document}"])
-    with patch("mathbank.paper_helper.subprocess.run", side_effect=fake_run):
+    # 同上：屏蔽 xelatex 存在性预检，保证该用例不依赖真实 TeX 安装。
+    with patch("shutil.which", return_value="/usr/bin/xelatex"), patch(
+        "mathbank.paper_helper.subprocess.run", side_effect=fake_run
+    ):
         pdf_bytes, output = compile_tex_to_pdf(tex)
 
     assert pdf_bytes == b"complete pdf"

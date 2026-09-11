@@ -32,6 +32,19 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Verify dependency consistency
         run: python -m pip check
+      # 部分用例会真实调用 xelatex 编译 PDF（试卷 bundle 导出）。装上最小 TeX 工具链，
+      # 让这些用例在 CI 上真跑；缺工具链时端点会走优雅降级分支，测试同样有断言覆盖。
+      - name: Install minimal TeX Live
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            texlive-xetex texlive-lang-chinese texlive-latex-extra texlive-science texlive-pictures
+          xelatex --version | head -1
+          if kpsewhich exam-zh.cls >/dev/null; then
+            echo "exam-zh.cls 可用，bundle 导出将真实编译"
+          else
+            echo "::warning::exam-zh.cls 未随 apt 包提供，bundle 导出将走降级分支"
+          fi
       - name: Run test suite
         run: python -m pytest tests/
       - uses: actions/setup-node@v4
