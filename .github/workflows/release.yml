@@ -1,0 +1,62 @@
+name: Release
+
+# 推送 V* 形式的 tag 时，自动构建 Windows / macOS 便携包并发布到对应 Release。
+# 构建脚本自带校验：固定 SHA-256 的嵌入版 Python、白名单文件树、逐文件清单与校验和。
+on:
+  push:
+    tags:
+      - "V*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build and publish portable packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install locked dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      # 构建脚本会下载固定 SHA-256 的 Windows 嵌入版 Python 与全部 win_amd64 wheel。
+      # 非 Windows 平台上 validate_windows_runtime 的 os.name 分支自动跳过运行时
+      # smoke check，因此 Linux runner 可以完整产出两个平台的包。
+      - name: Build Windows and macOS packages
+        run: python -m scripts.build_release
+
+      - name: Verify built artifacts
+        run: |
+          set -euo pipefail
+          test -f dist/MathBank-Windows-x64.zip
+          test -f dist/MathBank-macOS.zip
+          ls -lh dist/MathBank-Windows-x64.zip dist/MathBank-macOS.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/MathBank-Windows-x64.zip \
+              dist/MathBank-macOS.zip --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file .github/release-notes.md \
+              dist/MathBank-Windows-x64.zip \
+              dist/MathBank-macOS.zip
+          fi
