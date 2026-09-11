@@ -175,7 +175,14 @@ def test_ai_classify_returns_fine_grained_question_type():
         }
         return resp
 
-    with patch("main.resolve_text_provider", return_value=provider), patch(
+    # 注入点是 decide_classify_model（ai_classify 的实现走它做模型选型）。
+    # 早前 patch 的是 resolve_text_provider，但该端点已不再调用它，patch 打空后
+    # 在未配置 API Key 的环境（如 CI）会命中 `if not api_key` 的提前返回分支
+    # （返回 JSONResponse 而非 dict），导致断言处 TypeError。
+    with patch(
+        "main.decide_classify_model",
+        return_value={"raw_model": provider.model_name, "provider": provider},
+    ), patch(
         "main.post_chat_completion", side_effect=_classify_response
     ), patch(
         "main.get_current_curriculum", return_value={"必修一": {"1. 集合": []}}
