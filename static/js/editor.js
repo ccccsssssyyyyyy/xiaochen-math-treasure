@@ -770,6 +770,7 @@ let bankQuestionsRetryTimer = null;
                         
                         // Render total counters
                         document.getElementById('statsTotalCount').textContent = data.total_count;
+                        document.getElementById('statsNormalCount').textContent = data.normal_count;
                         document.getElementById('statsEasyErrorCount').textContent = data.easy_error_count;
                         document.getElementById('statsChallengeCount').textContent = data.challenge_count;
                         document.getElementById('statsQiangjiCount').textContent = data.qiangji_count;
