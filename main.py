@@ -5480,6 +5480,230 @@ def batch_select_paper(payload: dict, db: Session = Depends(get_db)):
         )
 
 
+# ---------------------------------------------------------------------------
+# 拆题结果的学段/章节/小节受控归一（零 token 兜底）
+# ---------------------------------------------------------------------------
+# 背景：审查卡片的学段/章节/小节下拉是「严格相等匹配」受控教材目录
+# （/api/categories = curriculum 全集 + 库内自定义条目）。LLM（尤其免费小
+# 参数模型）输出的 compulsory/chapter 经常：①整字段留空；②写别名
+# （「必修第一册」「选择性必修一」）；③照抄教辅专题名（「专题三 基本不等式」）。
+# 任何偏差都会让三级下拉静默全空。与 source 的 normalize_source、选项的
+# recover_missing_choices 同族问题，这里补上值级归一 + 知识点反推兜底。
+#
+# 匹配策略（保守优先，宁缺勿错）：
+#   学段：精确 → 别名表 → 互含唯一命中；
+#   章节：精确 → 归一化（去编号前缀/全角转半角/去空白）后相等 → 互含唯一；
+#   小节：精确 → 互含唯一；空值时用 knowledge_list 逐个试；
+#   反推：学段缺失或章节缺失时，用知识点标签在受控树里打分，唯一胜出才填。
+_CATEGORY_COMP_ALIASES = {
+    "必修第一册": "必修一", "必修第二册": "必修二", "必修第三册": "必修三",
+    "必修第四册": "必修四",
+    "选择性必修第一册": "选修一", "选择性必修第二册": "选修二", "选择性必修第三册": "选修三",
+    "选择性必修一": "选修一", "选择性必修二": "选修二", "选择性必修三": "选修三",
+    "选必一": "选修一", "选必二": "选修二", "选必三": "选修三",
+    "必修1": "必修一", "必修2": "必修二", "必修3": "必修三", "必修4": "必修四",
+    "选修1": "选修一", "选修2": "选修二", "选修3": "选修三",
+}
+
+_FULLWIDTH_TRANS = str.maketrans(
+    "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ"
+    "ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ（）．：、，",
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz().:,,",
+)
+
+
+def _normalize_category_key(s: str) -> str:
+    """章节/小节名匹配前的归一：全角转半角、去空白、去编号类前缀（「第X章」「1.」「(3)」）。"""
+    if not s:
+        return ""
+    t = str(s).translate(_FULLWIDTH_TRANS)
+    t = re.sub(r"\s+", "", t)
+    t = re.sub(r"^第[一二三四五六七八九十百零]+[章节篇讲][\.、_\-]*", "", t)
+    t = re.sub(r"^[\(\[\{](?:\d{1,2}|[\一二三四五六七八九十百零]{1,3})[\)\]\}][\.、_\-]*", "", t)
+    t = re.sub(r"^\d+[\.\、_\-]+", "", t)
+    return t.strip(" .、_-.：:,()（）")
+
+
+def _match_compulsory(raw, curriculum) -> str | None:
+    """学段（书名）受控归一。精确 → 别名 → 互含唯一命中；失败返回 None。"""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s in curriculum:
+        return s
+    alias = _CATEGORY_COMP_ALIASES.get(s)
+    if alias and alias in curriculum:
+        return alias
+    hits = [c for c in curriculum if c and s and (c in s or s in c)]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _match_chapter(raw, comp, curriculum) -> str | None:
+    """章节受控归一（在给定书内）。精确 → 归一后相等 → 互含唯一命中。"""
+    if not raw or not comp or comp not in curriculum:
+        return None
+    chaps = list(curriculum[comp].keys())
+    s = str(raw).strip()
+    if s in chaps:
+        return s
+    ns = _normalize_category_key(s)
+    if not ns:
+        return None
+    norm_map: dict[str, list] = {}
+    for ch in chaps:
+        norm_map.setdefault(_normalize_category_key(ch), []).append(ch)
+    hit = norm_map.get(ns)
+    if hit and len(hit) == 1:
+        return hit[0]
+    hits = [ch for ch in chaps
+            if ns in _normalize_category_key(ch) or _normalize_category_key(ch) in ns]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _match_knowledge_in_section(raw, comp, chap, curriculum) -> str | None:
+    """小节受控匹配（在给定书+章内）。精确 → 互含唯一命中。"""
+    if not raw or not comp or not chap:
+        return None
+    knows = curriculum.get(comp, {}).get(chap) or []
+    s = str(raw).strip()
+    if s in knows:
+        return s
+    ns = _normalize_category_key(s)
+    if not ns:
+        return None
+    hits = [k for k in knows if _normalize_category_key(k) and ns in _normalize_category_key(k)]
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _score_category_hits(tags, scoring_items: dict) -> dict:
+    """知识点标签对候选（书,章）或小节打分：精确=3，互含（双方≥4字）=2。
+
+    scoring_items: {候选键: 归一化文本}。返回 {候选键: 累计分}（只含有分者）。
+    """
+    scores: dict = {}
+    for tag in tags:
+        t = str(tag).strip()
+        if len(t) < 2:
+            continue
+        nt = _normalize_category_key(t)
+        if not nt:
+            continue
+        for key, ntext in scoring_items.items():
+            if not ntext:
+                continue
+            if nt == ntext:
+                scores[key] = scores.get(key, 0) + 3
+            elif min(len(nt), len(ntext)) >= 4 and (nt in ntext or ntext in nt):
+                scores[key] = scores.get(key, 0) + 2
+    return scores
+
+
+def _infer_comp_chap_from_knowledge(knowledge_list, curriculum):
+    """知识点标签反推 (comp, chap)。章节名与小节名都参与打分（小节命中归所属章节）。
+
+    仅当唯一 (comp, chap) 严格胜出时返回，否则 None。
+    """
+    if not knowledge_list:
+        return None
+    scoring: dict = {}
+    for comp, chaps in curriculum.items():
+        for chap, knows in chaps.items():
+            scoring[(comp, chap)] = _normalize_category_key(chap)
+            for k in knows or []:
+                nk = _normalize_category_key(k)
+                if nk:
+                    scoring[(comp, chap)] = (scoring[(comp, chap)] + "|" + nk).strip("|")
+    scores = _score_category_hits(knowledge_list, scoring)
+    if not scores:
+        return None
+    best = max(scores.values())
+    if best < 2:
+        return None
+    top = [k for k, v in scores.items() if v == best]
+    if len(top) == 1:
+        return top[0]
+    return None
+
+
+def _infer_chapter_from_knowledge(knowledge_list, comp, curriculum):
+    """书已定时用知识点反推章节（章节名与小节名都参与打分）。唯一胜出才返回。"""
+    if not knowledge_list or comp not in curriculum:
+        return None
+    scoring: dict = {}
+    for chap, knows in curriculum[comp].items():
+        scoring[chap] = _normalize_category_key(chap)
+        for k in knows or []:
+            nk = _normalize_category_key(k)
+            if nk:
+                scoring[chap] = (scoring[chap] + "|" + nk).strip("|")
+    scores = _score_category_hits(knowledge_list, scoring)
+    if not scores:
+        return None
+    best = max(scores.values())
+    if best < 2:
+        return None
+    top = [k for k, v in scores.items() if v == best]
+    if len(top) == 1:
+        return top[0]
+    return None
+
+
+def normalize_category_fields(parsed_questions: list, curriculum: dict) -> dict:
+    """三级受控归一 + 知识点反推兜底。就地改写 category_* 字段，返回审计统计。
+
+    只在值能精确/唯一受控命中时才写入，失败留空（前端会归入「未分类」，
+    由用户手选），绝不猜一个模糊值入库。
+    """
+    stats = {
+        "total": len(parsed_questions),
+        "comp": 0, "chap": 0, "know": 0,
+        "comp_raw": {}, "chap_raw": {},
+    }
+    for q in parsed_questions:
+        raw_comp = (q.get("category_compulsory") or q.get("compulsory") or "").strip()
+        raw_chap = (q.get("category_chapter") or q.get("chapter") or "").strip()
+        know_list = q.get("knowledge_list") if isinstance(q.get("knowledge_list"), list) else []
+
+        comp = _match_compulsory(raw_comp, curriculum)
+        chap = _match_chapter(raw_chap, comp, curriculum) if comp else None
+        if comp and not chap:
+            chap = _infer_chapter_from_knowledge(know_list, comp, curriculum)
+        if not comp:
+            inferred = _infer_comp_chap_from_knowledge(know_list, curriculum)
+            if inferred:
+                comp, chap = inferred
+
+        if comp:
+            q["category_compulsory"] = comp
+            q["category_chapter"] = chap or ""
+            stats["comp"] += 1
+            if chap:
+                stats["chap"] += 1
+                if not (q.get("category_knowledge") or "").strip():
+                    for tag in know_list:
+                        know = _match_knowledge_in_section(tag, comp, chap, curriculum)
+                        if know:
+                            q["category_knowledge"] = know
+                            stats["know"] += 1
+                            break
+        else:
+            if raw_comp:
+                stats["comp_raw"][raw_comp] = stats["comp_raw"].get(raw_comp, 0) + 1
+            if raw_chap:
+                key = f"{raw_comp or '?'} ▸ {raw_chap}"
+                stats["chap_raw"][key] = stats["chap_raw"].get(key, 0) + 1
+    return stats
+
+
 def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, task_id: str = None, ocr_results: list = None) -> list:
     """PDF 专属解析卡片后处理：正则搜寻 /tmp/ 下的图片，以及将未解析的图n占位符智能映射回真实的裁剪插图图片，
     最后将其灌入 image_paths 数组中，并在 content 中静默清除以配合布局展示。支持文本重合度兜底映射，防大模型删除路径！"""
@@ -5521,15 +5745,20 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
             q["content"] = _strip_leading_question_number(q["content"])
             q["content"] = normalize_choice_options_to_latex(q["content"])
 
-    # 0.5 字段对齐：AI 整卷拆解输出的分类字段为 compulsory/chapter（对应提示词要求），
-    # 而前端审查卡片绑定的是 category_compulsory/category_chapter。
-    # 这里做桥接（不额外消耗 token），使审查页能正确回填学段与章节。
-    # 仅当目标字段缺失时才用源字段补全，避免覆盖模型已直接输出的 category_* 字段。
-    for q in parsed_questions:
-        if not q.get("category_compulsory") and q.get("compulsory"):
-            q["category_compulsory"] = q["compulsory"]
-        if not q.get("category_chapter") and q.get("chapter"):
-            q["category_chapter"] = q["chapter"]
+    # 0.5 学段/章节/小节三级受控归一（值级兜底）：AI 整卷拆解输出的
+    #    compulsory/chapter 可能为空、写别名（「必修第一册」）或照抄教辅专题名，
+    #    而审查卡片下拉严格相等匹配受控教材目录，任何偏差都静默全空。
+    #    这里零 token 归一：精确 → 别名表 → 互含唯一 → 知识点标签反推（唯一胜出才填），
+    #    失败留空交用户手选，绝不猜模糊值入库。同时输出审计日志便于事后定位。
+    category_stats = normalize_category_fields(parsed_questions, get_current_curriculum())
+    print(
+        f"[Category Audit] {category_stats['total']} 题 | "
+        f"学段受控 {category_stats['comp']}/{category_stats['total']}、"
+        f"章节 {category_stats['chap']}、小节补填 {category_stats['know']}；"
+        f"未匹配学段原值: {category_stats['comp_raw'] or '{}'}；"
+        f"未匹配章节原值: {category_stats['chap_raw'] or '{}'}",
+        flush=True,
+    )
 
     # 1. 搜集该 PDF 任务在 tmp 文件夹中生成的所有物理裁剪图片，按生成时间（mtime）进行排序
     task_crop_urls = []
@@ -5544,6 +5773,11 @@ def post_process_pdf_parsed_questions(parsed_questions: list, paper_title: str, 
                 f"[PDF PostProcess] 从原卷答案区按题号回填了 {filled}/{len(parsed_questions)} 道题的 answer_markdown。",
                 flush=True,
             )
+    else:
+        # 没识别出答案区时 _apply_pdf_answer_zone 不会运行，step 0 抽的
+        # 临时题号必须在这里补清，避免 _orig_seq_int 泄漏进审查页/入库。
+        for q in parsed_questions:
+            q.pop("_orig_seq_int", None)
     if task_id:
         crop_pattern = os.path.join(TMP_UPLOAD_DIR, f"pdf_crop_{task_id}_*.png")
         crop_files = glob.glob(crop_pattern)

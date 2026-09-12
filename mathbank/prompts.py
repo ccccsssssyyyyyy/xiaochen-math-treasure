@@ -246,6 +246,7 @@ def build_pdf_parse_system_prompt(curriculum: dict, generate_answers_bool: bool,
         "2.2 【样例-答案匹配】原文末尾有 `7. D\\n解析：若能将…` 这种答案区时，对应 7 题的 answer_markdown 必须为 `[EXTRACTED_ORIGINAL]\\nD\\n若能将…`（首行答案、后接解析），绝对不要把答案留空也不要自行推导；没找到原卷答案才是留空。\n"
         "3. 标签：knowledge_list（知识点数组）、solve_method（核心解题方法一个）、tags（主题标签数组）、related_chapters（关联章节数组，单章题 []）。\n"
         f"3.1 {CLASSIFICATION_PRIORITY_RULE}\n"
+        "3.2 【样例-教材定位】compulsory 与 chapter 必须**逐字**取自上方受控列表：一道「基本不等式」题 → compulsory `必修一`、chapter `2. 一元二次函数、方程和不等式`（含编号前缀）。**严禁**输出列表外写法（如「必修第一册」「选择性必修一」「专题三」或教辅自拟专题名）；确实无法判断时才留空字符串。\n"
         "4. 忠实保留：100% 保留题干汉字与「（如图）」等指代；图片链接原样保留并记入 referenced_images；`[公式待核对]` 等标记原样保留，不得猜测补写。\n"
         + formula_lock_section +
         "6. 排版：填空题下划线用 `\\fillin`；加粗用 `\\textbf{}`（禁 `**`）；几何顶点/变量用 `$...$`（禁单个 `*` 斜体）；不同小问/步骤间空行分隔。\n"
