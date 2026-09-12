@@ -1,10 +1,24 @@
 #!/bin/bash
 
-# MathBank macOS launcher. It stops only the recorded instance or a listener
-# whose process tree, working directory, and project files all verify MathBank.
+# 小陈的数学宝藏 macOS launcher. It stops only the recorded instance or a
+# listener whose process tree, working directory, and project files all verify
+# this project.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 cd "$SCRIPT_DIR" || exit 1
+
+# macOS 会给从浏览器下载的 zip 打上隔离属性（com.apple.quarantine）。
+# 隔离属性会连带阻止包内自带的 Python 运行时被执行，表现为
+# “Apple 无法验证” / 双击无反应。这里做一次性自愈：能去掉就静默去掉。
+strip_quarantine() {
+    command -v xattr >/dev/null 2>&1 || return 0
+    current_flags=$(xattr -p com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null) || current_flags=""
+    [ -n "$current_flags" ] || return 0
+    echo "检测到下载隔离属性，正在为本目录解除（一次性操作）..."
+    xattr -dr com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null \
+        || echo "⚠️ 解除隔离属性失败（可手动执行：xattr -dr com.apple.quarantine \"$SCRIPT_DIR\"）。"
+}
+strip_quarantine
 
 SYSTEM_DIR="$SCRIPT_DIR/.system_generated"
 PID_FILE="$SYSTEM_DIR/server.pid"
@@ -13,7 +27,7 @@ LOG_FILE="$SYSTEM_DIR/server.log"
 PROJECT_ID="$SCRIPT_DIR"
 
 echo "================================================="
-echo "     本地数学题库教研系统 (MathBank) Mac 启动器"
+echo "     小陈的数学宝藏 · 本地数学题库与备课工作台"
 echo "================================================="
 
 pause_if_interactive() {
@@ -57,9 +71,9 @@ host_machine() {
 
 recommended_macos_package() {
     if [ "$1" = "arm64" ]; then
-        printf 'MathBank-macOS-AppleSilicon.zip\n'
+        printf 'xiaochen-math-treasure-macOS-AppleSilicon.zip\n'
     else
-        printf 'MathBank-macOS-Intel.zip\n'
+        printf 'xiaochen-math-treasure-macOS-Intel.zip\n'
     fi
 }
 
@@ -107,7 +121,10 @@ is_mathbank_project_root() {
     [ -f "$candidate_root/static/index.html" ] || return 1
     [ -f "$candidate_root/启动题库系统.command" ] || return 1
     grep -q 'FastAPI' "$candidate_root/main.py" 2>/dev/null || return 1
-    grep -q 'MathBank' "$candidate_root/static/index.html" 2>/dev/null || return 1
+    # 品牌标识同时接受新旧两种写法：旧版（含上游 MathBank 字样）与
+    # 本派生的中文品牌名。早先只匹配 'MathBank'，而本派生在 2026-08-27
+    # 把页面标题换成了中文名，导致身份核验恒为失败、旧实例永远停不掉。
+    grep -qE 'MathBank|小陈的数学宝藏' "$candidate_root/static/index.html" 2>/dev/null || return 1
 }
 
 find_verified_mathbank_owner() {
@@ -146,21 +163,21 @@ stop_verified_legacy_mathbank_listeners() {
     verified_owners=""
     for port_pid in $port_pids; do
         verified_owner=$(find_verified_mathbank_owner "$port_pid") || \
-            fail "端口 8000 已被其他进程占用 (PID: $(echo "$port_pids" | tr '\n' ' '))；启动器不会终止无法确认身份的进程。"
+            fail "端口 8000 已被占用 (PID: $(echo "$port_pids" | tr '\n' ' '))，且无法确认它是否属于本工具，因此不会强行终止。请先在该程序页面用右上角电源按钮关闭，或手动结束该进程后重试。"
         verified_owners="$verified_owners
 $verified_owner"
     done
     verified_owners=$(printf '%s\n' "$verified_owners" | sed '/^[[:space:]]*$/d' | sort -u)
 
-    echo "检测到另一份或旧版 MathBank 仍在运行，正在安全停止 (PID: $(echo "$verified_owners" | tr '\n' ' '))..."
+    echo "检测到本工具的旧实例仍在运行，正在安全停止 (PID: $(echo "$verified_owners" | tr '\n' ' '))..."
     for verified_owner in $verified_owners; do
         kill -0 "$verified_owner" 2>/dev/null || continue
         rechecked_owner=$(find_verified_mathbank_owner "$verified_owner") || \
-            fail "旧版 MathBank 进程身份在停止前发生变化 ($verified_owner)，已取消操作。"
+            fail "旧实例进程身份在停止前发生变化 ($verified_owner)，已取消操作。"
         [ "$rechecked_owner" = "$verified_owner" ] || \
-            fail "旧版 MathBank 进程身份核验不一致 ($verified_owner)，已取消操作。"
+            fail "旧实例进程身份核验不一致 ($verified_owner)，已取消操作。"
         if ! kill -TERM "$verified_owner" 2>/dev/null && kill -0 "$verified_owner" 2>/dev/null; then
-            fail "无法停止已确认的旧版 MathBank 进程 ($verified_owner)。"
+            fail "无法停止已确认的旧实例进程 ($verified_owner)。"
         fi
     done
 
@@ -171,7 +188,7 @@ $verified_owner"
     done
     remaining_pids=$(listener_pids)
     [ -z "$remaining_pids" ] || \
-        fail "旧版 MathBank 未在 5 秒内退出 (PID: $(echo "$remaining_pids" | tr '\n' ' '))；请在原页面使用电源键关闭后重试。"
+        fail "旧实例未在 5 秒内退出 (PID: $(echo "$remaining_pids" | tr '\n' ' '))；请在原页面使用电源键关闭后重试。"
 }
 
 mkdir -p "$SYSTEM_DIR" || fail "无法创建运行状态目录。"

@@ -48,7 +48,12 @@ _normalize_question_content = normalize_question_content
 from mathbank.paper_helper import build_latex_document, build_answer_sheet_latex, compile_tex_to_pdf, create_tex_zip_package, create_full_bundle_zip_package, collect_referenced_images, build_restricted_tex_environment
 from mathbank.word_export_helper import build_word_document, create_word_bundle_zip
 from mathbank.sync_helper import export_database_to_files
-from mathbank.backup import acquire_runtime_lock, create_full_backup_if_due
+from mathbank.backup import acquire_runtime_lock, create_full_backup, create_full_backup_if_due
+from mathbank.sample_library import (
+    DEFAULT_MARKER_SOURCE as SAMPLE_QUESTIONS_SOURCE,
+    import_sample_questions,
+    sample_question_count,
+)
 from mathbank.health import readiness_report
 from mathbank.task_manager import (
     TaskCancelled,
@@ -223,6 +228,10 @@ def print_startup_diagnostics():
     pandoc_path = os.getenv("MATHBANK_PANDOC_PATH", "").strip() or shutil.which("pandoc")
     pandoc_status = f"已就绪 ({pandoc_path})" if pandoc_path else "未检测到 (Word 公式将使用图片兜底)"
 
+    # 检查 LibreOffice（Word 转 PDF 预览 / docx 渲染依赖）
+    soffice_path = shutil.which("soffice") or shutil.which("libreoffice") or ""
+    libreoffice_status = f"已就绪 ({soffice_path})" if soffice_path else "未检测到 (Word 原卷预览转 PDF 不可用)"
+
     # 检查 PyMuPDF
     fitz_ok = False
     try:
@@ -232,7 +241,7 @@ def print_startup_diagnostics():
         pass
 
     print("=" * 64, flush=True)
-    print("      本地数学题库教研系统 (MathBank) 启动自检与诊断面板", flush=True)
+    print("      小陈的数学宝藏 · 本地数学题库与备课工作台 —— 启动自检面板", flush=True)
     print("=" * 64, flush=True)
     print(f"  • Python 运行环境   : {sys.version.split()[0]} [{env_type}]", flush=True)
     print(f"  • Python 可执行路径 : {sys.executable}", flush=True)
@@ -242,6 +251,7 @@ def print_startup_diagnostics():
     print(f"  • PyMuPDF 渲染器    : {'✅ 已就绪' if fitz_ok else '❌ 未安装 (建议 pip install pymupdf)'}", flush=True)
     print(f"  • LaTeX 编译排版    : {latex_engine}", flush=True)
     print(f"  • Word 原生公式转换 : Pandoc {pandoc_status}", flush=True)
+    print(f"  • Word 转 PDF 预览  : LibreOffice {libreoffice_status}", flush=True)
     print(f"  • SQLite 本地数据库 : {DATABASE_PATH}", flush=True)
     print(f"  • 项目静态与根路径 : {PROJECT_ROOT}", flush=True)
     print("=" * 64, flush=True)
@@ -1599,6 +1609,92 @@ def get_version_info():
         "repo": GITHUB_REPO,
         "is_git_repo": is_git_repo
     }
+
+@app.get("/api/environment")
+def get_environment_status():
+    """外部依赖自检：LaTeX / LibreOffice / Pandoc / PDF Inspector。
+
+    前端用它生成「缺什么、影响什么、怎么装」的引导面板，取代过去只把
+    「未检测到 xelatex 编译器」抛给用户的做法。
+    """
+    latex_engine = ""
+    if shutil.which("xelatex"):
+        latex_engine = "xelatex"
+    elif shutil.which("pdflatex"):
+        latex_engine = "pdflatex"
+    latex_path = shutil.which(latex_engine) if latex_engine else ""
+
+    soffice_path = shutil.which("soffice") or shutil.which("libreoffice") or ""
+    if not soffice_path:
+        # macOS / Windows 默认安装位置的兜底探测（未加入 PATH 也能识别）
+        for candidate in (
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ):
+            if Path(candidate).exists():
+                soffice_path = candidate
+                break
+
+    pandoc_path = os.getenv("MATHBANK_PANDOC_PATH", "").strip() or shutil.which("pandoc") or ""
+
+    return {
+        "status": "success",
+        "platform": platform.system(),
+        "latex": {"available": bool(latex_path), "path": latex_path, "engine": latex_engine},
+        "libreoffice": {"available": bool(soffice_path), "path": soffice_path},
+        "pandoc": {"available": bool(pandoc_path), "path": pandoc_path},
+        "pdf_inspector": {"available": bool(is_pdf_inspector_available())},
+    }
+
+
+@app.post("/api/backup")
+def create_backup_snapshot():
+    """手动创建完整备份（升级向导调用；不含 .env 与密钥）。"""
+    try:
+        archive = create_full_backup()
+    except Exception as exc:  # noqa: BLE001 - 备份失败必须回报原因而不是 500
+        return {"status": "error", "message": f"备份失败：{exc}"}
+    return {
+        "status": "success",
+        "file": archive.name,
+        "dir": str(archive.parent),
+        "message": f"已创建完整备份：{archive.name}",
+    }
+
+
+@app.get("/api/sample-questions")
+def get_sample_questions_info(db: Session = Depends(get_db)):
+    """内置示例题库的可用性与导入状态（供首次启动引导使用）。"""
+    marker = normalize_source(SAMPLE_QUESTIONS_SOURCE)
+    imported = db.query(Question).filter(Question.source == marker).count()
+    return {
+        "status": "success",
+        "available": sample_question_count(),
+        "imported": imported,
+        "source": marker,
+    }
+
+
+@app.post("/api/sample-questions/import")
+def import_sample_questions_endpoint(
+    force: str = Form("false"),
+    db: Session = Depends(get_db),
+):
+    """载入内置示例题目（幂等；无需 API Key 即可体验组卷与导出）。"""
+    try:
+        result = import_sample_questions(
+            db,
+            get_active_version_code(),
+            extra_content_normalizer=lambda text: _strip_leading_question_number(
+                normalize_fillin_macro(text)
+            ),
+            force=str(force).lower() in ("true", "1", "yes"),
+        )
+    except Exception as exc:  # noqa: BLE001 - 文件缺失等异常需回传可读原因
+        return {"status": "error", "message": f"示例题目载入失败：{exc}"}
+    return result
+
 
 @app.get("/api/version/check-update")
 def check_version_update():

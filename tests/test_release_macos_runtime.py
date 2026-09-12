@@ -404,9 +404,16 @@ def test_macos_launcher_prefers_bundled_runtime_and_keeps_host_fallback():
     assert "RUNTIME-ARCH.txt" in launcher
     assert "sysctl -n hw.optional.arm64" in launcher
     assert "recommended_macos_package" in launcher
-    assert "MathBank-macOS-AppleSilicon.zip" in launcher
-    assert "MathBank-macOS-Intel.zip" in launcher
+    assert "xiaochen-math-treasure-macOS-AppleSilicon.zip" in launcher
+    assert "xiaochen-math-treasure-macOS-Intel.zip" in launcher
     assert "chmod +x" in launcher
+    # 下载隔离属性（com.apple.quarantine）会连带阻止包内自带 Python 被
+    # 执行，启动器必须做一次性自愈。
+    assert "com.apple.quarantine" in launcher
+    assert "xattr -dr" in launcher
+    # 身份核验必须同时接受新中文品牌与旧 MathBank 字样：只匹配旧字样会让
+    # 旧实例永远停不掉（曾导致"端口 8000 已被占用"而拒绝启动）。
+    assert "MathBank|小陈的数学宝藏" in launcher
     # 内置运行时分支必须排在 venv 回退分支之前，否则会先创建无用的 venv。
     portable_branch = launcher.index('if [ -f "$PORTABLE_PYTHON" ]; then')
     venv_branch = launcher.index('if [ ! -d "$SCRIPT_DIR/venv" ]; then')

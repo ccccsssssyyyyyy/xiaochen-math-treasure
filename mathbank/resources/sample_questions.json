@@ -1,0 +1,94 @@
+{
+  "_comment": "内置示例题库：仅供首次启动试用（组卷/导出/公式渲染无需 API Key 即可体验）。source 统一为「教辅 · 内置示例题目」，导入为幂等操作，以该 source 作为已导入标记。",
+  "marker_source": "教辅 · 内置示例题目",
+  "questions": [
+    {
+      "content": "已知集合 $A=\\{1,2,3\\}$，$B=\\{2,3,4\\}$，则 $A\\cap B=$（　　）\n\\begin{choices}\n\\item $\\{1,2\\}$\n\\item $\\{2,3\\}$\n\\item $\\{3,4\\}$\n\\item $\\{1,4\\}$\n\\end{choices}",
+      "question_type": "single_choice",
+      "category_compulsory": "必修一",
+      "category_chapter": "1. 集合与常用逻辑用语",
+      "category_knowledge": "1.3 集合的基本运算",
+      "difficulty": "normal",
+      "knowledge_list": "集合的交集,集合的基本运算",
+      "solve_method": "定义法",
+      "answer_markdown": "**答案：B**\n\n交集取两个集合的公共元素：$A\\cap B=\\{2,3\\}$。"
+    },
+    {
+      "content": "已知 $x>0$，则 $x+\\dfrac{1}{x}$ 的最小值为（　　）\n\\begin{choices}\n\\item $1$\n\\item $\\sqrt{2}$\n\\item $2$\n\\item $4$\n\\end{choices}",
+      "question_type": "single_choice",
+      "category_compulsory": "必修一",
+      "category_chapter": "2. 一元二次函数、方程和不等式",
+      "category_knowledge": "2.2 基本不等式",
+      "difficulty": "normal",
+      "knowledge_list": "基本不等式",
+      "solve_method": "基本不等式法",
+      "answer_markdown": "**答案：C**\n\n由基本不等式 $x+\\dfrac{1}{x}\\ge 2\\sqrt{x\\cdot\\dfrac{1}{x}}=2$，当且仅当 $x=1$ 时取等号。"
+    },
+    {
+      "content": "设函数 $f(x)$ 的定义域为 $\\mathbb{R}$，则下列函数中为奇函数的是（　　）\n\\begin{choices}\n\\item $y=x^{2}$\n\\item $y=x^{3}$\n\\item $y=\\dfrac{1}{x}$\n\\item $y=2^{x}$\n\\end{choices}",
+      "question_type": "multi_choice",
+      "category_compulsory": "必修一",
+      "category_chapter": "3. 函数的概念与性质",
+      "category_knowledge": "3.2 函数的基本性质",
+      "difficulty": "challenge",
+      "knowledge_list": "函数的奇偶性",
+      "solve_method": "定义法,数形结合",
+      "answer_markdown": "**答案：BC**\n\n奇函数满足 $f(-x)=-f(x)$（定义域关于原点对称）。\n\n- $y=x^{2}$ 满足 $f(-x)=f(x)$，是偶函数；\n- $y=x^{3}$ 满足 $(-x)^{3}=-x^{3}$，是奇函数（B 正确）；\n- $y=\\dfrac{1}{x}$ 满足 $f(-x)=-\\dfrac{1}{x}=-f(x)$，是奇函数（C 正确）；\n- $y=2^{x}$ 既不是奇函数也不是偶函数。\n\n> 说明：本题为示例数据，用于演示多选题的组卷与答案导出。"
+    },
+    {
+      "content": "计算：$\\left(\\dfrac{1}{2}\\right)^{-2}+\\log_{2}8=$ $\\fillin$ ．",
+      "question_type": "fill_in_blank",
+      "category_compulsory": "必修一",
+      "category_chapter": "4. 指数函数与对数函数",
+      "category_knowledge": "4.2 指数函数",
+      "difficulty": "normal",
+      "knowledge_list": "指数幂的运算,对数的运算",
+      "solve_method": "公式法",
+      "answer_markdown": "**答案：$7$**\n\n$\\left(\\dfrac{1}{2}\\right)^{-2}=2^{2}=4$，$\\log_{2}8=\\log_{2}2^{3}=3$，故原式 $=4+3=7$。"
+    },
+    {
+      "content": "已知 $\\alpha$ 为第三象限角，且 $\\sin\\alpha=-\\dfrac{3}{5}$，求 $\\cos\\alpha$ 与 $\\tan\\alpha$ 的值。",
+      "question_type": "detailed_answer",
+      "category_compulsory": "必修一",
+      "category_chapter": "5. 三角函数",
+      "category_knowledge": "5.3 诱导公式",
+      "difficulty": "normal",
+      "knowledge_list": "同角三角函数的基本关系",
+      "solve_method": "公式法,分类讨论",
+      "answer_markdown": "**答案：$\\cos\\alpha=-\\dfrac{4}{5}$，$\\tan\\alpha=\\dfrac{3}{4}$**\n\n由 $\\sin^{2}\\alpha+\\cos^{2}\\alpha=1$ 得 $\\cos^{2}\\alpha=1-\\dfrac{9}{25}=\\dfrac{16}{25}$，故 $\\cos\\alpha=\\pm\\dfrac{4}{5}$。\n\n因为 $\\alpha$ 是第三象限角，$\\cos\\alpha<0$，所以 $\\cos\\alpha=-\\dfrac{4}{5}$。\n\n于是 $\\tan\\alpha=\\dfrac{\\sin\\alpha}{\\cos\\alpha}=\\dfrac{-3/5}{-4/5}=\\dfrac{3}{4}$。"
+    },
+    {
+      "content": "若复数 $z=\\dfrac{1+i}{1-i}$（$i$ 为虚数单位），则 $z=$（　　）\n\\begin{choices}\n\\item $1$\n\\item $i$\n\\item $-1$\n\\item $-i$\n\\end{choices}",
+      "question_type": "single_choice",
+      "category_compulsory": "必修二",
+      "category_chapter": "7. 复数",
+      "category_knowledge": "7.2 复数的四则运算",
+      "difficulty": "easy_error",
+      "knowledge_list": "复数的四则运算,共轭复数",
+      "solve_method": "分母实数化",
+      "answer_markdown": "**答案：B**\n\n分子分母同乘 $1+i$：$z=\\dfrac{(1+i)^{2}}{(1-i)(1+i)}=\\dfrac{2i}{2}=i$。\n\n> 易错点：忘记分母实数化，直接把分子分母分别相除。"
+    },
+    {
+      "content": "已知向量 $\\vec{a}=(1,2)$，$\\vec{b}=(x,-1)$，且 $\\vec{a}\\perp\\vec{b}$，则 $x=$ $\\fillin$ ．",
+      "question_type": "fill_in_blank",
+      "category_compulsory": "必修二",
+      "category_chapter": "6. 平面向量及其应用",
+      "category_knowledge": "6.2 平面向量的运算",
+      "difficulty": "normal",
+      "knowledge_list": "平面向量数量积,向量垂直的判定",
+      "solve_method": "坐标法",
+      "answer_markdown": "**答案：$2$**\n\n$\\vec{a}\\perp\\vec{b}\\iff \\vec{a}\\cdot\\vec{b}=0$，即 $1\\cdot x+2\\cdot(-1)=0$，解得 $x=2$。"
+    },
+    {
+      "content": "已知椭圆 $C:\\dfrac{x^{2}}{a^{2}}+\\dfrac{y^{2}}{b^{2}}=1\\ (a>b>0)$ 的离心率为 $\\dfrac{\\sqrt{3}}{2}$，且经过点 $(2,0)$，求椭圆 $C$ 的标准方程。",
+      "question_type": "detailed_answer",
+      "category_compulsory": "选修一",
+      "category_chapter": "3. 圆锥曲线的方程",
+      "category_knowledge": "3.1 椭圆",
+      "difficulty": "qiangji",
+      "knowledge_list": "椭圆的离心率,椭圆的标准方程",
+      "solve_method": "待定系数法,函数与方程",
+      "answer_markdown": "**答案：$\\dfrac{x^{2}}{4}+y^{2}=1$**\n\n点 $(2,0)$ 在椭圆上，代入得 $\\dfrac{4}{a^{2}}=1$，即 $a^{2}=4$，故 $a=2$。\n\n由 $e=\\dfrac{c}{a}=\\dfrac{\\sqrt{3}}{2}$ 得 $c=\\sqrt{3}$，于是 $b^{2}=a^{2}-c^{2}=4-3=1$。\n\n所以椭圆 $C$ 的标准方程为 $\\dfrac{x^{2}}{4}+y^{2}=1$。\n\n> 说明：本题为示例数据，用于演示「公式渲染 + 组卷导出」链路。"
+    }
+  ]
+}

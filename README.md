@@ -95,6 +95,13 @@
 
 - 新增 `tests/` 回归用例与 `tools/` 验证脚本，覆盖难度、标签、多文件队列、关联章节、OCR 分类、免费路由、虚拟滚动等核心改动。
 
+**上手与运维（本派生新增）**
+
+- 首次启动引导：题库为空时在顶部显示「三步出一份卷」卡片（配 Key → 载入 8 道内置示例题 → 去组卷），示例题走与正式入库完全相同的归一管线（choices 环境 / 来源规约 / 标签词表），并可幂等重复导入。
+- 依赖引导面板：**设置 → 关于 → 运行环境自检** 实时列出 LaTeX / LibreOffice / Pandoc / PDF 解析引擎状态，逐项给出「影响哪些功能 + 国内镜像 + 可复制安装命令」；PDF 导出因缺 xelatex 失败时自动弹出该面板。
+- 升级向导：更新弹窗内嵌三步清单（先备份 → 下载解压到临时目录 → 安全关机合并覆盖），并提供一键完整备份（`POST /api/backup`）与可复制的升级清单，降低「误点替换整个文件夹导致丢库」的风险。
+- macOS 下载隔离自愈：启动器检测到 `com.apple.quarantine` 时自动解除（隔离属性会连带阻止包内自带 Python 被执行）；安装指引与 README 同步补充终端 / 右键两条手动路径。
+
 **已知 TODO**
 
 - 讲义（handout）功能：从题库 / 组卷走向备课的关键一环，规划中、未实现。
@@ -162,10 +169,13 @@ flowchart LR
 
 ## 使用前提与环境
 
+> [!TIP]  
+> **不确定本机缺什么？** 打开 **设置 → 关于 → 运行环境自检**，会实时列出 LaTeX / LibreOffice / Pandoc / PDF 解析引擎的就绪状态，每项都带说明与国内镜像下载地址。**导出 PDF 失败时也会自动弹出这个面板**，不用再猜「未检测到编译器」是什么意思。
+
 - **LaTeX 依赖**：只有用到 **TikZ 几何重绘** 或 **一键导出 PDF** 时才需要本地 LaTeX。仅录入、预览、检索、AI 解答、导出源码则完全不需要。需要的话：
-  - macOS：装 [MacTeX](https://www.tug.org/mactex/)（约 5GB，国内用[清华镜像](https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/mac/mactex/)）
+  - macOS：装 [MacTeX](https://www.tug.org/mactex/)（约 5GB，国内用[清华镜像](https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/mac/mactex/)），或 `brew install --cask mactex-no-gui`
   - Windows：装 [TeX Live](https://www.tug.org/texlive/)（[清华镜像](https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/texlive/Images/)），也可选 MiKTeX
-- **Word (.docx) 安全导入**：无需装 Word / MathType。系统转换常见 OMML 公式、解析 MathType 结构，递归保留超链接 / 修订 / 表格 / 原图；不能高置信转换的公式保留预览图并标记人工核对。
+- **Word (.docx) 安全导入**：无需装 Word / MathType。系统转换常见 OMML 公式、解析 MathType 结构，递归保留超链接 / 修订 / 表格 / 原图；不能高置信转换的公式保留预览图并标记人工核对。把 Word 转成原卷预览图与 MathType 公式还原需要 **LibreOffice**（不装则原卷预览不可用，拆题仍可进行）。
 
 ---
 
@@ -182,7 +192,10 @@ flowchart LR
 > 1. 启动后点网页右上角 **⚙️ 设置**；
 > 2. 在「API 配置」填入你自己的 DeepSeek / 阿里百炼 / 硅基流动等密钥并保存。
 >
-> 没配 Key 时，**基础功能仍可用**（录入、预览、检索、导出源码）；但 **AI 拆解 / 解题 / OCR** 需要有效 Key。各平台免费领取方式与选型见[API 配置指南](#api-配置与大模型选型指南)。
+> 没配 Key 时，**基础功能仍可用**（录入、预览、检索、导出源码、**内置示例题组卷**）；但 **AI 拆解 / 解题 / OCR** 需要有效 Key。各平台免费领取方式与选型见[API 配置指南](#api-配置与大模型选型指南)。
+
+> [!TIP]  
+> **打开后是空题库，不知道怎么下手？** 页面顶部会出现「开始使用：三步就能出一份卷」引导卡片：① 配 Key（可跳过）→ ② 点「载入示例题」写入 8 道内置示例题 → ③ 去组卷工作台排版导出。这条路径**不需要任何 API Key**。卡片可随时关闭，也可以在 **设置 → 关于 → 新手引导卡片** 里重新打开。
 
 ### 方式一：下载便携包（非技术用户首选）
 
@@ -190,13 +203,24 @@ flowchart LR
 
 | 平台 | 下载文件 | 启动方式 |
 |---|---|---|
-| Windows | `MathBank-Windows-x64.zip` | 自带 Python，解压后双击 `启动题库系统.bat` |
-| macOS（Apple 芯片 M1/M2/M3/M4） | `MathBank-macOS-AppleSilicon.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
-| macOS（Intel 芯片） | `MathBank-macOS-Intel.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
+| Windows | `xiaochen-math-treasure-Windows-x64.zip` | 自带 Python，解压后双击 `启动题库系统.bat` |
+| macOS（Apple 芯片 M1/M2/M3/M4） | `xiaochen-math-treasure-macOS-AppleSilicon.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
+| macOS（Intel 芯片） | `xiaochen-math-treasure-macOS-Intel.zip` | 自带 Python，解压后双击 `启动题库系统.command` |
 
 **不确定 Mac 是哪种芯片**：左上角  →「关于本机」看「芯片」一行——写着 Apple M* 就下 AppleSilicon 版，写着 Intel 就下 Intel 版。下错了启动器会直接提示该换哪个包，不会静默失败。
 
-两个平台包都**自带 Python 运行时**，解压双击即跑，不需要先装 Python、也不会联网装依赖。两个启动器只会停掉本项目记录的旧服务；端口 8000 被占用会安全退出，健康检查失败不自动开浏览器。
+> [!WARNING]  
+> **macOS 首次打开被 macOS 拦住？** 从浏览器下载的 zip 会被打上「隔离属性」，双击启动器可能提示「Apple 无法验证」或「无法打开，因为无法验证开发者」——这不是文件损坏。任选一条：
+>
+> 1. 终端执行（换成你的实际解压路径）：
+>    ```bash
+>    xattr -dr com.apple.quarantine "/Users/你的用户名/Documents/小陈的数学宝藏"
+>    ```
+> 2. 或：在访达里按住 Control 点（右键）`启动题库系统.command` → 选「打开」→ 弹窗里再点一次「打开」。
+>
+> 启动器自身也会在启动时尝试一次性解除隔离（包内自带的 Python 运行时同样会被隔离属性拦住），但**第一次双击之前它还没机会运行**，所以上面的步骤不能省。
+
+两个平台包都**自带 Python 运行时**，解压双击即跑，不需要先装 Python、也不会联网装依赖。两个启动器只会停掉本项目记录的旧服务；端口 8000 被占用会安全退出并说明原因，健康检查失败不自动开浏览器。
 
 > 只有**改过代码、要自己打包**时才用 `python3 -m scripts.build_release`（构建器校验运行时哈希与白名单），产物只保存在本地 `dist/`，不会上传。
 
@@ -267,7 +291,7 @@ flowchart LR
 
 ### 升级方式
 
-- **界面一键更新**：右上角【设置】→【版本更新】，实时比对 GitHub Release，可一键下载对应便携包，也支持忽略不常更的版本。
+- **界面一键更新（半自动，程序无法在运行中替换自己）**：右上角【设置】→【版本更新】比对 GitHub Release 并下载对应便携包。弹窗里内置**升级向导三步**：① 点「立即备份」生成完整备份（`data_backup/snapshots/`）→ ② 下载并解压到临时目录 → ③ 安全关机后合并覆盖、双击新启动器；另有「复制升级清单」按钮可把步骤拷到备忘录，也支持忽略不常更的版本。
 - **方式 A：Git 升级**（源码用户）
   ```bash
   git pull
@@ -355,7 +379,8 @@ python3 -m scripts.restore <快照.zip> --apply --yes  # 实际恢复（须先�
 │   ├── source_normalize.py     # 题目来源命名归一化（本派生新增）
 │   └── resources/
 │       ├── curriculums/        # A/B/S/H 四套共享 JSON 大纲
-│       └── tag_vocabulary.json # 知识点/解题方法受控词表（本派生新增）
+│       ├── tag_vocabulary.json # 知识点/解题方法受控词表（本派生新增）
+│       └── sample_questions.json # 内置示例题目（本派生新增，首次启动可一键载入）
 ├── scripts/                    # 运维、迁移、检索与 Release 工具
 │   ├── search_questions.py
 │   ├── backup.py
@@ -372,7 +397,8 @@ python3 -m scripts.restore <快照.zip> --apply --yes  # 实际恢复（须先�
 │       ├── editor.js           # 编辑、KaTeX 预览与 TikZ 编译
 │       ├── ocr.js              # OCR 公式识别与交互
 │       ├── import.js           # 试题拆解与草稿/题库列表
-│       └── paper.js            # 组卷排版工作台 & Live Preview 渲染引擎
+│       ├── paper.js            # 组卷排版工作台 & Live Preview 渲染引擎
+│       └── onboarding.js       # 首次启动引导 / 依赖引导 / 升级向导（本派生新增）
 ├── templates/                  # LaTeX 试卷模板与 exam-zh 宏包库
 ├── tests/                      # Pytest 自动化测试与 artifacts（含本派生回归用例）
 ├── tools/                      # 轻量验证脚本（如 difficulty_vocab_test.py / tag_vocab_test.py）

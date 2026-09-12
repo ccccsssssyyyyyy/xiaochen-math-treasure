@@ -697,6 +697,79 @@ def test_check_update_picks_the_macos_package_for_the_local_chip(client):
         mathbank.GITHUB_REPO = original_repo
 
 
+def test_check_update_matches_the_renamed_release_assets(client):
+    """发布包改名成 `xiaochen-math-treasure-*` 后，资产匹配必须仍然命中。
+
+    改名只动了文件名前缀（`ASSET_PREFIX`），匹配逻辑靠 `macOS`/`AppleSilicon`/
+    `Intel`/`Windows` 这些词干，理论上不受影响；但"理论上"不算验证 ——
+    一旦匹配失败，界面上的「一键升级」会静默地没有下载按钮，
+    所以这里用真实的新包名锁一遍。
+    """
+    import mathbank
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "tag_name": "v9.9.9",
+        "name": "Release 9.9.9",
+        "body": "Mocked changelog",
+        "html_url": "https://example.com/release",
+        "published_at": "2026-08-09T00:00:00Z",
+        "assets": [
+            {
+                "name": "xiaochen-math-treasure-macOS-AppleSilicon.zip.sha256",
+                "size": 128,
+                "download_count": 0,
+                "browser_download_url": "https://example.com/mac-arm.sha256",
+            },
+            {
+                "name": "xiaochen-math-treasure-macOS-AppleSilicon.zip",
+                "size": 55 * 1024 * 1024,
+                "download_count": 12,
+                "browser_download_url": "https://example.com/mac-arm.zip",
+            },
+            {
+                "name": "xiaochen-math-treasure-macOS-Intel.zip",
+                "size": 52 * 1024 * 1024,
+                "download_count": 7,
+                "browser_download_url": "https://example.com/mac-intel.zip",
+            },
+            {
+                "name": "xiaochen-math-treasure-Windows-x64.zip",
+                "size": 60 * 1024 * 1024,
+                "download_count": 30,
+                "browser_download_url": "https://example.com/win.zip",
+            },
+        ],
+    }
+
+    original_repo = mathbank.GITHUB_REPO
+    mathbank.GITHUB_REPO = "ccccsssssyyyyyy/xiaochen-math-treasure"
+    try:
+        with patch("mathbank.ai_http.requests.get", return_value=mock_resp), patch(
+            "main.local_macos_architecture", return_value="arm64"
+        ):
+            data = client.get("/api/version/check-update").json()
+        assert data["assets"]["macOS"]["name"] == (
+            "xiaochen-math-treasure-macOS-AppleSilicon.zip"
+        )
+        assert data["assets"]["macOS"]["host_arch"] == "arm64"
+        assert data["assets"]["Windows"]["name"] == (
+            "xiaochen-math-treasure-Windows-x64.zip"
+        )
+
+        with patch("mathbank.ai_http.requests.get", return_value=mock_resp), patch(
+            "main.local_macos_architecture", return_value="x86_64"
+        ):
+            data = client.get("/api/version/check-update").json()
+        assert data["assets"]["macOS"]["name"] == (
+            "xiaochen-math-treasure-macOS-Intel.zip"
+        )
+        assert data["assets"]["macOS"]["host_arch"] == "x86_64"
+    finally:
+        mathbank.GITHUB_REPO = original_repo
+
+
 def test_check_update_short_circuits_on_localfork(client):
     """GITHUB_REPO 为 `localfork/` 占位时 → 不向上游发请求，直接返回 info。
 

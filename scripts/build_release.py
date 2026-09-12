@@ -60,6 +60,12 @@ MACOS_RUNTIME_ROOT = "python"
 MACOS_RUNTIME_ARCH_FILE = "python/RUNTIME-ARCH.txt"
 _MACOS_CPU_TYPE_ARM64 = 0x0100000C
 _MACOS_CPU_TYPE_X86_64 = 0x01000007
+# 发布包文件名前缀，与仓库名保持一致。
+# 为什么不用中文品牌名做文件名：GitHub 下载直链会对非 ASCII 做百分号转义，
+# 复制/转发的链接会变成一串 %E5%...，既难看也容易在转发中截断；不同系统
+# 解压时的编码处理也不一致。因此文件名走 ASCII，品牌名只出现在界面与文档里。
+# 历史版本用 "MathBank-" 前缀，旧名保留在 RELEASE_OUTPUT_NAMES 中以便清理。
+ASSET_PREFIX = "xiaochen-math-treasure"
 MACOS_RUNTIME_BUILDS = {
     "apple-silicon": {
         "asset": (
@@ -70,7 +76,7 @@ MACOS_RUNTIME_BUILDS = {
         "host_machine": "arm64",
         "cpu_type": _MACOS_CPU_TYPE_ARM64,
         "wheel_platforms": ("macosx_11_0_arm64", "macosx_11_0_universal2"),
-        "output_stem": "MathBank-macOS-AppleSilicon",
+        "output_stem": f"{ASSET_PREFIX}-macOS-AppleSilicon",
     },
     "intel": {
         "asset": (
@@ -86,7 +92,7 @@ MACOS_RUNTIME_BUILDS = {
             "macosx_11_0_x86_64",
             "macosx_11_0_universal2",
         ),
-        "output_stem": "MathBank-macOS-Intel",
+        "output_stem": f"{ASSET_PREFIX}-macOS-Intel",
     },
 }
 MACOS_BUILD_DIRS = {
@@ -161,13 +167,19 @@ FORBIDDEN_RELEASE_SUFFIXES = {
 }
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_OUTPUT_NAMES = (
+    f"{ASSET_PREFIX}-Windows-x64.zip",
+    f"{ASSET_PREFIX}-Windows-x64.zip.sha256",
+    f"{ASSET_PREFIX}-macOS-AppleSilicon.zip",
+    f"{ASSET_PREFIX}-macOS-AppleSilicon.zip.sha256",
+    f"{ASSET_PREFIX}-macOS-Intel.zip",
+    f"{ASSET_PREFIX}-macOS-Intel.zip.sha256",
+    # Legacy names (<= 2.2.3) kept so a stale package in dist/ is always purged.
     "MathBank-Windows-x64.zip",
     "MathBank-Windows-x64.zip.sha256",
     "MathBank-macOS-AppleSilicon.zip",
     "MathBank-macOS-AppleSilicon.zip.sha256",
     "MathBank-macOS-Intel.zip",
     "MathBank-macOS-Intel.zip.sha256",
-    # Legacy 2.2.0 name, kept so a stale package in dist/ is always purged.
     "MathBank-macOS.zip",
     "MathBank-macOS.zip.sha256",
 )
@@ -1324,7 +1336,7 @@ def zip_release():
     validate_windows_runtime(BUILD_DIR)
     return _build_archive(
         BUILD_DIR,
-        os.path.join(DIST_DIR, "MathBank-Windows-x64"),
+        os.path.join(DIST_DIR, f"{ASSET_PREFIX}-Windows-x64"),
         "windows-x64",
         WINDOWS_LAUNCHER_NAME,
     )

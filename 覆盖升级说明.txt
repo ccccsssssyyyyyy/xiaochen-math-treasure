@@ -1,6 +1,8 @@
-MathBank 便携包覆盖升级
+小陈的数学宝藏 便携包覆盖升级
 
 1. 先创建一份可验证完整备份。
+   - 网页内：右上角【设置】→【版本更新】弹窗里点「立即备份」（存到 data_backup/snapshots/）；
+   - 或命令行：python3 -m scripts.backup
 2. 在网页右上角点击电源按钮安全关闭，确认服务已停止。
 3. 将新版 ZIP 解压到一个临时新目录。
 4. 打开新版文件夹，只复制其中的“内容”到原项目目录。
@@ -17,5 +19,11 @@ MathBank 便携包覆盖升级
 - venv/
 
 三个便携包（Windows、macOS Apple 芯片、macOS Intel）都内置完整 Python 运行时，解压即可运行，无需另行安装 Python，也不会联网安装依赖。
-macOS 请下载与本机芯片匹配的包：Apple 芯片用 MathBank-macOS-AppleSilicon.zip，Intel 用 MathBank-macOS-Intel.zip。若下错，启动器会直接提示应改用哪个包并停止启动，不会静默失败。
+macOS 请下载与本机芯片匹配的包：Apple 芯片用 xiaochen-math-treasure-macOS-AppleSilicon.zip，Intel 用 xiaochen-math-treasure-macOS-Intel.zip。若下错，启动器会直接提示应改用哪个包并停止启动，不会静默失败。
+（2.2.3 及更早版本的包名是 MathBank-*.zip，两者内容相同，只是文件名不同。）
 从 2.2.0 及更早版本升级时，旧的 venv/ 目录会原样保留但不再被使用，可自行删除以释放空间。
+
+macOS 提示：从浏览器下载的 ZIP 会被系统打上“隔离属性”，可能导致双击启动器提示“Apple 无法验证”。
+任选一条解决：
+1) 终端执行（换成你的实际解压路径）：xattr -dr com.apple.quarantine "/Users/你的用户名/Documents/小陈的数学宝藏"
+2) 在访达里按住 Control 点（右键）“启动题库系统.command”→ 选“打开”→ 弹窗里再点一次“打开”。

@@ -1495,6 +1495,10 @@
                 
                 // Refresh update status in About tab
                 refreshAboutTabUpdateInfo();
+                // 环境与依赖自检（onboarding.js 提供；未加载时静默跳过）
+                if (typeof window.refreshSettingsEnvGrid === 'function') {
+                    window.refreshSettingsEnvGrid();
+                }
             } else if (tabName === 'free') {
                 if (btnFree) {
                     btnFree.classList.add('border-brand-500', 'text-brand-600');
@@ -1608,7 +1612,7 @@
                     btnMac.classList.remove('opacity-50', 'pointer-events-none');
                     if (macSize) macSize.innerText = `${macAsset.size_mb} MB • .zip 格式`;
                 } else {
-                    btnMac.href = releaseData.release_url || 'https://github.com/JudgePeach/math-question-bank/releases';
+                    btnMac.href = releaseData.release_url || 'https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases';
                     if (macSize) macSize.innerText = '前往 Releases 下载';
                 }
                 if (clientOS === 'macOS') {
@@ -1624,7 +1628,7 @@
                     btnWin.classList.remove('opacity-50', 'pointer-events-none');
                     if (winSize) winSize.innerText = `${winAsset.size_mb} MB • .zip 格式`;
                 } else {
-                    btnWin.href = releaseData.release_url || 'https://github.com/JudgePeach/math-question-bank/releases';
+                    btnWin.href = releaseData.release_url || 'https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases';
                     if (winSize) winSize.innerText = '前往 Releases 下载';
                 }
                 if (clientOS === 'Windows') {
@@ -1815,12 +1819,12 @@
                             latest_version: "v2.0.1",
                             release_title: "v2.0.1 正式发布",
                             release_body: "1. 新增 Word (.docx) 试卷 OMML 公式与插图 0 损直提智能拆解。\n2. 全新升级 KaTeX 填空题 \\fillin 宏与数学比较符号防撕裂转义自愈。\n3. 优化拖放区域 UI 与拆分进度动画盒模型。\n4. 内置版本自动检测、忽略更新与便携包一键直链更新体系。",
-                            release_url: "https://github.com/JudgePeach/math-question-bank/releases",
+                            release_url: "https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases",
                             published_at: new Date().toISOString(),
                             is_git_repo: true,
                             assets: {
-                                macOS: { name: "MathBank-macOS.zip", size_mb: 11.7, downloads: 40, url: "https://github.com/JudgePeach/math-question-bank/releases" },
-                                Windows: { name: "MathBank-Windows-x64.zip", size_mb: 51.2, downloads: 171, url: "https://github.com/JudgePeach/math-question-bank/releases" }
+                                macOS: { name: "xiaochen-math-treasure-macOS-AppleSilicon.zip", size_mb: 55.9, downloads: 0, url: "https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases" },
+                                Windows: { name: "xiaochen-math-treasure-Windows-x64.zip", size_mb: 48.9, downloads: 0, url: "https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases" }
                             }
                         };
                         openUpdateModal(demoData);

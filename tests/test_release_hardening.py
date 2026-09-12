@@ -15,6 +15,61 @@ from scripts import build_release, release_overlay
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _release_workflow_text() -> str:
+    return (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_release_workflow_derives_asset_names_from_the_build_script():
+    """改名 ASSET_PREFIX 时，release workflow 必须跟着走，不能各写一份。
+
+    2026-09-12 的真实事故：`build_release.ASSET_PREFIX` 从 `MathBank` 改成
+    `xiaochen-math-treasure`，但 workflow 的「校验产物」「上传产物」两步仍硬编码
+    `dist/MathBank-*.zip`。后果不是报错，而是**打 tag 时构建在这一步静默失败、
+    永远发不出新包** —— 而改名当时本地测试全绿，没有任何信号。
+    所以这里锁死：workflow 不得再出现硬编码的包名，必须向构建脚本取前缀。
+    """
+    workflow = _release_workflow_text()
+
+    # 不得硬编码任何一种发布包名。
+    for stale in (
+        "MathBank-Windows-x64.zip",
+        "MathBank-macOS-AppleSilicon.zip",
+        "MathBank-macOS-Intel.zip",
+        "MathBank-macOS.zip",
+    ):
+        assert stale not in workflow, f"workflow 仍硬编码旧包名: {stale}"
+
+    # 必须从构建脚本读前缀并落进 GITHUB_ENV 供后续步骤复用。
+    assert "import scripts.build_release as b; print(b.ASSET_PREFIX)" in workflow
+    assert 'echo "ASSET_PREFIX=$PREFIX" >> "$GITHUB_ENV"' in workflow
+    assert 'test -n "$ASSET_PREFIX"' in workflow
+
+    # 三个包都必须以 $PREFIX / $ASSET_PREFIX 拼出来校验与上传。
+    for suffix in ("Windows-x64.zip", "macOS-AppleSilicon.zip", "macOS-Intel.zip"):
+        assert workflow.count(suffix) >= 2, f"{suffix} 应在校验与上传两处都出现"
+
+    # 单架构旧包的「不得回落」断言要保留（前缀化，而非删除）。
+    assert 'test ! -f "dist/$PREFIX-macOS.zip"' in workflow
+
+
+def test_release_workflow_never_leaves_a_release_as_draft():
+    """发布步骤必须显式取消草稿态 —— 草稿会静默吞掉上传。
+
+    2026-09-12 的真实事故：tag `V2.2.3` 已存在一个 **草稿** release，workflow 走
+    `gh release view` 命中分支 → `gh release upload --clobber` 把三个包写进**草稿**，
+    于是：对外不可见、`releases/latest` 一直停在 V2.2.2、匿名访问
+    `releases/tags/V2.2.3` 直接 404。整条链路全绿，包却没人能下到。
+    """
+    workflow = _release_workflow_text()
+
+    assert 'gh release edit "$TAG" --draft=false' in workflow
+    # 发布后要有一次「确实不是草稿」的收尾自检，否则失败仍是静默的。
+    assert "isDraft" in workflow
+    assert "release 仍是草稿，对外不可见" in workflow
+
+
 def _zip_bytes(name="payload.txt", content=b"verified"):
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
@@ -733,8 +788,10 @@ def test_launchers_require_python_310_and_only_stop_verified_mathbank_processes(
     assert 'Path(sys.base_prefix) / "Resources" / "Python.app"' in mac_launcher
     assert 'case " $inspected_command "' in mac_launcher
     assert 'rechecked_owner=$(find_verified_mathbank_owner "$verified_owner")' in mac_launcher
-    assert "另一份或旧版 MathBank 仍在运行" in mac_launcher
-    assert "无法确认身份的进程" in mac_launcher
+    # 品牌改名后统一称「旧实例」，用户可见文案里不再出现上游的 MathBank 字样。
+    # 这里守的语义不变：①发现旧实例要提示并安全停止；②身份无法确认时拒绝强杀。
+    assert "检测到本工具的旧实例仍在运行" in mac_launcher
+    assert "无法确认它是否属于本工具，因此不会强行终止" in mac_launcher
     assert "sys.version_info >= (3, 10)" in mac_launcher
     assert "浏览器不会打开" in mac_launcher
     assert "requirements.sha256" in mac_launcher

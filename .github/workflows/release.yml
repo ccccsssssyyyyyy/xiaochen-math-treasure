@@ -40,12 +40,18 @@ jobs:
       - name: Verify built artifacts
         run: |
           set -euo pipefail
-          test -f dist/MathBank-Windows-x64.zip
-          test -f dist/MathBank-macOS-AppleSilicon.zip
-          test -f dist/MathBank-macOS-Intel.zip
+          # 包名唯一来源是 scripts/build_release.py 的 ASSET_PREFIX，这里直接向构建
+          # 脚本取真实前缀，不再硬编码文件名。
+          # （2026-09-12 踩过：改了 ASSET_PREFIX 却漏改本文件，会让打 tag 的构建在
+          #   这一步直接失败 —— 而改名时 CI 并不会有任何提示，属于静默断链。）
+          PREFIX=$(python -c "import scripts.build_release as b; print(b.ASSET_PREFIX)")
+          echo "ASSET_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          test -f "dist/$PREFIX-Windows-x64.zip"
+          test -f "dist/$PREFIX-macOS-AppleSilicon.zip"
+          test -f "dist/$PREFIX-macOS-Intel.zip"
           # 2.2.0 的单架构 macOS 包名已废弃，构建失败时不得回落到旧产物。
-          test ! -f dist/MathBank-macOS.zip
-          ls -lh dist/MathBank-*.zip
+          test ! -f "dist/$PREFIX-macOS.zip"
+          ls -lh dist/*.zip
 
       - name: Publish GitHub Release
         env:
@@ -53,16 +59,24 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          test -n "$ASSET_PREFIX"
+          WINDOWS="dist/$ASSET_PREFIX-Windows-x64.zip"
+          MACOS_ARM="dist/$ASSET_PREFIX-macOS-AppleSilicon.zip"
+          MACOS_INTEL="dist/$ASSET_PREFIX-macOS-Intel.zip"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
-              dist/MathBank-Windows-x64.zip \
-              dist/MathBank-macOS-AppleSilicon.zip \
-              dist/MathBank-macOS-Intel.zip --clobber
+            gh release upload "$TAG" "$WINDOWS" "$MACOS_ARM" "$MACOS_INTEL" --clobber
+            # 兜底：若该 tag 已存在一个 **草稿** release，上面的 upload 会静默写进
+            # 草稿，对外既不可见、也不被 releases/latest 返回。2026-09-12 的 V2.2.3
+            # 就是这样被吞掉的（页面 latest 一直停在 V2.2.2）。这里显式取消草稿态。
+            gh release edit "$TAG" --draft=false
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes-file .github/release-notes.md \
-              dist/MathBank-Windows-x64.zip \
-              dist/MathBank-macOS-AppleSilicon.zip \
-              dist/MathBank-macOS-Intel.zip
+              "$WINDOWS" "$MACOS_ARM" "$MACOS_INTEL"
           fi
+
+          # 收尾自检：确认对外可见、且资产挂载成功。
+          gh release view "$TAG" --json isDraft,assets \
+            --jq 'if .isDraft then error("release 仍是草稿，对外不可见") else "已发布 \(.assets|length) 个资产" end'

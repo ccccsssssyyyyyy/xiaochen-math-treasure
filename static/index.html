@@ -298,6 +298,67 @@
             </div>
         </div>
 
+        <!-- 首次启动引导：空题库时出现，三步走完即可出卷（可永久关闭） -->
+        <div id="onboardingCard" class="shrink-0 hidden glass-panel border-b border-brand-100 dark:border-brand-500/20 bg-brand-50/40 dark:bg-brand-500/5 px-4 py-3 z-20">
+            <div class="flex items-start justify-between gap-4">
+                <div class="flex-1 min-w-0">
+                    <div class="flex flex-wrap items-center gap-2 mb-2">
+                        <span class="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center space-x-1.5">
+                            <i class="fa-solid fa-seedling text-brand-500 text-xs"></i>
+                            <span>开始使用：三步就能出一份卷</span>
+                        </span>
+                        <span id="onboardingEnvBadge" class="hidden text-[10px] px-2 py-0.5 rounded-full bg-white/80 dark:bg-slate-800/80 border border-brand-200 dark:border-brand-500/30 text-slate-500 dark:text-slate-400"></span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <!-- 步骤 1：配置 API Key -->
+                        <div class="rounded-xl border border-slate-200/70 dark:border-slate-700/70 bg-white/70 dark:bg-slate-800/60 p-2.5 flex flex-col">
+                            <div class="flex items-center space-x-1.5 mb-1">
+                                <span class="w-4 h-4 rounded-full bg-brand-600 text-white text-[9px] font-bold flex items-center justify-center shrink-0">1</span>
+                                <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">配置 API Key</span>
+                                <span id="onboardingKeyState" class="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300">未配置</span>
+                            </div>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed flex-1">AI 拆卷 / 解题 / OCR 需要密钥；录入、预览、检索、导出源码不需要。</p>
+                            <div class="flex items-center space-x-2 mt-1.5">
+                                <button type="button" onclick="openSettingsModal()" class="text-[10px] px-2 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all">去填 Key</button>
+                                <button type="button" onclick="openDepGuideModal('keys')" class="text-[10px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all">去哪申请</button>
+                            </div>
+                        </div>
+
+                        <!-- 步骤 2：载入示例题目 -->
+                        <div class="rounded-xl border border-slate-200/70 dark:border-slate-700/70 bg-white/70 dark:bg-slate-800/60 p-2.5 flex flex-col">
+                            <div class="flex items-center space-x-1.5 mb-1">
+                                <span class="w-4 h-4 rounded-full bg-brand-600 text-white text-[9px] font-bold flex items-center justify-center shrink-0">2</span>
+                                <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">先放几道题进来</span>
+                            </div>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed flex-1">没有试卷也能先试：载入内置示例题（<span id="onboardingSampleCount">8</span> 道，题库为空时可用），或直接导入自己的 PDF / Word。</p>
+                            <div class="flex items-center space-x-2 mt-1.5">
+                                <button type="button" id="onboardingSampleBtn" onclick="importSampleQuestions()" class="text-[10px] px-2 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all">载入示例题</button>
+                                <button type="button" onclick="openImportModal()" class="text-[10px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all">导入试卷</button>
+                            </div>
+                        </div>
+
+                        <!-- 步骤 3：去组卷 -->
+                        <div class="rounded-xl border border-slate-200/70 dark:border-slate-700/70 bg-white/70 dark:bg-slate-800/60 p-2.5 flex flex-col">
+                            <div class="flex items-center space-x-1.5 mb-1">
+                                <span class="w-4 h-4 rounded-full bg-brand-600 text-white text-[9px] font-bold flex items-center justify-center shrink-0">3</span>
+                                <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">选题 → 组卷 → 导出</span>
+                            </div>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed flex-1">在题库里勾选题目加入试题篮，再到组卷工作台排版导出。导出 PDF 需要本机装 LaTeX。</p>
+                            <div class="flex items-center space-x-2 mt-1.5">
+                                <button type="button" onclick="selectWorkspace('paper', '组卷工作台')" class="text-[10px] px-2 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all">打开组卷台</button>
+                                <button type="button" onclick="openDepGuideModal('latex')" class="text-[10px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all">导出环境检查</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <button type="button" onclick="dismissOnboarding(true)" title="不再显示（可在设置里恢复）" aria-label="关闭首次启动引导" class="glass-btn w-8 h-8 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all shrink-0">
+                    <i class="fa-solid fa-xmark text-sm"></i>
+                </button>
+            </div>
+        </div>
+
         <!-- Workspace 1: Bank研讨工作台 (3-Column Layout) -->
         <div id="bankWorkspaceSection" class="w-full flex-1 min-h-0 flex overflow-hidden">
             <!-- Left Panel: Sidebar & Questions List - Apple Glass Style -->
@@ -1411,20 +1472,44 @@
 
                     <!-- Links & Environmental Details -->
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                        <a href="https://github.com/JudgePeach/math-question-bank" target="_blank" class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 hover:border-brand-500/50 hover:bg-slate-50/50 dark:hover:bg-slate-800 transition-all flex items-center justify-between group">
+                        <a href="https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure" target="_blank" rel="noopener" class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 hover:border-brand-500/50 hover:bg-slate-50/50 dark:hover:bg-slate-800 transition-all flex items-center justify-between group">
                             <div class="flex items-center space-x-2 text-slate-700 dark:text-slate-300">
                                 <i class="fa-brands fa-github text-base"></i>
                                 <span class="font-medium">GitHub 开源主页</span>
                             </div>
                             <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-slate-400 group-hover:text-brand-500"></i>
                         </a>
-                        <a href="https://github.com/JudgePeach/math-question-bank/releases" target="_blank" class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 hover:border-brand-500/50 hover:bg-slate-50/50 dark:hover:bg-slate-800 transition-all flex items-center justify-between group">
+                        <a href="https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases" target="_blank" rel="noopener" class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 hover:border-brand-500/50 hover:bg-slate-50/50 dark:hover:bg-slate-800 transition-all flex items-center justify-between group">
                             <div class="flex items-center space-x-2 text-slate-700 dark:text-slate-300">
                                 <i class="fa-solid fa-tags text-base text-brand-500"></i>
                                 <span class="font-medium">Releases 发布页面</span>
                             </div>
                             <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-slate-400 group-hover:text-brand-500"></i>
                         </a>
+                    </div>
+
+                    <!-- 环境与依赖自检 + 新手引导恢复 -->
+                    <div class="mt-3 space-y-2.5">
+                        <div class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 bg-white/60 dark:bg-slate-800/50">
+                            <div class="flex items-center justify-between gap-2 mb-2">
+                                <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center space-x-1.5">
+                                    <i class="fa-solid fa-screwdriver-wrench text-brand-500 text-[10px]"></i>
+                                    <span>运行环境自检</span>
+                                </span>
+                                <button type="button" onclick="openDepGuideModal()" class="text-[10px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all">查看安装指引</button>
+                            </div>
+                            <div id="settingsEnvGrid" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <div class="text-[10px] text-slate-400">切换到本页时自动检测…</div>
+                            </div>
+                        </div>
+
+                        <div class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70 bg-white/60 dark:bg-slate-800/50 flex items-center justify-between gap-2">
+                            <div>
+                                <div class="text-[11px] font-bold text-slate-700 dark:text-slate-200">新手引导卡片</div>
+                                <div class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">题库为空时显示在题库工作台顶部，可随时重新显示。</div>
+                            </div>
+                            <button type="button" onclick="resetOnboarding()" class="shrink-0 text-[10px] px-2.5 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all">重新显示</button>
+                        </div>
                     </div>
                 </div>
                 <!-- End of settings-tab-about -->
@@ -1480,6 +1565,56 @@
                     </div>
                 </div>
 
+                <!-- 升级向导：三步走完，避免"下了包不知道下一步做什么" -->
+                <div class="rounded-2xl border border-brand-100 dark:border-brand-500/20 bg-white/60 dark:bg-slate-800/50 p-3.5 space-y-2.5">
+                    <div class="flex items-center justify-between gap-2">
+                        <h4 class="font-bold text-slate-700 dark:text-slate-200 text-xs flex items-center space-x-1.5">
+                            <i class="fa-solid fa-list-check text-brand-500"></i>
+                            <span>升级向导：三步完成</span>
+                        </h4>
+                        <span id="upgradeStepState" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300">第 1 / 3 步</span>
+                    </div>
+
+                    <!-- 步骤 1：备份 -->
+                    <div class="flex items-start space-x-2.5">
+                        <span class="w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">1</span>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">先做一次完整备份</span>
+                                <span id="upgradeBackupState" class="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300">未备份</span>
+                            </div>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">备份题库、上传图片与元数据（不含密钥），存到 <code class="font-mono">data_backup/snapshots/</code>。</p>
+                            <button type="button" id="btnUpgradeBackup" onclick="runUpgradeBackup()" class="mt-1.5 text-[10px] px-2.5 py-1 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all flex items-center space-x-1.5">
+                                <i class="fa-solid fa-box-archive text-[9px]"></i><span>立即备份</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 步骤 2：下载 -->
+                    <div class="flex items-start space-x-2.5">
+                        <span class="w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">2</span>
+                        <div class="flex-1 min-w-0">
+                            <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">下载你系统的便携包</span>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">点下方按钮下载（约 50–60MB，含内置 Python）。下载完先解压到<b>临时目录</b>，不要直接解压进原目录。</p>
+                        </div>
+                    </div>
+
+                    <!-- 步骤 3：替换重启 -->
+                    <div class="flex items-start space-x-2.5">
+                        <span class="w-5 h-5 rounded-full bg-brand-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">3</span>
+                        <div class="flex-1 min-w-0">
+                            <span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">安全关机 → 合并覆盖 → 重启</span>
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">用右上角电源按钮关机，再把新版内容<b>合并</b>到原目录（保留 <code class="font-mono">.db</code> / <code class="font-mono">.env</code> / <code class="font-mono">data_backup/</code> / <code class="font-mono">static/uploads/</code>），最后双击新启动器。<b class="text-amber-700 dark:text-amber-300">合并时不要选「替换整个文件夹」，否则 .env 与数据库会被删掉。</b></p>
+                            <div class="flex flex-wrap items-center gap-2 mt-1.5">
+                                <button type="button" onclick="copyUpgradeChecklist(this)" class="text-[10px] px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all flex items-center space-x-1.5">
+                                    <i class="fa-regular fa-copy text-[9px]"></i><span>复制升级清单</span>
+                                </button>
+                                <button type="button" onclick="openDepGuideModal('keys')" class="text-[10px] px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-300 hover:border-brand-400 transition-all">升级后 Key 还在吗</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Platform Download Buttons -->
                 <div class="space-y-2">
                     <span class="text-[11px] font-bold text-slate-500 dark:text-slate-400 block">选择您的系统下载便携升级包：</span>
@@ -1527,11 +1662,137 @@
                 </button>
                 <div class="flex items-center space-x-2">
                     <button type="button" onclick="closeUpdateModal()" class="glass-btn px-4 py-2 rounded-xl text-xs font-medium text-slate-500">稍后再说</button>
-                    <a id="btnViewOnGithub" href="https://github.com/JudgePeach/math-question-bank/releases" target="_blank" class="glass-btn-primary px-5 py-2 rounded-xl font-medium text-xs flex items-center space-x-1.5">
+                    <a id="btnViewOnGithub" href="https://github.com/ccccsssssyyyyyy/xiaochen-math-treasure/releases" target="_blank" class="glass-btn-primary px-5 py-2 rounded-xl font-medium text-xs flex items-center space-x-1.5">
                         <i class="fa-brands fa-github"></i>
                         <span>前往 GitHub 查看</span>
                     </a>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 外部依赖引导弹窗：缺什么、影响什么、怎么装（LaTeX / LibreOffice / Pandoc / API Key） -->
+    <div id="depGuideModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="depGuideTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
+        <div class="glass-modal rounded-3xl w-full max-w-2xl p-6 sm:p-7 transform scale-95 transition-transform duration-300 flex flex-col max-h-[85vh] overflow-hidden shadow-2xl border border-brand-200/50 dark:border-brand-500/20">
+            <div class="flex justify-between items-start pb-4 border-b border-slate-200/60 dark:border-slate-700/60 shrink-0">
+                <div class="flex items-center space-x-3.5">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-brand-500 to-indigo-600 text-white flex items-center justify-center text-xl shadow-md shrink-0">
+                        <i class="fa-solid fa-screwdriver-wrench text-xl text-white"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-lg text-slate-800 dark:text-white" id="depGuideTitle">环境与依赖检查</h3>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5" id="depGuideSubtitle">哪些功能需要额外安装，装完怎么确认</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeDepGuideModal()" aria-label="关闭环境与依赖检查" class="glass-btn w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all">
+                    <i class="fa-solid fa-xmark text-base"></i>
+                </button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto py-4 pr-1 space-y-3 scrollbar-thin text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                <!-- 依赖状态总览 -->
+                <div id="depStatusGrid" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div class="p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/60">
+                        <div class="text-[11px] text-slate-400">正在检测本机环境...</div>
+                    </div>
+                </div>
+
+                <!-- LaTeX -->
+                <div class="rounded-2xl border border-slate-200/70 dark:border-slate-700/70 overflow-hidden">
+                    <button type="button" onclick="toggleDepSection('latex')" class="w-full px-3.5 py-2.5 flex items-center justify-between bg-slate-50/80 dark:bg-slate-800/60 hover:bg-brand-50/50 dark:hover:bg-slate-700/60 transition-all text-left">
+                        <span class="flex items-center space-x-2">
+                            <i class="fa-solid fa-square-root-variable text-brand-500"></i>
+                            <span class="font-bold text-slate-700 dark:text-slate-200 text-xs">LaTeX（MacTeX / TeX Live）</span>
+                            <span class="text-[10px] text-slate-400">约 5GB，按需安装</span>
+                        </span>
+                        <i class="fa-solid fa-chevron-down text-[10px] text-slate-400" id="depChevron-latex"></i>
+                    </button>
+                    <div id="depSection-latex" class="hidden px-3.5 py-3 space-y-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                        <p><span class="font-bold text-slate-700 dark:text-slate-200">影响：</span>组卷「一键导出 PDF」、TikZ 几何重绘需要它。<span class="font-bold">不装也能用</span>：录入、预览、检索、AI 解答、导出 LaTeX 源码包全部正常。</p>
+                        <p class="font-bold text-slate-700 dark:text-slate-200">macOS 安装：</p>
+                        <div class="space-y-1.5">
+                            <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-100/70 dark:bg-slate-900/60 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                                <span class="truncate">brew install --cask mactex-no-gui</span>
+                                <button type="button" onclick="copyDepCommand(this, 'brew install --cask mactex-no-gui')" class="shrink-0 px-2 py-0.5 rounded-md bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-[10px] hover:border-brand-400 transition-all">复制</button>
+                            </div>
+                            <a href="https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/mac/mactex/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline inline-flex items-center space-x-1">
+                                <i class="fa-solid fa-download text-[10px]"></i><span>清华镜像下载 MacTeX（国内推荐）</span>
+                            </a>
+                        </div>
+                        <p class="font-bold text-slate-700 dark:text-slate-200">Windows 安装：</p>
+                        <div class="space-y-1.5">
+                            <a href="https://mirrors.tuna.tsinghua.edu.cn/CTAN/systems/texlive/Images/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline inline-flex items-center space-x-1">
+                                <i class="fa-solid fa-download text-[10px]"></i><span>清华镜像下载 TeX Live</span>
+                            </a>
+                            <p>也可用体积更小的 MiKTeX：<a href="https://miktex.org/download" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline">miktex.org/download</a></p>
+                        </div>
+                        <p class="text-[10px] text-slate-500 dark:text-slate-400">安装完成后重启本程序（命令行能调用 <code class="font-mono">xelatex</code> 即为成功）。</p>
+                    </div>
+                </div>
+
+                <!-- LibreOffice -->
+                <div class="rounded-2xl border border-slate-200/70 dark:border-slate-700/70 overflow-hidden">
+                    <button type="button" onclick="toggleDepSection('soffice')" class="w-full px-3.5 py-2.5 flex items-center justify-between bg-slate-50/80 dark:bg-slate-800/60 hover:bg-brand-50/50 dark:hover:bg-slate-700/60 transition-all text-left">
+                        <span class="flex items-center space-x-2">
+                            <i class="fa-solid fa-file-word text-blue-500"></i>
+                            <span class="font-bold text-slate-700 dark:text-slate-200 text-xs">LibreOffice</span>
+                            <span class="text-[10px] text-slate-400">约 700MB</span>
+                        </span>
+                        <i class="fa-solid fa-chevron-down text-[10px] text-slate-400" id="depChevron-soffice"></i>
+                    </button>
+                    <div id="depSection-soffice" class="hidden px-3.5 py-3 space-y-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                        <p><span class="font-bold text-slate-700 dark:text-slate-200">影响：</span>Word（.docx）导入时把原卷转成预览图、以及 MathType 公式还原。不装则 Word 原卷预览不可用，拆题仍可进行。</p>
+                        <div class="space-y-1.5">
+                            <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-100/70 dark:bg-slate-900/60 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                                <span class="truncate">brew install --cask libreoffice</span>
+                                <button type="button" onclick="copyDepCommand(this, 'brew install --cask libreoffice')" class="shrink-0 px-2 py-0.5 rounded-md bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-[10px] hover:border-brand-400 transition-all">复制</button>
+                            </div>
+                            <a href="https://zh-cn.libreoffice.org/download/libreoffice/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline inline-flex items-center space-x-1">
+                                <i class="fa-solid fa-download text-[10px]"></i><span>官网下载（Windows / macOS）</span>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pandoc -->
+                <div class="rounded-2xl border border-slate-200/70 dark:border-slate-700/70 overflow-hidden">
+                    <button type="button" onclick="toggleDepSection('pandoc')" class="w-full px-3.5 py-2.5 flex items-center justify-between bg-slate-50/80 dark:bg-slate-800/60 hover:bg-brand-50/50 dark:hover:bg-slate-700/60 transition-all text-left">
+                        <span class="flex items-center space-x-2">
+                            <i class="fa-solid fa-arrows-rotate text-emerald-500"></i>
+                            <span class="font-bold text-slate-700 dark:text-slate-200 text-xs">Pandoc</span>
+                            <span class="text-[10px] text-slate-400">可选增强</span>
+                        </span>
+                        <i class="fa-solid fa-chevron-down text-[10px] text-slate-400" id="depChevron-pandoc"></i>
+                    </button>
+                    <div id="depSection-pandoc" class="hidden px-3.5 py-3 space-y-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                        <p><span class="font-bold text-slate-700 dark:text-slate-200">影响：</span>Word 导入时的原生公式转换质量。不装则公式退化为图片（仍可手动截图补图）。</p>
+                        <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-100/70 dark:bg-slate-900/60 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                            <span class="truncate">brew install pandoc</span>
+                            <button type="button" onclick="copyDepCommand(this, 'brew install pandoc')" class="shrink-0 px-2 py-0.5 rounded-md bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-[10px] hover:border-brand-400 transition-all">复制</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- API Key -->
+                <div class="rounded-2xl border border-amber-200/70 dark:border-amber-500/30 bg-amber-50/50 dark:bg-amber-500/10 px-3.5 py-3 space-y-2">
+                    <p class="font-bold text-slate-700 dark:text-slate-200 text-xs flex items-center space-x-1.5">
+                        <i class="fa-solid fa-key text-amber-500"></i><span>API Key（AI 拆卷 / 解题 / OCR）</span>
+                    </p>
+                    <p>程序不内置、不代填任何密钥。推荐按需选一家注册后，在 <span class="font-bold">设置 → API 配置</span> 填入：</p>
+                    <ul class="space-y-1 ml-1">
+                        <li><i class="fa-solid fa-angle-right text-[9px] text-slate-400 mr-1"></i><span class="font-semibold">DeepSeek</span>（文本推理，性价比高）：<a href="https://platform.deepseek.com/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline">platform.deepseek.com</a></li>
+                        <li><i class="fa-solid fa-angle-right text-[9px] text-slate-400 mr-1"></i><span class="font-semibold">硅基流动</span>（免费模型 + 识图，实名送额度）：<a href="https://cloud.siliconflow.cn/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline">cloud.siliconflow.cn</a></li>
+                        <li><i class="fa-solid fa-angle-right text-[9px] text-slate-400 mr-1"></i><span class="font-semibold">阿里云百炼</span>（qwen 系列，有免费额度）：<a href="https://bailian.console.aliyun.com/" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-400 hover:underline">bailian.console.aliyun.com</a></li>
+                    </ul>
+                    <p class="text-[10px] text-slate-500 dark:text-slate-400">识图 OCR 必须用多模态模型（如 Qwen-VL）；纯文本模型无法读图。</p>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-between gap-2 pt-3 border-t border-slate-200/60 dark:border-slate-700/60 shrink-0">
+                <button type="button" onclick="refreshDepStatus()" class="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-all flex items-center space-x-1">
+                    <i class="fa-solid fa-rotate text-[10px]"></i><span>重新检测</span>
+                </button>
+                <button type="button" onclick="closeDepGuideModal()" class="glass-btn-primary px-5 py-2 rounded-xl font-medium text-xs">知道了</button>
             </div>
         </div>
     </div>
@@ -1971,6 +2232,7 @@
     <script src="/static/js/ocr.js?v=1.0.1"></script>
     <script src="/static/js/import.js?v=1.0.5"></script>
     <script src="/static/js/paper.js?v=1.0.1"></script>
+    <script src="/static/js/onboarding.js?v=1.0.0"></script>
     
     <!-- PDF PAGE VIEWER & MANUAL CROP LIGHTBOX MODAL - Apple Glass Style -->
     <div id="pdfCropModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="pdfCropModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
