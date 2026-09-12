@@ -1452,7 +1452,7 @@ let bankQuestionsRetryTimer = null;
                                     </button>
                                 </div>
                             </div>
-                            <div class="text-xs text-slate-700 leading-relaxed font-medium line-clamp-3 card-formula-render">${cleanContent || '[空白题干]'}</div>
+                            <div class="text-xs text-slate-700 leading-relaxed font-medium line-clamp-4 card-formula-render">${cleanContent || '[空白题干]'}</div>
                             <!-- 展开/收起完整题干 -->
                             <button type="button" onclick="event.stopPropagation(); window.bankToggleExpand(${item.id})" class="self-start text-[9px] text-brand-500 hover:text-brand-700 font-semibold flex items-center space-x-0.5" title="展开/收起完整题干">
                                 <i class="fa-solid fa-angles-down text-[8px]" id="exp-ic-${item.id}"></i>
