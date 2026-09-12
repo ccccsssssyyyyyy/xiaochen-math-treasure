@@ -1573,7 +1573,7 @@ let bankQuestionsRetryTimer = null;
             const body = card.querySelector('.card-formula-render');
             const ic = document.getElementById('exp-ic-' + qid);
             const tx = document.getElementById('exp-tx-' + qid);
-            if (body) body.classList.toggle('line-clamp-3', !bankExpandedIds.has(qid));
+            if (body) body.classList.toggle('line-clamp-4', !bankExpandedIds.has(qid));
             if (body) body.classList.toggle('expanded-body', bankExpandedIds.has(qid));
             if (ic) ic.className = bankExpandedIds.has(qid) ? 'fa-solid fa-angles-up text-[8px]' : 'fa-solid fa-angles-down text-[8px]';
             if (tx) tx.textContent = bankExpandedIds.has(qid) ? '收起' : '展开全文';
