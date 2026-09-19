@@ -37,14 +37,20 @@ jobs:
       - name: Install minimal TeX Live
         run: |
           sudo apt-get update -qq
+          # texlive-plain-generic 提供 ulem.sty：xeCJKfntef.sty 会 require 它，
+          # 缺了会让所有真实编译的用例直接报 "File `ulem.sty' not found" 而失败。
+          # 它不在 texlive-lang-chinese 的 apt 依赖链里，必须显式装（2026-09-19 踩）。
           sudo apt-get install -y --no-install-recommends \
-            texlive-xetex texlive-lang-chinese texlive-latex-extra texlive-science texlive-pictures
+            texlive-xetex texlive-lang-chinese texlive-latex-extra texlive-science texlive-pictures \
+            texlive-plain-generic
           xelatex --version | head -1
-          if kpsewhich exam-zh.cls >/dev/null; then
-            echo "exam-zh.cls 可用，bundle 导出将真实编译"
-          else
-            echo "::warning::exam-zh.cls 未随 apt 包提供，bundle 导出将走降级分支"
-          fi
+          for sty in exam-zh.cls ulem.sty; do
+            if kpsewhich "$sty" >/dev/null; then
+              echo "$sty 可用"
+            else
+              echo "::warning::$sty 未随 apt 包提供，相关用例可能失败或走降级分支"
+            fi
+          done
       - name: Run test suite
         run: python -m pytest tests/
       - uses: actions/setup-node@v4

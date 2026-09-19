@@ -86,6 +86,7 @@ from mathbank.docx_helper import (
     compress_docx_image_links,
     decompress_docx_image_links_in_questions,
 )
+from mathbank.docx_font_normalizer import normalize_docx_fonts
 from mathbank.content_locks import lock_visible_math, restore_visible_math
 from mathbank.tex_helper import (
     MAX_TEX_BYTES,
@@ -3078,6 +3079,7 @@ def create_question(
     background_tasks: BackgroundTasks,
     content: str = Form(...),
     question_type: str = Form(...),
+    subject: str = Form(""),  # 学科（math/physics/chemistry）；老请求不带时由 normalize_subject 归入 math
     category_compulsory: str = Form(""),
     category_chapter: str = Form(""),
     category_knowledge: str = Form(""),
