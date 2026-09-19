@@ -15,12 +15,67 @@ import unicodedata
 from mathbank.paths import CURRICULUMS_DIR
 
 
-CURRICULUM_NAMES = {
+# 数学四套版本可由用户在「设置 - 大纲」里切换；物化各只有一套指定版本。
+MATH_CURRICULUM_NAMES = {
     "A": "人教A版",
     "B": "人教B版",
     "S": "苏教版",
     "H": "沪教版",
 }
+
+# 物化目录为内置只读资源（不进设置里的可编辑大纲框），避免物化题被数学大纲覆盖：
+#   PJK = 教育科学出版社《物理》2019 版
+#   CRJ = 人民教育出版社《化学》2019 版
+SUBJECT_CURRICULUM_NAMES = {
+    "PJK": "教科版物理",
+    "CRJ": "人教版化学",
+}
+
+CURRICULUM_NAMES = {**MATH_CURRICULUM_NAMES, **SUBJECT_CURRICULUM_NAMES}
+
+#: 题库工作台三科 Tab 的顺序（默认数学，刻意不设「全部」以免混科点错）。
+SUBJECT_ORDER = ("math", "physics", "chemistry")
+
+SUBJECT_LABELS = {
+    "math": "数学",
+    "physics": "物理",
+    "chemistry": "化学",
+}
+
+#: 学科 → 可选教材版本码。数学沿用原四套；物化各锁死一套。
+SUBJECT_VERSIONS = {
+    "math": tuple(MATH_CURRICULUM_NAMES),
+    "physics": ("PJK",),
+    "chemistry": ("CRJ",),
+}
+
+DEFAULT_SUBJECT_VERSION = {"math": "A", "physics": "PJK", "chemistry": "CRJ"}
+
+
+def normalize_subject(value: str | None) -> str:
+    """把任意输入收敛到三科之一。
+
+    未知 / 空值退回 ``math`` —— 历史请求不带 subject 字段，其语义就是数学题；
+    错题工作台里 ``other`` 这一档也归到数学桶，否则题目入库后在三科 Tab 下都
+    看不见（题库只设三个 Tab，不设「其他」）。
+    """
+
+    code = str(value or "").strip().lower()
+    return code if code in SUBJECT_LABELS else "math"
+
+
+def is_math_subject(value: str | None) -> bool:
+    """判断是否数学学科 —— 「导入试卷」等只对数学开放的入口用它做门禁。"""
+
+    return normalize_subject(value) == "math"
+
+
+def default_version_for_subject(subject: str | None) -> str:
+    return DEFAULT_SUBJECT_VERSION[normalize_subject(subject)]
+
+
+def versions_for_subject(subject: str | None) -> tuple[str, ...]:
+    return SUBJECT_VERSIONS[normalize_subject(subject)]
 
 DEFAULT_QUESTION_TYPES = [
     {"value": "single_choice", "label": "单选题"},

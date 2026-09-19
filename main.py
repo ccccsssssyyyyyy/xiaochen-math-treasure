@@ -102,11 +102,19 @@ from mathbank.free_model_routing import (
     decide_classify_model,
 )
 from mathbank.curriculums import (
+    CURRICULUM_NAMES,
+    DEFAULT_QUESTION_TYPES,
+    DIFFICULTY_VALUES,
+    SUBJECT_LABELS,
+    SUBJECT_ORDER,
     build_default_metadata,
+    default_version_for_subject,
     get_curriculum_preset,
     load_curriculum,
     normalize_difficulty,
+    normalize_subject,
     normalize_tag_list,
+    versions_for_subject,
 )
 from mathbank.prompts import (
     COMMON_OCR_PROMPT,
@@ -289,8 +297,13 @@ def heal_database_curriculum_names():
         # 清理在主表 questions 及镜像表 question_curriculums 中残留的不属于各自大纲小节列表的旧章名/错位知识点
         curr = get_current_curriculum()
         healed_know_count = 0
+        # 只自愈数学题：下面这条校验的是「数学的活动大纲」（物理挂教科版、化学挂
+        # 人教版，是两套独立目录树）。拿数学树去校验物化题会把物化章节判成非法，
+        # 然后在每次启动时静默清空它们的知识点。
         all_qs = db.query(Question).all()
         for q in all_qs:
+            if (q.subject or "math") != "math":
+                continue
             comp = q.category_compulsory
             chap = q.category_chapter
             know = q.category_knowledge
@@ -514,32 +527,57 @@ PDF_OCR_SEMAPHORE = threading.BoundedSemaphore(4)
 MAX_PDF_TASK_PAGES = 80
 
 def get_seq_mapping(db: Session, question_ids=None):
-    """Map physical ID order to the user-facing contiguous sequence number.
+    """Map physical ID order to the user-facing **per-subject** sequence number.
 
-    当 ``question_ids`` 较小时，用相关子查询 ``COUNT(*) WHERE id <= q.id``
+    编号按科目各自从 1 起：数学 #1..#N、物理 #1..#M、化学 #1..#K —— 跨科目不连续。
+    （2026-09-19 需求：混科题库里物理第一题就该是 #1，而不是接着数学的号往下排。）
+
+    这是纯展示口径、不落库：库里保留主键 ``id`` 作为唯一标识（错题图片目录、试卷归档、
+    关联题组都认 id），编号只表示「该科第几道题」，所以删题后该科后续编号会前移 ——
+    与改造前的全局排名口径性质一致，不需要任何数据迁移。
+
+    当 ``question_ids`` 较小时，用相关子查询 ``COUNT(*) WHERE id <= q.id AND 同科目``
     替代全表 ``ROW_NUMBER() OVER`` 再过滤，避免对全表做窗口函数扫描。
-    SQLite 实测从 ~0.184ms 降到 ~0.0074ms（约 25x），且过滤越严收益越大。
     """
 
+    from sqlalchemy import case, func, select
+
+    question_table = Question.__table__
+    # 科目口径与 curriculums.normalize_subject 完全一致：空值 / 未知值一律并入数学。
+    # 否则同一条题在题库 Tab 里算数学、在这里却自成「一门课」，编号会凭空从 1 重来。
+    _raw_subject = func.lower(func.trim(func.coalesce(question_table.c.subject, "")))
+    subject_key = case(
+        (_raw_subject.in_(list(SUBJECT_ORDER)), _raw_subject),
+        else_=SUBJECT_ORDER[0],
+    )
+
     if question_ids is None:
-        all_q = db.query(Question.id).order_by(Question.id.asc()).all()
-        return {q_id: idx + 1 for idx, (q_id,) in enumerate(all_q)}
+        rows = (
+            db.query(Question.id, subject_key.label("subject_key"))
+            .order_by(subject_key.asc(), Question.id.asc())
+            .all()
+        )
+        counters: dict[str, int] = {}
+        mapping: dict[int, int] = {}
+        for q_id, key in rows:
+            name = str(key)
+            counters[name] = counters.get(name, 0) + 1
+            mapping[int(q_id)] = counters[name]
+        return mapping
 
     normalized_ids = {int(question_id) for question_id in question_ids}
     if not normalized_ids:
         return {}
 
-    # 小集合走内存计算（避免任何 SQL 开销）：seq_num = 全局中 <= id 的题目数。
-    # 1) 拿到这批 id 的全局 rank，用相关子查询一次性执行；2) 每个 id 的 seq = rank。
-    # 注意：这里依赖 Question.id 是全局升序主键；若主键不连续，seq 仍是排序位置。
-    from sqlalchemy import func, select
-
-    question_table = Question.__table__
-    filtered = select(question_table.c.id).where(
-        question_table.c.id.in_(normalized_ids)
-    ).alias("filtered")
+    # 单个 id 的 seq = 同科目内 id <= 它的题目数（相关子查询一次性算完）。
+    # 注意：这里依赖 Question.id 是升序主键；若主键不连续，seq 仍是科目内的排序位置。
+    filtered = select(
+        question_table.c.id,
+        subject_key.label("subject_key"),
+    ).where(question_table.c.id.in_(normalized_ids)).alias("filtered")
     seq_expr = select(func.count()).where(
-        question_table.c.id <= filtered.c.id
+        question_table.c.id <= filtered.c.id,
+        subject_key == filtered.c.subject_key,
     ).correlate(filtered).scalar_subquery()
     stmt = select(filtered.c.id, seq_expr.label("seq_num"))
     rows = db.execute(stmt).fetchall()
@@ -2171,6 +2209,8 @@ def list_questions(
     question_type: str = None,
     difficulty: str = None,
     source: str = None,
+    subject: str = None,
+    origin: str = None,
     page: Optional[int] = None,
     page_size: int = 20,
     sort: str = "desc",
@@ -2265,6 +2305,23 @@ def list_questions(
         query = query.filter(Question.difficulty == difficulty)
     if source:
         query = query.filter(Question.source.like(f"%{source}%"))
+    # 学科是题库的一等维度：三个学科 Tab 各自请求，互不混科。组卷页允许同时勾多科
+    # （一套卷子可以跨学科），所以这里额外接受逗号分隔的多值；单值路径保持原语义，
+    # 连「未知值回落数学」的历史行为都不动。
+    if subject:
+        raw_subjects = [entry.strip() for entry in str(subject).split(",") if entry.strip()]
+        if len(raw_subjects) == 1:
+            query = query.filter(Question.subject == normalize_subject(raw_subjects[0]))
+        elif raw_subjects:
+            picked_subjects: list = []
+            for entry in raw_subjects:
+                code = normalize_subject(entry)
+                if code not in picked_subjects:
+                    picked_subjects.append(code)
+            query = query.filter(Question.subject.in_(picked_subjects))
+    # 渠道（bank / mistake）用于「只看错题」这类筛选。
+    if origin:
+        query = query.filter(Question.origin == str(origin).strip())
         
     order_columns = (
         (Question.created_at.asc(), Question.id.asc())
@@ -2714,6 +2771,10 @@ def create_question(
         # 来源自动归一（与一次性批量归一、拆卷导入共用同一映射表）
         source = normalize_source(source)
 
+        # 学科归一：老请求不带 subject 时退回 math，语义与历史一致。
+        # 录入单题对三科开放（这是物化的手动录入口子）；导入试卷仍只对数学开放。
+        subject_value = normalize_subject(subject)
+
         # Validate json array format
         parsed_img_paths = json.loads(image_paths) if image_paths else []
         
@@ -2744,6 +2805,8 @@ def create_question(
             norm_knowledge_list = normalize_tag_list(category_knowledge, field="knowledge_list")
 
         db_question = Question(
+            subject=subject_value,
+            origin="bank",
             content=content,
             content_fingerprint=_normalize_question_content(content),
             question_type=question_type,
@@ -2855,6 +2918,7 @@ def update_question(
     background_tasks: BackgroundTasks,
     content: str = Form(...),
     question_type: str = Form(...),
+    subject: str = Form("math"),
     category_compulsory: str = Form(""),
     category_chapter: str = Form(""),
     category_knowledge: str = Form(""),
@@ -3271,9 +3335,68 @@ def get_active_version_code() -> str:
         return "S"
     return "A"
 
+
+def get_subject_version_code(subject: str | None) -> str:
+    """学科对应的教材版本码，写进 ``question_curriculums.version_code``。
+
+    数学保持原行为（由「设置 - 大纲」里的活动大纲反查 A/B/S/H）；物理恒为教科版
+    ``PJK``，化学恒为人教版 ``CRJ``。所有入库路径都必须经过这里取值 —— 否则物化题
+    会被挂到数学大纲下，章节筛选与知识统计就再也对不上。
+    """
+
+    subject_value = normalize_subject(subject)
+    if subject_value == "math":
+        return get_active_version_code()
+    return default_version_for_subject(subject_value)
+
+
+def get_subject_curriculum_tree(subject: str | None) -> dict:
+    """学科对应的教材目录树。
+
+    数学返回「设置 - 大纲」里的活动大纲；物理返回教科版树、化学返回人教版树。
+    凡是「拿树去比对 / 让 AI 按树分类」的地方都必须走这里 —— 用数学树去处理物化，
+    会让 AI 把物理题打上数学章节。
+    """
+
+    subject_value = normalize_subject(subject)
+    if subject_value == "math":
+        return get_current_curriculum()
+    return load_curriculum(default_version_for_subject(subject_value))
+
 @app.get("/api/config/metadata")
 def get_metadata_config():
-    return METADATA_CACHE
+    """题库元数据。
+
+    在原有 ``question_types`` / ``difficulties`` / ``curriculum``（数学的「活动大纲」，
+    仍可在设置里编辑）之外，新增两份只读数据：
+
+    - ``subjects``：三科 Tab 定义（value / label / 可用版本 / 默认版本）；
+    - ``subject_curriculum``：``{学科: 目录树}``。物理挂教科版、化学挂人教版，
+      数学直接用设置里的活动大纲。前端必须按当前学科取树 —— 三科共用一套树必然错位。
+    """
+
+    payload = dict(METADATA_CACHE)
+    payload["subjects"] = [
+        {
+            "value": subject,
+            "label": SUBJECT_LABELS[subject],
+            "versions": [
+                {"code": code, "name": CURRICULUM_NAMES[code]}
+                for code in versions_for_subject(subject)
+            ],
+            "default_version": default_version_for_subject(subject),
+        }
+        for subject in SUBJECT_ORDER
+    ]
+    subject_curriculum = {"math": METADATA_CACHE.get("curriculum", {})}
+    for subject in SUBJECT_ORDER:
+        if subject == "math":
+            continue
+        subject_curriculum[subject] = load_curriculum(
+            default_version_for_subject(subject)
+        )
+    payload["subject_curriculum"] = subject_curriculum
+    return payload
 
 @app.get("/api/config/curriculum-presets/{version}")
 def get_curriculum_preset_config(version: str):
@@ -3582,20 +3705,37 @@ def get_db_stats(db: Session = Depends(get_db)):
         )
 
 @app.get("/api/categories")
-def list_categories(db: Session = Depends(get_db)):
-    # Initialize with predefined curriculum
+def list_categories(subject: str = "math", db: Session = Depends(get_db)):
+    """学段 → 章节 → 小节 三级级联数据（题库筛选栏与录入表单共用）。
+
+    基线目录树按学科取：数学用「设置 - 大纲」里的活动大纲，物理挂教科版、
+    化学挂人教版。三科共用一套数学树的时代结束了 —— 那会让物理题的学段下拉框
+    里全是数学章节，选出来的分类写进库后与教材完全对不上。
+
+    数据库里的自定义分类仍会合并进来，但只合并**当前学科**的题：跨学科合并会
+    把数学的章节名塞进物理下拉框。
+    """
+
+    subject_value = normalize_subject(subject)
+    base_tree = get_subject_curriculum_tree(subject_value)
+
     hierarchy = {}
-    for comp, chapters in get_current_curriculum().items():
+    for comp, chapters in base_tree.items():
         hierarchy[comp] = {}
         for chap, sections in chapters.items():
             hierarchy[comp][chap] = list(sections)
             
     # Also fetch any custom entries from DB
-    results = db.query(
-        Question.category_compulsory,
-        Question.category_chapter,
-        Question.category_knowledge
-    ).distinct().all()
+    results = (
+        db.query(
+            Question.category_compulsory,
+            Question.category_chapter,
+            Question.category_knowledge,
+        )
+        .filter(Question.subject == subject_value)
+        .distinct()
+        .all()
+    )
     
     for comp, chap, know in results:
         if not comp:
@@ -3614,7 +3754,11 @@ def list_categories(db: Session = Depends(get_db)):
 # ----------------- AI Auto-Classification API -----------------
 
 @app.post("/api/ai/classify")
-def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
+def ai_classify(
+    content: str = Form(...),
+    use_free_model: str = Form("false"),
+    subject: str = Form("math"),
+):
     use_free = use_free_model.lower() in ("true", "1", "yes")
     classify_decision = decide_classify_model(use_free)
     classify_model = classify_decision["raw_model"]
@@ -3634,7 +3778,11 @@ def ai_classify(content: str = Form(...), use_free_model: str = Form("false")):
         )
         
     try:
-        system_instructions = build_classification_system_prompt(get_current_curriculum())
+        # 分类提示词必须吃当前学科的目录树：给物理题喂数学大纲，AI 只会
+        # 硬套出「必修一 / 1. 集合与常用逻辑用语」这种对不上的结果。
+        system_instructions = build_classification_system_prompt(
+            get_subject_curriculum_tree(subject)
+        )
         data = {
             "model": model_name,
             "messages": [

@@ -197,6 +197,24 @@
 
         <!-- Top Filter Bar: 题库工作台顶部横向筛选栏 (搜索/题型/难度/学段/排序 + 更多筛选 + 操作按钮) -->
         <div id="bankTopFilterBar" class="shrink-0 glass-panel border-b border-slate-100 px-3 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 z-30">
+            <!-- 学科切换：三科各自独立成库。刻意不设「全部」——混科浏览容易点错。 -->
+            <div id="subjectTabs" class="flex items-center rounded-xl bg-slate-100 dark:bg-slate-700/40 p-0.5" role="tablist" aria-label="学科切换">
+                <button type="button" role="tab" data-subject="math" aria-selected="true" onclick="switchBankSubject('math')"
+                        class="subject-tab px-3 py-1 text-xs font-bold rounded-lg bg-white dark:bg-slate-800 text-brand-600 shadow-sm transition-all">数学</button>
+                <button type="button" role="tab" data-subject="physics" aria-selected="false" onclick="switchBankSubject('physics')"
+                        class="subject-tab px-3 py-1 text-xs font-bold rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 transition-all">物理</button>
+                <button type="button" role="tab" data-subject="chemistry" aria-selected="false" onclick="switchBankSubject('chemistry')"
+                        class="subject-tab px-3 py-1 text-xs font-bold rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 transition-all">化学</button>
+            </div>
+
+            <!-- 只看错题：origin=mistake（来自错题工作台入库的题），与学科 Tab 可叠加 -->
+            <button type="button" id="btnMistakeOnly" onclick="toggleMistakeOnly()" aria-pressed="false"
+                    class="glass-btn flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs text-slate-600"
+                    title="只显示从错题工作台入库的题目">
+                <i class="fa-solid fa-book-medical text-[10px]"></i>
+                <span>只看错题</span>
+            </button>
+
             <!-- 搜索框 -->
             <div class="relative flex items-center">
                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -287,11 +305,12 @@
 
             <!-- 右侧操作按钮 -->
             <div class="ml-auto flex items-center space-x-2">
+                <span id="subjectImportHint" class="hidden text-[10px] text-amber-600 dark:text-amber-400 max-w-[200px] leading-tight text-right">导入试卷只对数学开放；物化请到错题工作台扫卷入册</span>
                 <button onclick="checkAndSwitch(() => startNewQuestion())" class="glass-btn-primary flex items-center space-x-1.5 px-4 py-2 rounded-xl font-medium text-xs">
                     <i class="fa-solid fa-plus text-[10px]"></i>
                     <span>录入单题</span>
                 </button>
-                <button onclick="openImportModal()" class="glass-btn flex items-center space-x-1.5 px-4 py-2 rounded-xl font-medium text-xs text-slate-600">
+                <button id="btnImportPaper" onclick="openImportModal()" class="glass-btn flex items-center space-x-1.5 px-4 py-2 rounded-xl font-medium text-xs text-slate-600">
                     <i class="fa-solid fa-file-import text-[10px]"></i>
                     <span>导入试卷</span>
                 </button>

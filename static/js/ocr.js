@@ -1036,6 +1036,8 @@
             const formData = new FormData();
             formData.append('content', content);
             formData.append('use_free_model', 'true');
+            // 学科决定喂给 AI 的目录树：物理挂教科版、化学挂人教版。
+            formData.append('subject', window.bankSubject || 'math');
             fetch('/api/ai/classify', { method: 'POST', body: formData })
                 .then(r => r.json())
                 .then(data => {

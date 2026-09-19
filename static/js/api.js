@@ -1320,7 +1320,9 @@
                     window.systemMetadata = meta; // Global export
                     populateMetadataDropdowns();
                     
-                    return fetch('/api/categories');
+                    // 学科决定取哪套目录树：数学挂 A/B/S/H，物理挂教科版，化学挂人教版。
+                    // 不带 subject 会退回数学树，物化的学段/章节下拉就全错。
+                    return fetch('/api/categories?subject=' + encodeURIComponent(window.bankSubject || 'math'));
                 })
                 .then(r => {
                     if (!r.ok) {
@@ -1898,7 +1900,7 @@
                 if (type === 'multi_choice') return '多选题';
                 if (type === 'fill_in_blank') return '填空题';
                 if (type === 'detailed_answer') return '解答题';
-                return '数学题';
+                return bankSubjectLabel() + '题';
             }
             const found = systemMetadata.question_types.find(t => t.value === type);
             return found ? found.label : type;

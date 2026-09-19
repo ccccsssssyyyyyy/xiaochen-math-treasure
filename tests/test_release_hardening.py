@@ -358,6 +358,7 @@ sys.modules["mathbank.database"] = database
 
 paths = types.ModuleType("mathbank.paths")
 paths.TEMPLATES_DIR = Path(".")
+paths.CURRICULUMS_DIR = Path(".")
 sys.modules["mathbank.paths"] = paths
 
 diagnostics = types.ModuleType("mathbank.latex_diagnostics")

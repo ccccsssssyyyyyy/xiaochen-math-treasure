@@ -6,6 +6,156 @@ let bankQuestionsLoadController = null;
 let bankQuestionsLoadSequence = 0;
 let bankQuestionsRetryTimer = null;
 
+// ---------------------------------------------------------------------------
+// 学科维度（数学 / 物理 / 化学）
+// 三科各自独立成库：题库工作台用顶部 Tab 切换，列表、筛选、录入表单全部跟着走。
+// 物化只做一套指定版本（物理＝教科版，化学＝人教版），所以这里只切树、不切版本。
+// ---------------------------------------------------------------------------
+const SUBJECT_TAB_CLASS_ACTIVE = 'subject-tab px-3 py-1 text-xs font-bold rounded-lg bg-white dark:bg-slate-800 text-brand-600 shadow-sm transition-all';
+const SUBJECT_TAB_CLASS_IDLE = 'subject-tab px-3 py-1 text-xs font-bold rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 transition-all';
+
+function currentBankSubject() {
+    return window.bankSubject || 'math';
+}
+
+/** 学科中文名。题库工作台里所有带学科的文案都走这里，不再写死「数学」。 */
+const BANK_SUBJECT_LABELS = { math: '数学', physics: '物理', chemistry: '化学' };
+
+function bankSubjectLabel(subject) {
+    return BANK_SUBJECT_LABELS[String(subject || currentBankSubject())] || '数学';
+}
+
+/**
+ * 录入面板标题。三科共用同一个面板，标题必须跟学科走 —— 否则切到物理后
+ * 抬头还写着「录入新数学题」。
+ * mode: 'new' 新建 | 'edit' 编辑已有题 | 'draft' 草稿暂存
+ */
+function setEditorTitle(mode) {
+    const node = document.getElementById('editorTitle');
+    if (!node) return;
+    const label = bankSubjectLabel();
+    if (mode === 'edit') node.textContent = '编辑' + label + '题';
+    else if (mode === 'draft') node.textContent = '编辑草稿 - 暂存中';
+    else node.textContent = '录入新' + label + '题';
+}
+
+/** 取学科对应的目录树；元数据尚未到达时退回空树而不是数学树（宁可空也不要串科）。 */
+function subjectTreeFor(subject) {
+    const trees = (window.systemMetadata && window.systemMetadata.subject_curriculum) || {};
+    return trees[subject] || {};
+}
+
+/** Tab 高亮 + 导入试卷门禁。切换到物化时禁用导入并给出替代路径提示。 */
+function syncBankSubjectUI() {
+    const subject = currentBankSubject();
+    document.querySelectorAll('#subjectTabs .subject-tab').forEach(function (btn) {
+        const isActive = btn.dataset.subject === subject;
+        btn.className = isActive ? SUBJECT_TAB_CLASS_ACTIVE : SUBJECT_TAB_CLASS_IDLE;
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+
+    const importBtn = document.getElementById('btnImportPaper');
+    const hint = document.getElementById('subjectImportHint');
+    const mathOnlyViolated = subject !== 'math';
+    if (importBtn) {
+        importBtn.disabled = mathOnlyViolated;
+        importBtn.classList.toggle('opacity-40', mathOnlyViolated);
+        importBtn.classList.toggle('cursor-not-allowed', mathOnlyViolated);
+        importBtn.title = mathOnlyViolated
+            ? '导入试卷只对数学开放：物化材料通常需要先切块、逐题挑错，请到错题工作台处理'
+            : '上传 PDF / DOCX / 图片，AI 拆解成题';
+    }
+    if (hint) hint.classList.toggle('hidden', !mathOnlyViolated);
+}
+
+/** 题库工作台切学科。 */
+function switchBankSubject(subject) {
+    subject = String(subject || 'math');
+    if (subject === currentBankSubject()) return;
+    window.bankSubject = subject;
+
+    // 目录树必须整棵换掉：三科是两套独立教材树，复用数学树会让物化题的章节筛选
+    // 与录入表单全部对不上教材。
+    categoryTree = subjectTreeFor(subject);
+    window.categoryTree = categoryTree;
+
+    currentBankPage = 1;
+    currentDraftPage = 1;
+    syncBankSubjectUI();
+    populateCategoryDropdowns();
+    populateFilterDropdowns();
+
+    // 正在编辑的题属于旧学科，留着会让「学段/章节」下拉与题目跨科错配。
+    if (typeof window.checkAndSwitch === 'function') {
+        window.checkAndSwitch(function () {
+            if (typeof window.startNewQuestion === 'function') window.startNewQuestion();
+        });
+    } else if (typeof window.startNewQuestion === 'function') {
+        window.startNewQuestion();
+    }
+
+    if (typeof activeSidebarTab !== 'undefined' && activeSidebarTab === 'bank') {
+        loadQuestions();
+    } else {
+        loadDrafts();
+    }
+    // 重新拉该学科的元数据与目录树（含库内自定义分类）。
+    if (typeof window.loadCategories === 'function') window.loadCategories();
+}
+window.switchBankSubject = switchBankSubject;
+window.syncBankSubjectUI = syncBankSubjectUI;
+window.bankSubjectLabel = bankSubjectLabel;
+window.setEditorTitle = setEditorTitle;
+
+// ---------------------------------------------------------------------------
+// 「只看错题」：origin=mistake，即从错题工作台入库的题。
+// 与学科 Tab 正交（可叠加）—— 数学库里既有自己录的题、也有错题工作台入库的题，
+// 单靠学科 Tab 分不出「这道题是不是错题」。
+// ---------------------------------------------------------------------------
+const MISTAKE_ONLY_CLASS_ON = 'glass-btn flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 border border-rose-300/70 dark:bg-rose-900/30 dark:text-rose-200 dark:border-rose-700/50';
+const MISTAKE_ONLY_CLASS_OFF = 'glass-btn flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs text-slate-600';
+
+const SUBJECT_BADGE = {
+    math: { label: '数', cls: 'bg-sky-50 text-sky-600 border-sky-200/70' },
+    physics: { label: '物', cls: 'bg-violet-50 text-violet-600 border-violet-200/70' },
+    chemistry: { label: '化', cls: 'bg-teal-50 text-teal-600 border-teal-200/70' }
+};
+
+function isMistakeOnly() {
+    return window.bankMistakeOnly === true;
+}
+
+/** 同步「只看错题」按钮态。放在 loadQuestions 开头调用，保证样式与内存状态不脱钩。 */
+function syncMistakeOnlyUI() {
+    const btn = document.getElementById('btnMistakeOnly');
+    if (!btn) return;
+    const on = isMistakeOnly();
+    btn.className = on ? MISTAKE_ONLY_CLASS_ON : MISTAKE_ONLY_CLASS_OFF;
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+function toggleMistakeOnly() {
+    window.bankMistakeOnly = !isMistakeOnly();
+    currentBankPage = 1;
+    syncMistakeOnlyUI();
+    loadQuestions();
+}
+
+/** 卡片左上角角标：学科恒显，错题来源额外加一枚。 */
+function questionCardBadges(item) {
+    const safe = window.MathBankSafe;
+    const subject = String((item && item.subject) || 'math');
+    const meta = SUBJECT_BADGE[subject] || SUBJECT_BADGE.math;
+    let html = '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded border whitespace-nowrap ' + meta.cls + '" title="学科">' + meta.label + '</span>';
+    if (String((item && item.origin) || 'bank') === 'mistake') {
+        html += '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded border whitespace-nowrap bg-rose-50 text-rose-600 border-rose-200/70 flex items-center space-x-0.5" title="来自错题工作台"><i class="fa-solid fa-book-medical text-[7px]"></i><span>错题</span></span>';
+    }
+    return html;
+}
+window.toggleMistakeOnly = toggleMistakeOnly;
+window.syncMistakeOnlyUI = syncMistakeOnlyUI;
+window.questionCardBadges = questionCardBadges;
+
         function initResizers() {
             const sidebar = document.getElementById('sidebarSection');
             const editor = document.getElementById('editorSection');
@@ -518,7 +668,7 @@ let bankQuestionsRetryTimer = null;
             }
             renderEditorPaperMeta();
             
-            document.getElementById('editorTitle').textContent = `编辑草稿 - 暂存中`;
+            setEditorTitle('draft');
             
             // Backup draft state
             backupEditorState(null, draft.id);
@@ -701,20 +851,8 @@ let bankQuestionsRetryTimer = null;
                     });
                 }
                 
-                // Render KaTeX inline for this card
-                try {
-                    renderMathInElement(itemCard.querySelector('.card-formula-render'), {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: false},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: false}
-                        ],
-                        throwOnError: false
-                    });
-                } catch(e) {
-                    console.error('KaTeX sidebar rendering error: ', e);
-                }
+                // 左侧卡片是窄栏：$$ 与 \[ \] 也按行内排
+                window.MathRender.render(itemCard.querySelector('.card-formula-render'), 'inline');
                 
                 itemCard.onclick = () => {
                     checkAndSwitch(() => selectDraft(item));
@@ -1305,6 +1443,7 @@ let bankQuestionsRetryTimer = null;
 
         // Load and List Saved Questions
         function loadQuestions(retryCount = 0) {
+            syncMistakeOnlyUI();
             const loadSequence = ++bankQuestionsLoadSequence;
             if (bankQuestionsRetryTimer) {
                 clearTimeout(bankQuestionsRetryTimer);
@@ -1332,6 +1471,10 @@ let bankQuestionsRetryTimer = null;
             const selectedMethods = getSelectedTags('solve');
 
             const params = new URLSearchParams();
+            // 学科必带：三个 Tab 各自只请求自己学科的题，服务端据此过滤。
+            params.append('subject', currentBankSubject());
+            // 「只看错题」由服务端过滤：分页也在服务端，前端筛会把 total 算错。
+            if (isMistakeOnly()) params.append('origin', 'mistake');
             if (q) params.append('q', q);
             if (qtype) params.append('qtype', qtype);
             if (difficulty) params.append('difficulty', difficulty);
@@ -1437,7 +1580,10 @@ let bankQuestionsRetryTimer = null;
 
                         itemCard.innerHTML = `
                             <div class="flex items-start justify-between">
-                                <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0 mt-0.5">${window.MathBankSafe.escapeText(typeText)}</span>
+                                <span class="flex items-center gap-1 min-w-0 shrink-0 mt-0.5">
+                                    <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-500 whitespace-nowrap">${window.MathBankSafe.escapeText(typeText)}</span>
+                                    ${questionCardBadges(item)}
+                                </span>
                                 <div class="flex items-center gap-1.5 justify-end flex-wrap flex-1 ml-2">
                                     ${tagsHtml}
                                     ${difficultyBadge}
@@ -1470,20 +1616,8 @@ let bankQuestionsRetryTimer = null;
                             </div>
                         `;
 
-                        // Render KaTeX inline for this card
-                        try {
-                            renderMathInElement(itemCard.querySelector('.card-formula-render'), {
-                                delimiters: [
-                                    {left: '$$', right: '$$', display: false},
-                                    {left: '$', right: '$', display: false},
-                                    {left: '\\(', right: '\\)', display: false},
-                                    {left: '\\[', right: '\\]', display: false}
-                                ],
-                                throwOnError: false
-                            });
-                        } catch(e) {
-                            console.error('KaTeX sidebar rendering error: ', e);
-                        }
+                        // 左侧卡片是窄栏：$$ 与 \[ \] 也按行内排
+                        window.MathRender.render(itemCard.querySelector('.card-formula-render'), 'inline');
 
                         itemCard.onclick = () => {
                             checkAndSwitch(() => selectQuestion(item));
@@ -1852,24 +1986,8 @@ let bankQuestionsRetryTimer = null;
                 
                 // Trigger KaTeX render
                 try {
-                    renderMathInElement(previewContainer, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
-                    renderMathInElement(paperContainer, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
+                    window.MathRender.render(previewContainer, 'display');
+                    window.MathRender.render(paperContainer, 'display');
                     adaptChoicesGridLayout(previewContainer);
                     adaptChoicesGridLayout(paperContainer);
                 } catch(e) {
@@ -1896,28 +2014,8 @@ let bankQuestionsRetryTimer = null;
                 previewContainer.innerHTML = html;
                 paperContainer.innerHTML = html;
                 
-                try {
-                    renderMathInElement(previewContainer, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
-                    renderMathInElement(paperContainer, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
-                } catch(e) {
-                    console.error(e);
-                }
+                window.MathRender.render(previewContainer, 'display');
+                window.MathRender.render(paperContainer, 'display');
             };
             
             // Attach inputs
@@ -1958,20 +2056,8 @@ let bankQuestionsRetryTimer = null;
                 let html = parseMarkdownWithMath(text);
                 if (content) content.innerHTML = html;
                 
-                try {
-                    if (content) {
-                        renderMathInElement(content, {
-                            delimiters: [
-                                {left: '$$', right: '$$', display: true},
-                                {left: '$', right: '$', display: false},
-                                {left: '\\(', right: '\\)', display: false},
-                                {left: '\\[', right: '\\]', display: true}
-                            ],
-                            throwOnError: false
-                        });
-                    }
-                } catch(e) {
-                    console.error('KaTeX review rendering error: ', e);
+                if (content) {
+                    window.MathRender.render(content, 'display');
                 }
             };
             editReview.addEventListener('input', debounce(updateReviewPreview, 250));
@@ -2822,23 +2908,6 @@ let bankQuestionsRetryTimer = null;
         function switchPreviewTab() { /* no-op: 右侧预览始终显示 */ }
         window.switchPreviewTab = switchPreviewTab;
 
-        // 安全的 KaTeX 渲染（带降级）
-        function safeRenderMath(el) {
-            if (!el) return;
-            try {
-                if (typeof renderMathInElement === 'function') {
-                    renderMathInElement(el, {
-                        delimiters: [
-                            { left: '$$', right: '$$', display: true },
-                            { left: '$', right: '$', display: false },
-                            { left: '\\(', right: '\\)', display: false },
-                            { left: '\\[', right: '\\]', display: true }
-                        ],
-                        throwOnError: false
-                    });
-                }
-            } catch (e) { /* 忽略渲染异常 */ }
-        }
         function escapeHtml(s) {
             return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }

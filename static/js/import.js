@@ -111,7 +111,7 @@
                 window.invalidatePendingQuestionDetailLoad();
             }
             EditorState.reset();
-            document.getElementById('editorTitle').textContent = '录入新数学题';
+            setEditorTitle('new');
             
             document.getElementById('editContent').value = '';
             document.getElementById('editSource').value = '';
@@ -194,7 +194,7 @@
                 }
                 cancelAllOcr(); // Cancel any active OCR requests!
                 EditorState.reset();
-                document.getElementById('editorTitle').textContent = '录入新数学题';
+                setEditorTitle('new');
                 
                 document.getElementById('editContent').value = '';
                 document.getElementById('editSource').value = '';
@@ -250,7 +250,7 @@
                 window.invalidatePendingQuestionDetailLoad();
             }
             EditorState.reset();
-            document.getElementById('editorTitle').textContent = '录入新数学题';
+            setEditorTitle('new');
 
             window.lastOcrOriginalImagePath = '';
             window.contentLastCompiledTikzPath = '';
@@ -330,7 +330,7 @@
             // 新建后自动继承「当前卷名（默认来源）」
             if (window.applyInheritanceToSource) window.applyInheritanceToSource();
 
-            showToast('开始录入新数学题！');
+            showToast('开始录入新' + bankSubjectLabel() + '题！');
 
             // Reset the original state directly from the DOM!
             resetEditTagInputs();
@@ -609,7 +609,7 @@
                         throw new Error('题目详情与请求 ID 不匹配');
                     }
                     EditorState.useQuestion(fullItem);
-                    document.getElementById('editorTitle').textContent = '编辑数学题';
+                    setEditorTitle('edit');
 
                     // Clear previous OCR state only after the question switch commits.
                     clearContentOcrPreview();
@@ -1008,7 +1008,7 @@
                             // input typed after the POST response arrived.
                             EditorState.useQuestion(data.question);
                             backupEditorState(data.question.id, null, requestBackupSnapshot);
-                            document.getElementById('editorTitle').textContent = '编辑数学题';
+                            setEditorTitle('edit');
                             if (!requestStillVisible) {
                                 showToast('题目已保存；保存后继续输入的内容仍待再次保存', 'info');
                             }
