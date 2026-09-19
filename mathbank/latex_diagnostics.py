@@ -24,6 +24,28 @@ _COMMAND_PACKAGES = {
 }
 
 
+# 「xelatex 未安装」的真实信号：我们自己的预检查中文案，或操作系统层面的
+# 找不到可执行文件报错。TeX 的「File `xxx' not found.」（缺图/缺宏包）不在此列，
+# 否则会把内容错误误诊成环境问题。
+_COMPILER_MISSING_RE = re.compile(
+    r"(?:command not found|executable file not found|is not recognized)[^\n]{0,60}xelatex"
+    r"|xelatex['\"]?[^\n]{0,30}(?:command not found|not recognized|no such file)"
+    r"|no such file or directory['\"]?[:：]?\s*['\"]?xelatex",
+    re.IGNORECASE,
+)
+
+
+def is_xelatex_missing(log_text: str) -> bool:
+    """Only report a missing compiler on genuine signals, never on missing assets."""
+
+    plain = str(log_text or "")
+    if "xelatex" not in plain.lower():
+        return False
+    if "未检测到" in plain:
+        return True
+    return bool(_COMPILER_MISSING_RE.search(plain))
+
+
 def _first_error_block(log_text: str) -> tuple[str, int | None, str]:
     log = str(log_text or "")
 
@@ -113,7 +135,7 @@ def build_local_latex_diagnostic(log_text: str, tex_content: str) -> dict[str, A
         location = f"生成的 LaTeX 第 {line_number} 行附近"
 
     lower_log = str(log_text or "").lower()
-    if "xelatex" in lower_log and ("未检测到" in str(log_text) or "not found" in lower_log or "no such file" in lower_log):
+    if is_xelatex_missing(log_text):
         summary = "系统未安装 LaTeX 编译器（xelatex）"
         cause = "当前运行环境没有检测到 xelatex，因此无法编译试卷 PDF。这是环境问题而非试卷内容错误。"
         fixes = [
@@ -145,9 +167,16 @@ def build_local_latex_diagnostic(log_text: str, tex_content: str) -> dict[str, A
                 "确认提供该命令的宏包已经随项目离线内置并在模板中加载。",
             ]
     elif "file" in lower_log and "not found" in lower_log:
-        summary = "PDF 编译时缺少所需的文件或宏包"
+        missing_match = re.search(r"file\s*[`'\u201c\u2018]\s*([^`'\u201d\u2019\n]+?)\s*[`'\u201d\u2019]?\s*not found", str(log_text), re.IGNORECASE)
+        missing_name = missing_match.group(1).strip() if missing_match else ""
+        summary = "PDF 编译时缺少所需的文件或宏包" + (f"（{missing_name}）" if missing_name else "")
         cause = "公式、图片或模板引用了当前编译环境中不存在的资源。"
-        fixes = ["检查报错行引用的文件名。", "确认所需宏包或图片已经随项目离线内置。"]
+        fixes = [
+            (f"检查「{missing_name}」对应的插图是否仍在 static/uploads 目录中。" if missing_name
+             else "检查报错行引用的文件名。"),
+            "若题目配图刚被删除或移动，请在题目里重新插入插图后重试。",
+            "确认所需宏包已经随项目离线内置。",
+        ]
     elif "missing {" in lower_log or "missing }" in lower_log:
         summary = "公式中的花括号或命令参数不完整"
         cause = "某个 LaTeX 命令缺少必需的 `{...}` 参数，编译器无法确定公式边界。"

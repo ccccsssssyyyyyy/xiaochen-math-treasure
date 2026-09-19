@@ -5,11 +5,12 @@
     容易被误点一下冲掉，也无法微调大小。
 
 约定（用户拍板）：
-    1. 四角手柄缩放（nw/ne/sw/se）+ 框内部拖拽平移整框；
+    1. 四角缩放（nw/ne/sw/se，**按坐标命中，页面上不画任何手柄元素**）+ 框内部拖拽平移整框；
     2. 已完成的选区被「锁定」：在框外 mousedown **不重画、不清除**，
        必须先点「清除框选」或按 ESC 才能重新画框；
     3. 缩放「不翻越」：拖过对角锚点时框停在最小尺寸，绝不翻转到另一侧；
-    4. 不显示实时尺寸标签。
+    4. 不显示实时尺寸标签；
+    5. 选框只用线条表示，不画四角圆点（2026-09-15 追加）。
 
 本测试分两层：
     1. 源码契约（无需 node runtime）——锁定 DOM 手柄与三态分发语义；
@@ -33,26 +34,42 @@ def _read(path: Path) -> str:
 
 
 def _overlay_markup() -> str:
-    """抠出 index.html 里 pdfCropOverlayRect 整块（含四角手柄）。"""
+    """抠出 index.html 里 pdfCropOverlayRect 整块（现已自闭合，无子元素）。"""
     html = _read(INDEX_HTML_PATH)
     start = html.find('id="pdfCropOverlayRect"')
     assert start > 0, "未找到 pdfCropOverlayRect"
-    end = html.find("</div>", html.find('data-handle="se"'))
-    return html[start:end]
+    end = html.find("</div>", start)
+    assert end > start, "pdfCropOverlayRect 结构异常"
+    return html[start:end + len("</div>")]
 
 
-def test_four_corner_handles_declared() -> None:
-    """四角手柄必须存在且带方向标识，否则 JS 无法判定缩放方向。"""
+def test_overlay_draws_no_corner_handles() -> None:
+    """选框不画四角圆点（2026-09-15 用户要求：圆点太大影响观感，只要线条框）。
+
+    同时卡住「不许用透明手柄糊弄」：DOM 里一个手柄元素都不许留，
+    缩放必须走 hitCropHandle 的纯坐标判定。
+    """
     markup = _overlay_markup()
     for handle in ("nw", "ne", "sw", "se"):
-        assert f'data-handle="{handle}"' in markup, f"缺少 {handle} 手柄"
+        assert f'data-handle="{handle}"' not in markup, f"{handle} 手柄元素应已删除"
+    assert "rounded-full" not in markup, "选框内不应再有任何圆点样式"
+    assert "pointer-events-auto" not in markup, "不应留下看不见但可点的透明手柄"
 
 
-def test_handles_receive_pointer_events() -> None:
-    """父级 overlay 是 pointer-events-none，手柄必须单独开 auto 才能被点到。"""
+def test_overlay_keeps_line_and_fill() -> None:
+    """线条框 + 框内淡色填充保留；overlay 仍 pointer-events-none 以不挡图片事件。"""
     markup = _overlay_markup()
+    assert "border-brand-500" in markup, "选框需保留线条边框"
+    assert "bg-brand-500/25" in markup, "用户要求保留框内淡色填充"
     assert "pointer-events-none" in markup, "overlay 需保持 pointer-events-none 以不挡图片事件"
-    assert markup.count("pointer-events-auto") >= 4, "四个手柄都需 pointer-events-auto"
+
+
+def test_resize_survives_without_handle_elements() -> None:
+    """圆点删掉后缩放不能跟着丢：坐标命中是唯一入口，且不再读 DOM 手柄。"""
+    src = _read(IMPORT_JS_PATH)
+    assert "function hitCropHandle(" in src, "缺少角坐标命中函数"
+    assert "e.target.dataset.handle" not in src, "DOM 手柄已删，不应再读 dataset.handle"
+    assert "hitCropHandle(x, y)" in src, "mousedown 必须走坐标命中"
 
 
 def test_existing_selection_is_locked_against_redraw() -> None:

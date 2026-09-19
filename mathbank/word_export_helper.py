@@ -386,6 +386,38 @@ def _set_run_font(
     _set_rfonts(r_pr, cjk_font, latin_font)
 
 
+def _is_cjk_char(ch: str) -> bool:
+    return (
+        "\u3400" <= ch <= "\u9fff"      # 扩展 A + 基本区
+        or "\uf900" <= ch <= "\ufaff"   # 兼容表意文字
+        or "\uff01" <= ch <= "\uff60"   # 全角标点 / 全角字母
+    )
+
+
+def _spread_subject_line(text: str) -> str:
+    """模仿 exam-zh ``\\subject`` 的字距展开，让 Word 抬头和 PDF 看起来一致。
+
+    exam-zh 会用 ``\\hbox_set`` 量出学科串的自然宽度再横向撑到约两倍，两人字的单科卷
+    因此印成「数  学」。Word 版照同一规则补空格 —— 改动前写死的「数  学」正好是这个
+    结果，所以单科数学卷的 Word 抬头外观不变；混科卷手填「数理综合」时两种导出也一致。
+    已有空格的位置不再加，避免用户手打的空格被撑成一大片。
+    """
+
+    chars = list(text or "")
+    if len(chars) < 2:
+        return text or ""
+    out = [chars[0]]
+    for prev, cur in zip(chars, chars[1:]):
+        if prev.isspace() or cur.isspace():
+            gap = ""
+        elif _is_cjk_char(prev) and _is_cjk_char(cur):
+            gap = "  "
+        else:
+            gap = " "
+        out.append(gap + cur)
+    return "".join(out)
+
+
 def _clean_plain_text(text: str) -> str:
     value = text or ""
     value = IMAGE_PATTERN.sub("", value)
@@ -1419,6 +1451,23 @@ def _split_table_cells(row: str) -> list[str]:
     return cells
 
 
+def _normalize_upload_rel(value: str) -> str:
+    """把 markdown/存储的插图 URL 归一成相对 uploads 根的路径，保留子目录。
+
+    修 Word 导出丢图：旧实现取 Path(value).name 把子目录信息整个扔掉，
+    错题裁剪管线存的 mistakes/<id>/figures/x.png 在 uploads 根下找不到 → 静默丢图。
+    """
+    rel = str(value or "").strip().replace("\\", "/").lstrip("/")
+    for prefix in ("static/uploads/", "uploads/"):
+        if rel.startswith(prefix):
+            rel = rel[len(prefix):]
+            break
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return ""
+    return "/".join(parts)
+
+
 def _resolve_image_paths(question: dict, uploads_dir: str | Path | None) -> tuple[list[Path], list[Path]]:
     """拆分题干图与解析图，返回 (题干图, 解析图)。
 
@@ -1429,31 +1478,50 @@ def _resolve_image_paths(question: dict, uploads_dir: str | Path | None) -> tupl
     """
     root = Path(uploads_dir) if uploads_dir else None
 
-    def _names(field: str) -> list[str]:
-        return [Path(value).name for value in IMAGE_PATTERN.findall(question.get(field, "") or "")]
+    def _rel_names(field: str) -> list[str]:
+        names: list[str] = []
+        for value in IMAGE_PATTERN.findall(question.get(field, "") or ""):
+            rel = _normalize_upload_rel(value)
+            if rel:
+                names.append(rel)
+        return names
 
-    content_names = _names("content")
-    answer_names = _names("answer_markdown")
+    content_names = _rel_names("content")
+    answer_names = _rel_names("answer_markdown")
     stored = question.get("image_paths", [])
-    stored_names = [Path(str(item)).name for item in stored] if isinstance(stored, list) else []
+    stored_names = [_normalize_upload_rel(str(item)) for item in stored] if isinstance(stored, list) else []
+    stored_names = [name for name in stored_names if name]
 
     referenced = set(content_names) | set(answer_names)
     stem_names: list[str] = list(content_names)
     # 仅存于 image_paths、未被任一 markdown 引用的图片，保守归题干（兼容旧数据）
     for name in stored_names:
-        if name and name not in referenced and name not in stem_names:
+        if name not in referenced and name not in stem_names:
             stem_names.append(name)
 
     def _to_paths(names: list[str]) -> list[Path]:
         paths: list[Path] = []
         seen: set[str] = set()
         for name in names:
-            if not name or name in seen:
+            if not name or name in seen or not root:
                 continue
             seen.add(name)
-            candidate = root / name if root else None
-            if candidate and candidate.exists():
-                paths.append(candidate)
+            resolved: Path | None = None
+            base = Path(name).name
+            candidates = [root / name]
+            if base != name:
+                # 旧数据兜底：图片可能直接躺在 uploads 根目录
+                candidates.append(root / base)
+            for candidate in candidates:
+                if candidate.exists():
+                    resolved = candidate
+                    break
+            if resolved is None and "/" in name:
+                # 最后兜底：按文件名在 uploads 下搜（兼容子目录被移动/改名）
+                matches = sorted(p for p in root.rglob(base) if p.is_file())
+                resolved = matches[0] if matches else None
+            if resolved is not None:
+                paths.append(resolved)
         return paths
 
     return _to_paths(stem_names), _to_paths(answer_names)

@@ -96,6 +96,7 @@ from mathbank.tex_helper import (
 )
 from mathbank.latex_diagnostics import (
     build_local_latex_diagnostic,
+    is_xelatex_missing,
     merge_ai_latex_diagnostic,
 )
 from mathbank.ai_json import parse_ai_json, detect_truncation_signals
@@ -662,12 +663,20 @@ def read_index():
             html_content = f.read()
         
         # Inject dynamic cache-busting version parameter based on file mtime
-        js_files = ["api.js", "editor.js", "ocr.js", "import.js", "paper.js"]
+        # 新增 JS 文件时必须同步登记，否则它的 ?v= 永远停在源码里的占位值，
+        # 浏览器会一直用缓存，后续修复推不到用户手里（有测试钉住这一点）。
+        js_files = ["math-render.js", "api.js", "editor.js", "ocr.js", "import.js", "paper.js", "mistake.js", "onboarding.js", "backup.js"]
         for js in js_files:
             js_path = str(STATIC_JS_DIR / js)
             mtime = int(os.path.getmtime(js_path)) if os.path.exists(js_path) else 0
-            # Replace template version parameter
-            html_content = html_content.replace(f"/static/js/{js}?v=1.0.1", f"/static/js/{js}?v={mtime}")
+            # Replace whatever placeholder version the tag carries (v=1.0.0 / v=1.0.1 / v=1.0.2 ...).
+            # 原先写死匹配 "?v=1.0.1"，导致写成其它版本号的标签（api.js / onboarding.js）
+            # 永远拿不到 mtime，改了 JS 浏览器仍在用缓存。
+            html_content = re.sub(
+                r"/static/js/" + re.escape(js) + r"\?v=[^\"']*",
+                f"/static/js/{js}?v={mtime}",
+                html_content,
+            )
             # Also handle plain scripts references if they exist
             html_content = html_content.replace(f'src="/static/js/{js}"', f'src="/static/js/{js}?v={mtime}"')
             
@@ -7879,10 +7888,7 @@ def export_paper_pdf(payload: dict, db: Session = Depends(get_db)):
         else:
             # If the compiler is simply missing, return a clean, AI-free
             # diagnostic immediately instead of risking a slow/failing model call.
-            if "xelatex" in (log_or_err or "").lower() and (
-                "未检测到" in (log_or_err or "") or "not found" in (log_or_err or "").lower()
-                or "no such file" in (log_or_err or "").lower()
-            ):
+            if is_xelatex_missing(log_or_err or ""):
                 diagnostic = build_local_latex_diagnostic(log_or_err or "", tex_content)
             else:
                 diagnostic = explain_latex_compile_error(log_or_err, tex_content)

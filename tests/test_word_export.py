@@ -435,3 +435,36 @@ def test_create_word_bundle_zip():
         assert archive.read("高一数学月考.docx") == main_bytes
         assert archive.read("高一数学月考_含答案与解析.docx") == ans_bytes
 
+
+
+def test_resolve_image_paths_keeps_subdir_uploads(tmp_path):
+    """回归：错题裁剪管线存进子目录的插图必须能进 Word 导出（旧版按纯文件名找根目录 → 丢图）。"""
+    from mathbank.word_export_helper import _resolve_image_paths
+
+    fig_dir = tmp_path / "mistakes" / "9" / "figures"
+    fig_dir.mkdir(parents=True)
+    fig = fig_dir / "crop_vt.png"
+    fig.write_bytes(b"png")
+    root_img = tmp_path / "legacy.png"
+    root_img.write_bytes(b"png")
+
+    question = {
+        "content": "题面\n\n![插图](/static/uploads/mistakes/9/figures/crop_vt.png)",
+        "answer_markdown": "",
+        "image_paths": ["/static/uploads/legacy.png"],
+    }
+    stem_images, answer_images = _resolve_image_paths(question, tmp_path)
+    assert [p.name for p in stem_images] == ["crop_vt.png", "legacy.png"]
+    assert answer_images == []
+
+
+def test_resolve_image_paths_rejects_traversal(tmp_path):
+    from mathbank.word_export_helper import _resolve_image_paths
+
+    question = {
+        "content": "![x](/static/uploads/../../secrets/a.png)",
+        "answer_markdown": "",
+        "image_paths": [],
+    }
+    stem_images, _ = _resolve_image_paths(question, tmp_path)
+    assert stem_images == []

@@ -1213,7 +1213,7 @@
         let cropMoveOffsetX = 0;       // move 模式下鼠标相对框左上角的偏移
         let cropMoveOffsetY = 0;
         const CROP_MIN_SIZE = 15;      // 最小框选边长，与 mouseup 的可用性阈值一致
-        const CROP_HANDLE_HIT = 10;    // 手柄命中半径(px)，用于 dataset 不可用时的坐标兜底
+        const CROP_HANDLE_HIT = 10;    // 角命中半径(px)：圆点取消后，这是缩放的唯一判定依据
 
         // 纯函数：按「被拖动的角 + 固定不动的对角锚点」重算选区矩形。
         //   handle        'nw'|'ne'|'sw'|'se'，鼠标正拖动的那个角
@@ -1354,6 +1354,20 @@
             return false;
         }
 
+        /**
+         * 在 pos 处插入一段 markdown 图片，并在需要时补足空行（图片别跟正文挤在同一行）。
+         * pos 为 null 或越界时落到末尾 —— 用户从没把光标放进这个框时就是这个行为。
+         */
+        function insertMarkdownImageAt(source, pos, markdown) {
+            const text = String(source || '');
+            const at = (typeof pos === 'number' && pos >= 0) ? Math.min(pos, text.length) : text.length;
+            const before = text.slice(0, at);
+            const after = text.slice(at);
+            const lead = /(^|\n)\s*$/.test(before) ? '' : '\n\n';
+            const tail = /^\s*(\n|$)/.test(after) ? '' : '\n\n';
+            return { text: before + lead + markdown + tail + after, caret: (before + lead + markdown).length };
+        }
+
         function openPdfCropModalForQuestion(questionIndex) {
             const entry = getCropDocumentForQuestion(questionIndex);
             if (!entry) {
@@ -1364,6 +1378,16 @@
             window.pdfPageImages = entry.pageImages;
             if (entry.taskId) window.currentPdfTaskId = entry.taskId;
             window.activeCropQuestionIndex = questionIndex;
+            // 插图要插到光标处，而不是文字尾部。点按钮这一刻 textarea 已经失焦，但
+            // selectionStart 会留着，所以这里能读到用户真正的光标位置。必须是同一张卡片上
+            // 的编辑框 —— 在 A 卡的框里放光标、却点 B 卡的截图按钮时，那个位置毫无意义。
+            window.cropInsertCursor = null;
+            const cursorCard = document.getElementById(`parsed-card-${questionIndex}`);
+            const cursorArea = window.lastCropTextarea;
+            if (cursorCard && cursorArea && cursorCard.contains(cursorArea)) {
+                const caret = cursorArea.selectionStart;
+                window.cropInsertCursor = (typeof caret === 'number' && caret >= 0) ? caret : null;
+            }
             zoomFactor = 1.0;
             baseWidth = 0;
             baseHeight = 0;
@@ -1558,8 +1582,8 @@
                 showToast('页面图加载失败，请重试', 'error');
             };
             
-            // 命中测试：坐标落在某个角手柄的方形范围内则返回 'nw'|'ne'|'sw'|'se'。
-            // 仅作为 data-handle 不可用时的兜底（例如手柄被 pointer-events 屏蔽）。
+            // 命中测试：坐标落在某个角的方形范围内则返回 'nw'|'ne'|'sw'|'se'。
+            // 这是缩放的唯一入口 —— 页面图上不画任何手柄元素（2026-09-15 用户要求），只靠坐标判定。
             function hitCropHandle(x, y) {
                 if (rectWidth <= 0 || rectHeight <= 0) return null;
                 const corners = {
@@ -1587,7 +1611,7 @@
             // Bind drawing select listeners
             //
             // 三态分发（顺序敏感）：
-            //   1) 已有框 + 点在某角手柄     -> resize（拖动该角，对角锚定，不翻越）
+            //   1) 已有框 + 点在某角 10px 内 -> resize（拖动该角，对角锚定，不翻越）
             //   2) 已有框 + 点在框内部       -> move（整框平移）
             //   3) 已有框 + 点在框外部       -> 忽略：不重画也不清除，框被"锁定"
             //   4) 无框                      -> draw（画新框）
@@ -1601,10 +1625,9 @@
                 const y = e.clientY - rect.top;
 
                 const hasSelection = rectWidth > 0 && rectHeight > 0;
-                // 优先取手柄自身的 data-handle（最可靠），取不到再退回坐标命中
-                let handle = null;
-                if (e.target && e.target.dataset) handle = e.target.dataset.handle || null;
-                if (!handle) handle = hitCropHandle(x, y);
+                // 四角圆点已取消（2026-09-15 用户要求），缩放只靠坐标命中角，
+                // DOM 里没有任何 data-handle 元素可取。
+                const handle = hitCropHandle(x, y);
 
                 if (hasSelection && handle) {
                     cropDragMode = 'resize';
@@ -1639,11 +1662,16 @@
                 const rect = activeContainer.getBoundingClientRect();
 
                 if (!isDrawing) {
-                    // 悬停时光标提示：手柄由自身 CSS cursor 负责（子元素优先），
-                    // 这里只把「框内部」提示成可拖动，否则会一直显示 crosshair。
+                    // 悬停时光标提示：圆点取消后，光标是「拖到角上能缩放」的唯一提示。
                     const hoverX = e.clientX - rect.left;
                     const hoverY = e.clientY - rect.top;
-                    activeContainer.style.cursor = isInsideCropRect(hoverX, hoverY) ? 'move' : 'crosshair';
+                    const hoverHandle = hitCropHandle(hoverX, hoverY);
+                    if (hoverHandle) {
+                        activeContainer.style.cursor =
+                            (hoverHandle === 'nw' || hoverHandle === 'se') ? 'nwse-resize' : 'nesw-resize';
+                    } else {
+                        activeContainer.style.cursor = isInsideCropRect(hoverX, hoverY) ? 'move' : 'crosshair';
+                    }
                     return;
                 }
 
@@ -1795,21 +1823,30 @@
                     return runOcrOnCroppedImage(croppedUrl, qIdx);
                 }
 
-                // 插图模式：把裁剪图作为插图追加到「焦点所在」字段（题干/解析）
+                // 插图模式：把裁剪图插到「焦点所在」字段的**光标处**（题干/解析）。
+                // 2026-09-15 需求：不再统一追加到文字尾部 —— 插在哪儿由用户的光标决定。
                 const card = document.getElementById(`parsed-card-${qIdx}`);
                 const target = window.cropInsertTarget === 'answer' ? 'answer' : 'content';
                 const selector = target === 'answer' ? '.card-answer-textarea' : '.card-content-textarea';
                 if (card) {
                     const textarea = card.querySelector(selector);
                     if (textarea) {
-                        textarea.value = textarea.value.trim() + `\n\n![插图](${croppedUrl})\n\n`;
+                        const inserted = insertMarkdownImageAt(
+                            textarea.value,
+                            window.cropInsertCursor,
+                            `![插图](${croppedUrl})`
+                        );
+                        textarea.value = inserted.text;
                         textarea.dispatchEvent(new Event('input'));
+                        // 光标停在插图后面：连着截第二张时，落点自然接在上一张之后。
+                        textarea.selectionStart = inserted.caret;
+                        textarea.selectionEnd = inserted.caret;
                     }
                 }
 
                 showToast(target === 'answer'
-                    ? "裁剪成功！插图已追加到解析。"
-                    : "裁剪成功！插图已追加到题干。");
+                    ? "裁剪成功！插图已插到解析的光标处。"
+                    : "裁剪成功！插图已插到题干的光标处。");
                 closePdfCropModal();
                 return null;
             })
@@ -1949,6 +1986,9 @@
         // 不能读 document.activeElement：点「确认截取配图」按钮那一刻焦点已在按钮上，
         // 必须在 focusin 里提前记住用户最后点击的编辑框。
         window.cropInsertTarget = 'content'; // 'content'=题干 | 'answer'=解析
+        // 最后聚焦过的卡片编辑框 + 它的光标位；插图落点靠这两个值算。
+        window.lastCropTextarea = null;
+        window.cropInsertCursor = null;
 
         function refreshCropInsertTargetBadge() {
             const textEl = document.getElementById('pdfCropInsertTargetText');
@@ -1971,9 +2011,11 @@
             if (!t || !t.classList) return;
             if (t.classList.contains('card-content-textarea')) {
                 window.cropInsertTarget = 'content';
+                window.lastCropTextarea = t;
                 refreshCropInsertTargetBadge();
             } else if (t.classList.contains('card-answer-textarea')) {
                 window.cropInsertTarget = 'answer';
+                window.lastCropTextarea = t;
                 refreshCropInsertTargetBadge();
             }
         });
@@ -4882,15 +4924,7 @@
                     }
                     
                     contentPrev.innerHTML = window.MathBankSafe.sanitizeRichHtml(html);
-                    renderMathInElement(contentPrev, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
+                    window.MathRender.render(contentPrev, 'display');
                     if (typeof window.adaptChoicesGridLayout === 'function') {
                         window.adaptChoicesGridLayout(contentPrev);
                     }
@@ -4905,15 +4939,7 @@
             } else {
                 try {
                     answerPrev.innerHTML = parseMarkdownWithMath(answerText);
-                    renderMathInElement(answerPrev, {
-                        delimiters: [
-                            {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false},
-                            {left: '\\(', right: '\\)', display: false},
-                            {left: '\\[', right: '\\]', display: true}
-                        ],
-                        throwOnError: false
-                    });
+                    window.MathRender.render(answerPrev, 'display');
                 } catch(e) {
                     answerPrev.textContent = answerText;
                 }

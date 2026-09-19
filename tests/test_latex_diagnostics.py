@@ -5,14 +5,65 @@ from io import BytesIO
 import os
 import zipfile
 
-from mathbank.latex_diagnostics import build_local_latex_diagnostic
+from mathbank.latex_diagnostics import build_local_latex_diagnostic, is_xelatex_missing
 from mathbank.paper_helper import (
     build_answer_sheet_latex,
     build_latex_document,
     clean_content_for_latex,
+    collect_referenced_images,
     compile_tex_to_pdf,
     create_tex_zip_package,
 )
+
+
+def test_missing_image_is_not_misdiagnosed_as_missing_compiler():
+    """P2 回归：缺图日志不能被误报成「系统未安装 LaTeX 编译器」。"""
+    log = "\n".join([
+        "This is XeTeX, Version 0.999996 (TeX Live 2026)",
+        "! LaTeX Error: File `mistakes_1_figures_abc.png' not found.",
+        "See the LaTeX manual or LaTeX Companion for explanation.",
+    ])
+    result = build_local_latex_diagnostic(log, r"\documentclass{article}\begin{document}x\end{document}")
+    assert "未安装" not in result["summary"]
+    assert "缺少" in result["summary"]
+    assert "mistakes_1_figures_abc.png" in result["summary"]
+
+
+def test_genuine_missing_compiler_still_detected():
+    assert is_xelatex_missing("系统未检测到 xelatex 编译器，请确保已安装 TeX Live。")
+    assert is_xelatex_missing("/bin/sh: xelatex: command not found")
+    assert is_xelatex_missing("'xelatex' is not recognized as an internal or external command")
+    assert is_xelatex_missing("FileNotFoundError: [Errno 2] No such file or directory: 'xelatex'")
+    # 缺图日志不是「编译器缺失」
+    assert not is_xelatex_missing(
+        "This is XeTeX, Version 0.999996\n! LaTeX Error: File `x.png' not found."
+    )
+
+
+def test_collect_referenced_images_keeps_subdir_markdown_urls(tmp_path):
+    """P1 回归：markdown 里带 /static/uploads/ 前缀的子目录插图必须被收集。"""
+    uploads = tmp_path / "uploads"
+    fig_dir = uploads / "mistakes" / "7" / "figures"
+    fig_dir.mkdir(parents=True)
+    (fig_dir / "crop.png").write_bytes(b"png")
+    (uploads / "root.png").write_bytes(b"png")
+
+    questions_data = [{
+        "question": {
+            "id": 1,
+            "content": (
+                "题面\n\n"
+                "![插图](/static/uploads/mistakes/7/figures/crop.png)\n\n"
+                "![根图](/static/uploads/root.png)"
+            ),
+            "answer_markdown": "",
+            "image_paths": [],
+        },
+    }]
+    collected = collect_referenced_images(questions_data, str(uploads), "static/uploads")
+    names = [p.replace("\\", "/").split("/uploads/")[-1] for p in collected]
+    assert "mistakes/7/figures/crop.png" in names
+    assert "root.png" in names
 
 
 def test_local_diagnostic_maps_cancel_command_to_package():
