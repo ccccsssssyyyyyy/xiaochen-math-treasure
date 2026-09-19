@@ -33,14 +33,21 @@ from sqlalchemy import or_, text
 from dotenv import load_dotenv
 
 from mathbank.database import (
+    MistakeBatch,
+    MistakeRecord,
     Question,
     QuestionCurriculum,
     Paper,
     PaperQuestion,
+    Student,
     engine,
     get_db,
     init_db,
     normalize_question_content,
+)
+from mathbank.duplicate_check import (
+    duplicate_warning_payload,
+    find_duplicate_question,
 )
 
 # 查重指纹的唯一权威实现位于 mathbank.database，此处仅保留兼容性别名
@@ -124,10 +131,36 @@ from mathbank.prompts import (
     build_classification_system_prompt,
     build_import_parse_system_prompt,
     build_latex_error_explanation_prompts,
+    build_mistake_block_system_prompt,
     build_paper_selection_prompts,
     build_pdf_parse_system_prompt,
     build_tikz_correction_prompt,
     build_tikz_draw_prompt,
+)
+from mathbank.page_block_split import (
+    DEFAULT_MAX_PAGES as MISTAKE_MAX_SOURCE_PAGES,
+    DEFAULT_RENDER_DPI as MISTAKE_RENDER_DPI,
+    COLUMN_DOUBLE,
+    COLUMN_SINGLE,
+    BlockRegion,
+    ColumnLayout,
+    PageSplitError,
+    analyze_page_images,
+    clean_manual_boxes,
+    crop_region,
+    extract_pdf_text_lines,
+    extract_pdf_text_rows,
+    manual_column_layout,
+    merge_manual_boxes,
+    render_source_to_pages,
+)
+from mathbank.mistake_handout import (
+    HandoutOptions,
+    build_mistake_handout_latex,
+)
+from mathbank.mistake_vocabulary import (
+    list_mistake_reasons,
+    normalize_mistake_reason_list,
 )
 from mathbank.question_types import (
     detect_structured_question_form,
@@ -1026,6 +1059,9 @@ def ocr_formula(
         if latex_content:
             import re
             latex_content = re.sub(r"\[ILLUSTRATION_BOX:.*?\]", "", latex_content).strip()
+            # 同一口径：OCR 结果里若混进模型自绘的 TikZ，换算成占位符。解析截图识别
+            # 走的正是这条 `/api/ocr`，不在这拦一道，那串代码就会原样落进审校页的解析框。
+            latex_content = replace_drawn_figures_with_placeholders(latex_content)
 
         # 将 temp_filepath 置为 None，避免在 finally 块中被删除
         saved_filepath = temp_filepath
@@ -2445,6 +2481,102 @@ def normalize_fillin_macro(text: str) -> str:
     return text
 
 
+_FIGURE_PLACEHOLDER_MARK = "[插图待补: 图1]"
+
+#: 模型自绘的 TikZ 段落 / 单边 token。产品口径是「图由人工截图补入」，
+#: 所以这里只做换算与擦除，**不做任何编译**。
+_TIKZ_PICTURE_RE = re.compile(
+    r"\\begin\s*\{\s*tikzpicture\s*\}.*?\\end\s*\{\s*tikzpicture\s*\}",
+    re.DOTALL | re.IGNORECASE,
+)
+_TIKZ_BEGIN_RE = re.compile(r"\\begin\s*\{\s*tikzpicture\s*\}", re.IGNORECASE)
+_TIKZ_END_RE = re.compile(r"\\end\s*\{\s*tikzpicture\s*\}", re.IGNORECASE)
+_TIKZ_TOKEN_RE = re.compile(r"tikzpicture", re.IGNORECASE)
+_FIGURE_PLACEHOLDER_RE = re.compile(r"\[插图待补\s*[:：]\s*[^\]]*\]")
+
+#: 模型伪造图形位的其它写法。渲染端只支持 KaTeX 的数学环境，下面这些一个都不认，
+#: 留在正文里就是一行谁也读不懂的纯文本。实测 Qwen3-VL 被禁止画 TikZ 之后就改用
+#: `\begin{center}\includegraphics{image-placeholder}\end{center}` 这一套。
+_FAKE_INCLUDE_RE = re.compile(
+    r"\\includegraphics\s*\*?\s*(?:\[[^\]]*\])?\s*\{[^}]*\}", re.IGNORECASE
+)
+_FAKE_ENV_TAGS_RE = re.compile(
+    r"\\(?:begin|end)\s*\{\s*"
+    r"(?:center|figure|flushleft|flushright|minipage|wrapfigure|asy|pspicture)"
+    r"\s*\}(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\})?",
+    re.IGNORECASE,
+)
+_FAKE_CAPTION_RE = re.compile(r"\\caption\s*\*?\s*\{[^{}]*\}", re.IGNORECASE)
+_TEXT_WRAPPED_PLACEHOLDER_RE = re.compile(
+    r"\\text\s*\{\s*(\[插图待补\s*[:：]\s*[^\]]*\])\s*\}", re.IGNORECASE
+)
+#: 占位符那一行上的排版残渣：模型常把它跟 \quad / \qquad 之类捆在一起，
+#: 那些命令在数学环境外不渲染，留着就是从占位符旁边多出一串反斜杠。
+_ORPHAN_SPACING_RE = re.compile(r"\\(?:quad|qquad)\b")
+
+#: 触发兜底的指纹。命中任意一个才动手，否则内容一个字节都不改 —— 人工写好的
+#: 编号、人工粘的图片 markdown 都不该被这条链路碰。
+_FIGURE_SCAFFOLDING_HINTS = ("tikzpicture", "includegraphics", "\\caption", "\\begin{center}",
+                             "\\begin{figure}", "\\begin{minipage}", "\\begin{flushleft}",
+                             "\\begin{flushright}")
+
+
+def replace_drawn_figures_with_placeholders(text: str) -> str:
+    """把模型「画」出来的图形换算成 ``[插图待补: 图N]`` 占位符（零 token 兜底）。
+
+    产品口径：**错题流程不做 TikZ 编译**，题干/解析里的图一律由使用者在原卷上框选
+    补入（前端 TikZ 入口 2026-08-26 就已隐藏），正文里不该出现任何图形代码。提示词
+    写明了「留位不画」，但模型守不守是概率问题，实测同一批 4 道题里 2 道自行画了整段
+    ``tikzpicture``；提示词收紧之后它不画 TikZ 了，却改用
+    ``\\begin{center}\\includegraphics{image-placeholder}\\end{center}`` 来占位 ——
+    同一类缺陷换了个写法。渲染端只认 KaTeX，这两种写法在审校页都只是一行纯文本乱码。
+
+    所以在写回这一步做零 token 兜底，按顺序处理：
+
+    1. TikZ 段落（成对）+ 落单的 ``\\begin`` / ``\\end`` token；
+    2. ``\\includegraphics`` / ``\\caption`` / 纯排版环境壳子（center、figure、
+       minipage…）—— 只脱壳，里面的内容照留；
+    3. ``\\text{[插图待补: 图N]}`` 这类把占位符裹起来的写法就地拆开；
+    4. 占位符那一行上的 ``\\quad`` 之类排版残渣清掉，连续空行压成一个。
+
+    最后按出现顺序统一重排编号：前端是**按占位符出现顺序**配对 ``figure_images``
+    的，编号与顺序错位会让「图 2」配上第一张图。
+
+    没有任何图形脚手架的指纹时原样返回 —— 人工写的内容不该被这条链路碰。
+    """
+
+    raw = str(text or "")
+    lowered = raw.lower()
+    if not any(hint in lowered for hint in _FIGURE_SCAFFOLDING_HINTS):
+        return raw
+
+    cleaned = _TIKZ_PICTURE_RE.sub(_FIGURE_PLACEHOLDER_MARK, raw)
+    if "tikzpicture" in cleaned.lower():
+        cleaned = _TIKZ_BEGIN_RE.sub(_FIGURE_PLACEHOLDER_MARK, cleaned)
+        cleaned = _TIKZ_END_RE.sub("", cleaned)
+        cleaned = _TIKZ_TOKEN_RE.sub("", cleaned)
+    cleaned = _TEXT_WRAPPED_PLACEHOLDER_RE.sub(r"\1", cleaned)
+    cleaned = _FAKE_INCLUDE_RE.sub("", cleaned)
+    cleaned = _FAKE_CAPTION_RE.sub("", cleaned)
+    cleaned = _FAKE_ENV_TAGS_RE.sub("", cleaned)
+
+    lines = []
+    for line in cleaned.split("\n"):
+        if _FIGURE_PLACEHOLDER_RE.search(line):
+            line = _ORPHAN_SPACING_RE.sub(" ", line)
+            line = re.sub(r"[ \t]{2,}", " ", line).strip()
+        lines.append(line.rstrip())
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+
+    counter = {"seq": 0}
+
+    def _renumber(_match):
+        counter["seq"] += 1
+        return f"[插图待补: 图{counter['seq']}]"
+
+    return _FIGURE_PLACEHOLDER_RE.sub(_renumber, cleaned)
+
+
 def _strip_leading_question_number(content: str) -> str:
     """剥离套卷导入时残留的原卷题号（仅去除题干最开头的顺序编号，避免组卷时与系统编号叠加）。
 
@@ -2839,54 +2971,23 @@ def create_question(
                 else:
                     db_question.association_group_id = g2
 
-        # ---- 入库前查重：指纹预存 + 精确短路 + 轻量预筛（1+2 优化）----
+        # ---- 入库前查重：规则见 mathbank.duplicate_check（与错题入库共用同一实现）----
+        # 抽成公共函数的原因：错题工作台的「数学错题批量入库」需要完全相同的判重
+        # 行为，内联两份迟早会出现「手动入库判重复、错题入库却放行」的不一致。
         force_bool = force.lower() in ("true", "1", "yes")
         if not force_bool:
-            norm_content = _normalize_question_content(content)
-            dup_hit = None
-            dup_sim = 0.0
-            if norm_content:
-                import difflib
-                # 仅取 (id, 预存指纹)，不加载全文；扫描同题型全部候选，
-                # 不再 limit(4000)，彻底消除「超 4000 题漏查」隐患。
-                cands = db.query(Question.id, Question.content_fingerprint).filter(
-                    Question.question_type == question_type
-                ).all()
-                best_sim = 0.0
-                best_match_id = None
-                for cid, cfp in cands:
-                    if not cfp:
-                        continue
-                    # 精确相等短路：归一化指纹完全一致即判重，跳过 O(n²) 深比
-                    if cfp == norm_content:
-                        best_sim = 1.0
-                        best_match_id = cid
-                        break
-                    # 轻量预筛：长度差异超过 50% 不可能是 0.92 近似重复
-                    if abs(len(cfp) - len(norm_content)) * 2 > len(cfp) + len(norm_content):
-                        continue
-                    sim = difflib.SequenceMatcher(None, norm_content, cfp).ratio()
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_match_id = cid
-                DUP_THRESHOLD = 0.92
-                if best_match_id is not None and best_sim >= DUP_THRESHOLD:
-                    dup_hit = db.query(Question).filter(Question.id == best_match_id).first()
-                    dup_sim = best_sim
-            if dup_hit is not None:
-                return {
-                    "status": "duplicate_warning",
-                    "message": f"该题与库中第 {dup_hit.id} 题高度相似（相似度 {dup_sim:.0%}），疑似重复入库。",
-                    "existing_question_id": dup_hit.id,
-                    "similarity": round(dup_sim, 4),
-                    "existing_preview": (dup_hit.content or "")[:120],
-                }
+            dup_id, dup_sim = find_duplicate_question(
+                db, content, question_type, subject_value
+            )
+            if dup_id is not None:
+                return duplicate_warning_payload(db, dup_id, dup_sim)
 
         db.add(db_question)
         db.flush()
 
         # Save the question and its active curriculum mirror atomically.
-        active_version = get_active_version_code()
+        # 版本码按学科取：数学走活动大纲，物化各自锁定一套。
+        active_version = get_subject_version_code(db_question.subject)
         curriculum_map = QuestionCurriculum(
             question_id=db_question.id,
             version_code=active_version,
@@ -7663,6 +7764,3737 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
             content={"status": "error", "message": f"生成 Word 试卷包失败: {str(e)}"},
             status_code=500,
         )
+
+# ----------------- 错题扫描工作台（扫描 → 切题 → 点选 → 识别 → 错题本 / 入库） -----------------
+# 设计依据：docs/错题扫描与错题本-实施计划-2026-09-13.md
+#
+# 与题库解耦：三张新表（students / mistake_batches / mistake_records）不碰 questions /
+# papers。错题是「某学生某次做错的记录」，题库题是「可复用的备课素材」，两者生命周期
+# 不同（题库题会被编辑、删除），所以错题本导出只读快照字段，不 join questions。
+#
+# 上游前置（实施计划 §7）：去手写由用户在系统外用专门工具完成。本链路**不做任何图像
+# 去笔迹处理**，收到的图只含印刷体；上游效果不佳就回上游重做，系统不做事后补救。
+#
+# 切块复用 mathbank.page_block_split（纯 Pillow、零 token、确定性）；识别复用既有的
+# 多模态引擎链（resolve_ocr_fallbacks 的免费优先顺序 + 故障转移），不新造模型配置。
+
+MISTAKE_CUT_STEPS = [
+    {"key": "render_pages", "label": "转页图"},
+    {"key": "line_projection", "label": "判栏 + 行投影切块"},
+    {"key": "merge_blocks", "label": "合并题块并落盘"},
+]
+#: 识别任务的步骤。原来「后处理归一」是独立一步：模型结果先攒在内存里，整批跑完再
+#: 统一归一落库。改成逐题落库之后归一已并入识别循环，这一步不存在了 —— 留着它，步骤条
+#: 会永远停在「后处理归一」上不前进，而且中途看不到任何题面。
+MISTAKE_RECOGNIZE_STEPS = [
+    {"key": "recognize_blocks", "label": "逐块识别题面"},
+    {"key": "write_records", "label": "写入记录"},
+]
+
+#: 单批次源文件体积上限。刻意不复用单图 10 MB 限制 —— 真实样本（扫描全能王 12 页 PDF）
+#: 是 7.6 MB，一份几十页的卷子很容易突破 10 MB。
+MAX_MISTAKE_SOURCE_BYTES = 50 * 1024 * 1024
+#: 批次工作目录在 static/uploads 下的子目录名
+MISTAKE_UPLOAD_SUBDIR = "mistakes"
+#: 默认学生。姓名可被新建批次面板里的输入覆盖（见 ensure_mistake_student），
+#: 之所以不硬编码真实姓名：这个仓库要开源，个人姓名不该写进代码。
+DEFAULT_MISTAKE_STUDENT_NAME = os.getenv("MISTAKE_STUDENT_NAME", "默认学生")
+DEFAULT_MISTAKE_STUDENT_GRADE = os.getenv("MISTAKE_STUDENT_GRADE", "高一")
+MISTAKE_SUBJECT_LABELS = {
+    "math": "数学",
+    "physics": "物理",
+    "chemistry": "化学",
+    "other": "其他",
+}
+MISTAKE_SUBJECTS = tuple(MISTAKE_SUBJECT_LABELS)
+MISTAKE_STATUS_LABELS = {
+    "pending": "待切题",
+    "cutting": "切题中",
+    "cut_failed": "切题失败",
+    "reviewing": "待点选",
+    "done": "已出 PDF",
+}
+MISTAKE_SOURCE_EXTENSIONS = (
+    ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+)
+GRAD_STATUS_VALUES = ("correct", "incorrect", "unknown")
+MISTAKE_QUESTION_TYPES = {item["value"] for item in DEFAULT_QUESTION_TYPES}
+
+#: 人工微调切线后重切时，从旧记录按纵向重叠继承的字段。刻意包含 question_id ——
+#: 已入库的题重切后不该在题库里再落一份。
+MISTAKE_CARRY_OVER_FIELDS = (
+    "question_no",
+    "content",
+    "answer_markdown",
+    "question_type",
+    "difficulty",
+    "knowledge_tags",
+    "solve_method",
+    # 分类六列（v1010）。重切会重建记录，漏了它们等于让人在审校页填的分类白填 ——
+    # 与上面 question_type/difficulty 同理，属于「一条记录的用户输入」，不是块位置。
+    "source",
+    "category_compulsory",
+    "category_chapter",
+    "category_knowledge",
+    "related_curriculums",
+    "tags",
+    "grad_status",
+    "recognize_status",
+    "include_in_handout",
+    "answer_image",
+    "answer_source",
+    "answer_reviewed",
+    "error_reason",
+    "image_figure",
+    "mastery_status",
+    "question_id",
+    "snapshot_source",
+)
+
+
+def _mistake_session():
+    """后台任务用的独立会话。
+
+    每次调用都从 ``mathbank.database`` 现取 ``SessionLocal``（而不是模块级绑定），
+    这样测试里 conftest 对 ``database.SessionLocal`` 的替换才能生效。
+    """
+
+    from mathbank.database import SessionLocal
+
+    return SessionLocal()
+
+
+def _mistake_batch_dir(batch_id: int) -> Path:
+    """批次的工作目录（源文件 / 页图 / 题块图 / 导出产物都放这里）。
+
+    按批次隔离的好处：删批次时整目录递归删掉即可，不会误伤别的批次；也不依赖
+    ``clean_orphaned_images``（它只扫上传根目录与 ``tmp/``，不会进子目录）。
+    """
+
+    return Path(UPLOAD_DIR) / MISTAKE_UPLOAD_SUBDIR / str(int(batch_id))
+
+
+def _mistake_pages_dir(batch_id: int) -> Path:
+    return _mistake_batch_dir(batch_id) / "pages"
+
+
+def _mistake_blocks_dir(batch_id: int) -> Path:
+    return _mistake_batch_dir(batch_id) / "blocks"
+
+
+def _mistake_exports_dir(batch_id: int) -> Path:
+    return _mistake_batch_dir(batch_id) / "exports"
+
+
+def _mistake_analysis_file(batch_id: int) -> Path:
+    return _mistake_batch_dir(batch_id) / "analysis.json"
+
+
+def _mistake_web_url(batch_id: int, *parts: str) -> str:
+    segments = [UPLOAD_DIR_REL, MISTAKE_UPLOAD_SUBDIR, str(int(batch_id))]
+    segments.extend(str(part) for part in parts if str(part))
+    return "/" + "/".join(segments)
+
+
+def _mistake_block_web_url(batch_id: int, crop_name: str) -> str:
+    """块图的**裸** URL（不带任何查询串）—— 入库时存的就是它。"""
+
+    return _mistake_web_url(batch_id, "blocks", crop_name)
+
+
+def _page_web_url(batch_id: int, page_name: str) -> str:
+    """页图 URL，下发时挂上这一页自己的更新时间指纹。
+
+    页图文件名只由页号决定（``page_1.png``），重切 / 重新渲染是**同名覆盖**：
+    不带指纹时浏览器会在同一个文档里复用已经解码好的旧位图 —— 打开框选弹窗看到的
+    是上一版的页面，而磁盘上早已是新图。与块图同一套规则：库里存裸路径、出口才挂
+    （原因与踩坑记录见 ``_version_stored_block_url``）。
+    """
+
+    bare = _mistake_web_url(batch_id, "pages", page_name)
+    try:
+        stamp = (_mistake_pages_dir(batch_id) / page_name).stat().st_mtime_ns
+    except OSError:
+        # 图不在盘上就退回裸 URL，宁可让浏览器复用也别给一个必然 404 的地址。
+        return bare
+    return f"{bare}?v={stamp}"
+
+
+def _version_stored_block_url(batch_id: int, web_path: str) -> str:
+    """把库里的裸块图 URL 挂上这张图自己的更新时间指纹（幂等，可重复调用）。
+
+    块图的文件名只由「页号 + 块号」决定（``p002_b01.png``），重切或应用框选时是
+    **同名覆盖**。只按路径当 URL 会踩一个很安静的坑：内容换了、URL 没换，浏览器就
+    在同一个文档里复用已经解码好的旧位图 —— 卡片上显示的是上一版的内容，而数据库、
+    块图文件、接口返回全是新的（排查全过程见 .workbuddy/memory/2026-09-14.md）。
+    所以这层指纹是必须的。
+
+    ⚠️ 但它**绝不能进数据库**。资产安全层（``asset_security._reference_parts``）
+    明确拒绝任何含 ``?`` 的引用，而识别取图、导出插图都是拿 ``image_block`` 当磁盘
+    路径解析的。9-14 把带 ``?v=`` 的 URL 直接写进 ``image_block`` 列，代价是识别
+    100% 失败（整批标 ``failed``、题面全空），见 .workbuddy/memory/2026-09-15.md
+    第六轮。
+
+    浏览器要指纹、磁盘要路径 —— 两者在出口分岔：库里存裸路径，下发时才挂。
+    """
+
+    raw = str(web_path or "").strip()
+    if not raw:
+        return ""
+    bare = raw.split("?", 1)[0].split("#", 1)[0]
+    crop_name = bare.rsplit("/", 1)[-1]
+    if not crop_name:
+        return bare
+    try:
+        stamp = (_mistake_blocks_dir(batch_id) / crop_name).stat().st_mtime_ns
+    except OSError:
+        # 图还没落盘（不该发生）：退回裸 URL，宁可让浏览器复用也别给出一个 404。
+        return bare
+    return f"{bare}?v={stamp}"
+
+
+def _mistake_record_client_payload(record, batch_id: int) -> dict:
+    """对外下发一条错题记录：把块图字段的指纹在这里补齐。
+
+    前端拿 ``image_block`` 当 ``<img src>``（题卡缩略图 / 块列表 / 点开大图），
+    出口这一层必须挂上指纹，否则 9-14 修的「同 URL 复用旧位图」立刻复发。
+    ``block_images`` 是合并组的成员图列表，同样处理。
+    """
+
+    item = record.to_dict()
+    item["image_block"] = _version_stored_block_url(batch_id, item.get("image_block"))
+    images = item.get("block_images")
+    if isinstance(images, list):
+        item["block_images"] = [
+            _version_stored_block_url(batch_id, url) for url in images
+        ]
+    item["block_url"] = item["image_block"]
+    return item
+
+
+def _mistake_source_path(batch_id: int) -> Optional[Path]:
+    """返回批次源文件（保留原始扩展名，供 PyMuPDF / Pillow 分流）。"""
+
+    directory = _mistake_batch_dir(batch_id)
+    try:
+        for candidate in sorted(directory.glob("source.*")):
+            if candidate.is_file():
+                return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _reset_directory(directory: Path) -> None:
+    """清空目录内文件（不递归删子目录），用于重切前清掉旧题块图。"""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_file():
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+
+
+def ensure_mistake_student(db: Session, *, name: str = "", grade: str = "") -> Student:
+    """取（或建）错题工作台使用的学生记录。
+
+    一期界面不做多学生切换（实施计划 §5.1），但表结构按多学生设计：这里只保证
+    「至少有一条记录」。若用户在新建批次时填了姓名，就更新这条记录的名字 —— 免得
+    默认名把人锁死，也免得为此单开一个接口。
+    """
+
+    student = db.query(Student).order_by(Student.id.asc()).first()
+    desired_name = str(name or "").strip()
+    desired_grade = str(grade or "").strip()
+    if student is None:
+        student = Student(
+            name=desired_name or DEFAULT_MISTAKE_STUDENT_NAME,
+            grade=desired_grade or DEFAULT_MISTAKE_STUDENT_GRADE,
+        )
+        db.add(student)
+        db.flush()
+        return student
+    changed = False
+    if desired_name and desired_name != (student.name or ""):
+        student.name = desired_name
+        changed = True
+    if desired_grade and desired_grade != (student.grade or ""):
+        student.grade = desired_grade
+        changed = True
+    if changed:
+        db.flush()
+    return student
+
+
+def _mistake_field(record, name, default=None):
+    """从 ORM 对象或 ``to_dict()`` 结果里取值（统计函数两种输入都要吃）。"""
+
+    if isinstance(record, dict):
+        value = record.get(name, default)
+    else:
+        value = getattr(record, name, default)
+    return default if value is None else value
+
+
+def _mistake_record_stats(records) -> dict:
+    """对错分布 + 流程进度统计（错题本页头与批次列表共用）。"""
+
+    stats = {
+        "total": 0,
+        "correct": 0,
+        "incorrect": 0,
+        "unknown": 0,
+        "recognized": 0,
+        "failed": 0,
+        "included": 0,
+        "imported": 0,
+    }
+    for record in records or []:
+        stats["total"] += 1
+        grad = str(_mistake_field(record, "grad_status", "unknown"))
+        stats[grad if grad in GRAD_STATUS_VALUES else "unknown"] += 1
+        recognize_status = str(_mistake_field(record, "recognize_status", ""))
+        if recognize_status == "done":
+            stats["recognized"] += 1
+        elif recognize_status == "failed":
+            stats["failed"] += 1
+        if _mistake_field(record, "include_in_handout", False):
+            stats["included"] += 1
+        if _mistake_field(record, "question_id", None):
+            stats["imported"] += 1
+    return stats
+
+
+def _mistake_record_image_path(record) -> tuple[Optional[Path], str]:
+    """题块图的磁盘路径，外加失败原因（``path is None`` 时第二项才是有效文案）。
+
+    两件事必须分开报：「路径被安全层拒绝」与「文件不在磁盘上」是两种完全不同的
+    故障 —— 前者是数据里混进了不该有的字符，后者是图真的丢了。合并成一句「题块
+    图缺失」时，用户在界面和日志里都无从判断该修哪一边。
+    """
+
+    raw = str(_mistake_field(record, "image_block", "") or "").strip()
+    if not raw:
+        return None, "记录里没有题块图字段"
+    # 兼容历史数据：v2.3.x 早期有一版把带 ?v=<mtime_ns> 的 URL 写进了库里
+    # （见 .workbuddy/memory/2026-09-15.md 第六轮），剥掉查询串再解析，
+    # 否则资产安全层会以「包含不允许的字符」直接拒绝。
+    reference = raw.split("?", 1)[0].split("#", 1)[0]
+    try:
+        path = resolve_upload_asset(
+            reference,
+            uploads_dir=UPLOAD_DIR,
+            url_prefix=UPLOAD_DIR_REL,
+            # 故意不让安全层替我们报「文件不存在」：require_file=True 会把这种
+            # 情况也伪装成安全检查失败，两类故障就分不开了。下面单独判一次。
+            require_file=False,
+        )
+    except AssetSecurityError as exc:
+        return None, f"题块图路径被安全校验拒绝（{exc}）：{raw}"
+    if not path.is_file():
+        return None, f"题块图不存在：{reference}"
+    return path, ""
+
+
+def _write_mistake_analysis(
+    batch_id: int, analyses: list, cross_page_merges: Optional[list] = None
+) -> None:
+    """把切块元数据落盘（页尺寸、题块位置、候选切点、吸附点）。
+
+    为什么不进数据库：这些是「切块过程的中间产物」，只在点选/微调界面上用，不参与
+    错题本导出与统计；单开一张表或往 records 里塞 JSON 都不划算。放在批次目录里
+    与页图同生命周期，删批次一起清掉。
+
+    ``cross_page_merges`` 给了就写这一份，没给就把文件里原有的原样带过来。这个函数
+    整份重写文件，而跨页组挂在顶层、不属于任何一页 —— 不显式取回，一次「重切」就
+    把用户合好的跨页题悄悄拆回两道，还查不出是谁干的。
+    """
+
+    if cross_page_merges is None:
+        try:
+            cross_page_merges = _normalize_cross_page_merges(
+                _read_mistake_analysis(batch_id).get("cross_page_merges")
+            )
+        except MistakeAnalysisError:
+            cross_page_merges = []
+    payload = {
+        # v6：顶层增加 cross_page_merges（跨页合并组：一道题被页边界切成两半）
+        # v5：页增加 hidden_blocks（被用户删掉的题块，按几何矩形锚定，重切后依然隐藏）
+        # v4：页增加 manual_merges（人工合并组：一道题被切成多块时并为一条）
+        # v3：页增加 manual_boxes（人工框选矩形，叠在 blocks 之上的遮蔽层）
+        # v2：块增加横向范围与栏号，页增加 layout / 按栏吸附池
+        "version": 6,
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "cross_page_merges": cross_page_merges,
+        "pages": [analysis.to_dict() for analysis in analyses],
+    }
+    write_private_text_atomic(
+        _mistake_analysis_file(batch_id),
+        json.dumps(payload, ensure_ascii=False, indent=2),
+    )
+
+
+class MistakeAnalysisError(RuntimeError):
+    """切块元数据（``analysis.json``）**存在但读不出来** —— 损坏、结构异常或不可读。
+
+    为什么单独一个异常：这类情况和「还没有元数据」必须分开。旧实现把两者都归成
+    一个空壳返回，而 :func:`_update_mistake_page_meta` 是「读回整份 → 改点名键 →
+    整份写回」的写法 —— 空壳一写回去，整批人工框选、人工合并、删除名单就被抹平，
+    文件本身却还在，用户看到的只是「我画的框全没了」。
+    现在损坏一律抛本异常，写路径宁可失败也不覆盖。
+    """
+
+
+def _empty_mistake_analysis() -> dict:
+    """「还没有切块元数据」的空壳。
+
+    跨页合并组挂在文件**顶层**（成员带页号，不属于任何单页），空壳也得带上这个键
+    —— 漏掉它，第一次「读回 → 改键 → 整份写回」就会把跨页题从文件里抹掉。
+    """
+
+    return {"version": 6, "cross_page_merges": [], "pages": []}
+
+
+def _read_mistake_analysis(batch_id: int) -> dict:
+    """读回切块元数据。文件不存在＝正常空壳；文件在但读不出来＝抛异常。
+
+    三种状态要分清：
+
+    - **文件不存在**：还没切过块。这是合法状态，返回空壳。
+    - **文件为空**：写到一半被打断（原子写不会留半截，真出现就是异常路径）。空文件
+      里没有任何数据可丢，按「还没有」处理比报错更有用。
+    - **文件在但解析不出来 / 结构不对**：抛 :class:`MistakeAnalysisError`。调用方
+      绝不能拿空壳去覆盖它。
+
+    旧文件（v1–v5）缺顶层 ``cross_page_merges``（v6 新增），v1–v4 还缺
+    ``manual_boxes`` / ``manual_merges`` / ``hidden_blocks``，
+    就地补成空列表，省得每个调用方都写一次 ``.get("manual_boxes") or []`` 而漏掉
+    一处。更早的版本还缺横向范围与按栏吸附池，那些由各自的读取方兜底（它们本来
+    就有默认值）。
+    """
+
+    path = _mistake_analysis_file(batch_id)
+    try:
+        # 不用先 is_file() 再读：那中间有个窗口，且要判两次。直接读、按异常分流。
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _empty_mistake_analysis()
+    except OSError as exc:
+        raise MistakeAnalysisError(
+            f"切块元数据无法读取（{type(exc).__name__}: {exc}）。"
+            f"为避免覆盖原始文件，本次操作已中止。文件：{path}"
+        ) from exc
+
+    if not raw.strip():
+        return _empty_mistake_analysis()
+
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise MistakeAnalysisError(
+            f"切块元数据已损坏，JSON 解析失败（{exc}）。"
+            f"为避免覆盖原始文件，本次操作已中止。文件：{path}"
+        ) from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
+        raise MistakeAnalysisError(
+            "切块元数据结构异常（缺少 pages 列表）。"
+            f"为避免覆盖原始文件，本次操作已中止。文件：{path}"
+        )
+
+    for page in data["pages"]:
+        if not isinstance(page, dict):
+            continue
+        if not isinstance(page.get("manual_boxes"), list):
+            page["manual_boxes"] = []
+        if not isinstance(page.get("manual_merges"), list):
+            page["manual_merges"] = []
+        if not isinstance(page.get("hidden_blocks"), list):
+            page["hidden_blocks"] = []
+    if not isinstance(data.get("cross_page_merges"), list):
+        data["cross_page_merges"] = []
+    return data
+
+
+def _mark_mistake_batch_failed(batch_id: int, message: str) -> None:
+    """失败落状态用独立会话，避免复用已被 rollback 的那个。"""
+
+    session = _mistake_session()
+    try:
+        batch = session.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+        if batch is not None:
+            batch.status = "cut_failed"
+            batch.note = str(message or "")[:500]
+            session.commit()
+    except Exception as exc:  # noqa: BLE001 - 状态落盘失败不该覆盖原始错误
+        print(f"[Mistake Batch Status Error] {type(exc).__name__}: {exc}")
+    finally:
+        session.close()
+
+
+# ---- 多模态识别 ----
+
+
+def _mistake_multimodal_text(
+    provider: MultimodalProviderConfig, image_path: str, prompt: str
+) -> str:
+    """一次「图 + 自定义提示词 → 文本」调用。
+
+    与 ``ocr_via_provider`` 的唯一差别是提示词来源：那个写死 ``COMMON_OCR_PROMPT``
+    （通用公式识别），错题块要的是「只出题干与选项」的专用提示词。其余（思考预算注入、
+    百炼思考策略、超时、响应解析）保持完全一致，避免长出第二套行为。
+    """
+
+    import base64
+
+    try:
+        with open(image_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(f"读取并对题块图进行 Base64 编码失败: {str(e)}")
+
+    payload = {
+        "model": provider.model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{encoded_string}"
+                        },
+                    },
+                ],
+            }
+        ],
+        "stream": False,
+    }
+    payload = inject_reasoning_effort(payload, provider.reasoning_effort)
+    payload = apply_bailian_thinking_policy(
+        payload,
+        provider_code=provider.provider_code,
+        model_name=provider.model_name,
+        task="ocr",
+    )
+
+    # Chat-completion POST 不是幂等的：读超时可能发生在服务端已受理（并计费）之后。
+    # 与 ocr_via_provider 一样不做自动重发，把「是否重试」交回给用户。
+    response = post_chat_completion(provider, payload, timeout=240, check_status=False)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"{provider.provider_label} API 识别失败: HTTP {response.status_code}"
+        )
+    choices = (response.json() or {}).get("choices") or []
+    if not choices:
+        raise RuntimeError(
+            f"{provider.provider_label} 返回的数据中未包含 Choices 结果。"
+        )
+    return str(choices[0].get("message", {}).get("content", "")).strip()
+
+
+def recognize_mistake_block(
+    image_path: str, subject: str, engine: str = ""
+) -> tuple[dict, str]:
+    """识别单个题块，返回 ``(payload, provider_label)``。
+
+    引擎顺序沿用项目既有的多模态配置（``resolve_ocr_fallbacks``：默认免费优先
+    硅基流动 → 阿里百炼 → 中转站 GPT），故障转移语义与拆卷一致 —— 模型报错就换下一家，
+    但**读超时不换**（避免同一张图被重复计费）。``engine`` 供界面上「换模型重试」使用，
+    留空即走默认顺序。
+    """
+
+    prefer_engine = str(engine or "").strip() or os.getenv(
+        "OCR_PREFER_ENGINE", "siliconflow"
+    )
+    providers = resolve_ocr_fallbacks(prefer_engine)
+    if not providers:
+        raise RuntimeError(
+            "未配置任何识图 Key，请在右上角「API设置」面板中配置识图引擎的 API 密钥。"
+        )
+
+    # 照学科传树：物理挂教科版、化学挂人教版、数学用「设置 - 大纲」里的活动大纲。
+    # 传树之后模型才会逐字给出学段/章节/小节，_apply_mistake_category 再做受控归一。
+    prompt = build_mistake_block_system_prompt(
+        subject, get_subject_curriculum_tree(subject)
+    )
+    errors: list[str] = []
+    for provider in providers:
+        label = f"{provider.provider_label} ({provider.model_name})"
+        try:
+            raw = _mistake_multimodal_text(provider, image_path, prompt)
+            payload = parse_ai_json(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("模型没有返回 JSON 对象。")
+            return payload, label
+        except requests.exceptions.ReadTimeout as exc:
+            raise RuntimeError(
+                f"{label} 读取超时，请求是否已被处理尚不确定。"
+                "为避免重复计费，本次未自动切换到下一家模型，请稍后手动重试。"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - 换下一家引擎继续
+            message = f"{label} 出错: {str(exc)}"
+            print(f"[Mistake Recognize Warning] {message}")
+            errors.append(message)
+    raise RuntimeError("所有已配置的识图引擎均尝试失败。\n" + "\n".join(errors))
+
+
+def _mistake_payload_text(payload: dict, key: str) -> str:
+    """模型返回字段的取值归一：列表按「，」拼、其余转字符串去空白。"""
+
+    value = (payload or {}).get(key)
+    if isinstance(value, (list, tuple)):
+        return "，".join(
+            str(item).strip() for item in value if str(item).strip()
+        )
+    return str(value or "").strip()
+
+
+def _apply_mistake_payload(
+    record: MistakeRecord, payload: dict, curriculum: dict | None = None
+) -> None:
+    """把模型返回的字段写进记录，并做与手动录入一致的归一。
+
+    归一这一步不能省：题面里的 ``\fillin`` 与 ``choices`` 环境是题库侧的统一写法，
+    哪天要「单题识别 + 补入库」时，两边写法不一致会让查重指纹与渲染都对不上。
+
+    ``curriculum`` 是该学科的教材树（``get_subject_curriculum_tree``）。传了才会把
+    模型给的学段/章节/小节做受控归一后写进 ``category_*``，不传就只写题面那一组字段
+    （单测里只关心题面时用得上）。
+    """
+
+    def _text(key: str) -> str:
+        return _mistake_payload_text(payload, key)
+
+    question_no = _text("question_no")
+    if question_no:
+        record.question_no = question_no[:50]
+
+    content = _text("content")
+    if content:
+        content = normalize_fillin_macro(content)
+        content = normalize_choice_options_to_latex(content)
+        # 图由人工截图补入：模型擅自「画」出来的图形（TikZ / includegraphics / 排版壳子）
+        # 一律换算成占位符芯片（零 token 兜底，错题流程不做 TikZ 编译）。
+        content = replace_drawn_figures_with_placeholders(content)
+        record.content = _strip_leading_question_number(content)
+
+    question_type = _text("question_type")
+    if question_type in MISTAKE_QUESTION_TYPES:
+        record.question_type = question_type
+
+    record.difficulty = normalize_difficulty(
+        _text("difficulty") or None, default=record.difficulty or "normal"
+    )
+
+    knowledge_tags = _text("knowledge_tags")
+    if knowledge_tags:
+        record.knowledge_tags = normalize_tag_list(
+            knowledge_tags, field="knowledge_list"
+        )
+    solve_method = _text("solve_method")
+    if solve_method:
+        record.solve_method = normalize_tag_list(solve_method, field="solve_method")
+
+    _apply_mistake_category(record, payload, curriculum)
+
+
+def _apply_mistake_category(
+    record: MistakeRecord, payload: dict, curriculum: dict | None
+) -> None:
+    """把模型给出的教材定位写进记录的 ``category_*``，并做受控归一。
+
+    两个纪律：
+
+    ① **只填空值，且学段冲突时整组跳过**。用户已经在审校页手选过的字段一律不动 ——
+       「重新识别这道」的语义是重做题面，不是把人工分类抹掉；而他手选的学段与模型
+       判断不一致时，章节/小节也不填（否则会凑出「必修二 + 必修一的某章」这种
+       跨书组合，下拉里冒出一个该书根本没有的章节）。
+    ② **归一走后端既有那套**。模型给的小节名先当候选塞进 ``knowledge_list``，
+       交给 ``normalize_category_fields``（别名表 → 互含唯一 → 知识点反推唯一胜出）
+       去受控匹配；匹配不上就退回知识点标签反推，仍不行就留空交人工补 ——
+       绝不猜一个模糊值入库，否则它会在下拉里冒出一个教材树上根本没有的选项。
+
+    历史背景：这里以前**根本没有分类写入**（提示词也明文禁止模型判学段），前提是
+    「物化没有教材树、物化题一期不进题库」；这两条现在都已作废（教材树随三科错题库
+    一起落地、物化照样入库），于是每道物化错题入库后都掉进「未分类」桶，题库按章节
+    筛根本找不到 —— 这个函数就是补上那一段。
+    """
+
+    if not isinstance(curriculum, dict) or not curriculum:
+        return
+    raw_comp = _mistake_payload_text(payload, "compulsory")
+    raw_chap = _mistake_payload_text(payload, "chapter")
+    raw_know = _mistake_payload_text(payload, "category_knowledge")
+    if not (raw_comp or raw_chap or raw_know):
+        return
+
+    tags = payload.get("knowledge_tags")
+    if isinstance(tags, (list, tuple)):
+        tag_list = [str(item).strip() for item in tags if str(item).strip()]
+    else:
+        tag_list = [str(tags).strip()] if str(tags or "").strip() else []
+
+    candidate = {
+        "compulsory": raw_comp,
+        "chapter": raw_chap,
+        # 模型给的小节名排最前：它是最精确的候选（逐字取自教材范围），命中即落；
+        # 落空时 normalize_category_fields 会继续拿自由标签去反推。
+        "knowledge_list": ([raw_know] if raw_know else []) + tag_list,
+    }
+    normalize_category_fields([candidate], curriculum)
+
+    matched = {
+        field: str(candidate.get(field) or "").strip()
+        for field in ("category_compulsory", "category_chapter", "category_knowledge")
+    }
+    if not any(matched.values()):
+        return
+    # 人工选的学段与模型判断不一致时，连章节/小节一起跳过。只捂学段、照填章节的话，
+    # 会凑出「必修二 + 必修一的某章」这种跨书组合 —— 下拉里会冒出一个该书根本没有的
+    # 章节（reviewFillSelect 会把匹配不上的历史值当额外选项留着）。
+    chosen = str(record.category_compulsory or "").strip()
+    if chosen and matched["category_compulsory"] and chosen != matched["category_compulsory"]:
+        return
+    for field, value in matched.items():
+        if value and not str(getattr(record, field, "") or "").strip():
+            setattr(record, field, value)
+
+
+def _match_mistake_records(previous: list, blocks: list) -> dict:
+    """把旧题块记录按矩形重叠贪心匹配到新切出的题块上。
+
+    人工微调切线后重切，必须尽最大努力保住用户已经做过的点选、错因、识别结果与入库
+    状态 —— 一次重切把 40 道题的点选全部清空是不可接受的。匹配标准是纵向重叠高度
+    （重叠不足较矮一方高度的 30 % 视为不等价），一对一贪心；宁可不匹配也不乱配。
+
+    双栏页面上左右两栏的块纵向范围天然重叠，只看纵向会把左栏的作答状态接到右栏的
+    块上，因此横向也要求重叠（旧记录没有横向字段时按「整页宽」处理，等价于不限制）。
+
+    ⚠️ 返回的只是「状态来源」。调用方必须在本页新记录建好之后**把所有旧记录删掉**：
+    状态已经被复制到新记录上，旧记录留着就是同一道题在库里存在两份（首版实现漏了这
+    一步，实测重切后记录数直接翻倍）。
+
+    返回 ``{block_index: 旧记录}``。
+    """
+
+    pairs: list[tuple[float, int, int]] = []
+    for prev_index, record in enumerate(previous or []):
+        prev_start = float(_mistake_field(record, "block_y_start", 0.0))
+        prev_end = float(_mistake_field(record, "block_y_end", 1.0))
+        prev_x_start = float(_mistake_field(record, "block_x_start", 0.0))
+        prev_x_end = float(_mistake_field(record, "block_x_end", 1.0))
+        for block in blocks or []:
+            overlap = min(prev_end, block.y_end) - max(prev_start, block.y_start)
+            if overlap <= 0:
+                continue
+            reference = min(prev_end - prev_start, block.height)
+            if reference <= 0 or overlap < reference * 0.3:
+                continue
+            x_reference = min(prev_x_end - prev_x_start, block.width)
+            x_overlap = min(prev_x_end, block.x_end) - max(prev_x_start, block.x_start)
+            if x_reference <= 0 or x_overlap < x_reference * 0.3:
+                continue
+            pairs.append((overlap, prev_index, block.block_index))
+
+    pairs.sort(key=lambda item: item[0], reverse=True)
+    used_previous: set[int] = set()
+    used_blocks: set[int] = set()
+    matched: dict[int, object] = {}
+    for _overlap, prev_index, block_index in pairs:
+        if prev_index in used_previous or block_index in used_blocks:
+            continue
+        used_previous.add(prev_index)
+        used_blocks.add(block_index)
+        matched[block_index] = previous[prev_index]
+    return matched
+
+
+# ---- 异步任务：切题 ----
+
+
+def _normalize_mistake_page_layouts(raw) -> dict:
+    """解析前端传来的「本页栏目」。
+
+    接受两种写法：``{"1": "double"}``（只表态，分栏线由自动检测补）或
+    ``{"1": {"mode": "double", "boundary": 0.49}}``（人工拖过分栏线）。
+    非法页号/模式直接忽略，不报错 —— 多页批量提交时不该因为一页参数脏而整批失败。
+    """
+
+    layouts: dict = {}
+    if not isinstance(raw, dict):
+        return layouts
+    for key, value in raw.items():
+        try:
+            page_no = int(key)
+        except (TypeError, ValueError):
+            continue
+        if page_no <= 0:
+            continue
+        if isinstance(value, str):
+            mode, boundary = value.strip().lower(), None
+        elif isinstance(value, dict):
+            mode = str(value.get("mode") or "").strip().lower()
+            boundary = value.get("boundary")
+        else:
+            continue
+        if mode not in (COLUMN_SINGLE, COLUMN_DOUBLE):
+            continue
+        layouts[page_no] = manual_column_layout(mode, boundary)
+    return layouts
+
+
+def _normalize_mistake_boxes(raw) -> list[list[float]]:
+    """解析前端/落盘的人工框列表，返回可落盘的 ``[[x0, y0, x1, y1], …]``。
+
+    这里只判「结构成不成立」（正好四个数字、都落在 0–1），尺寸与退化交给算法
+    层的 :func:`clean_manual_boxes` —— 那是规则的唯一真源。两处各判一套的话，
+    迟早会出现「接口收了、写进元数据、前端照着画出来了，算法却不肯把它切成
+    题块」这种看得见摸不着的坏状态。
+    """
+
+    if not isinstance(raw, (list, tuple)):
+        return []
+    candidates: list[list[float]] = []
+    for box in raw:
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        try:
+            values = [float(value) for value in box]
+        except (TypeError, ValueError):
+            continue
+        if not all(0.0 <= value <= 1.0 for value in values):
+            continue
+        candidates.append(values)
+    return [
+        [round(x0, 6), round(y0, 6), round(x1, 6), round(y1, 6)]
+        for x0, y0, x1, y1 in clean_manual_boxes(candidates)
+    ]
+
+
+def _mistake_page_entry(batch_id: int, page_no: int) -> dict | None:
+    """从 analysis.json 里取出某页的切块元数据（找不到返回 None）。"""
+
+    for item in _read_mistake_analysis(batch_id).get("pages") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            if int(item.get("page_no") or 0) == page_no:
+                return item
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _update_mistake_page_meta(batch_id: int, page_no: int, updates: dict) -> None:
+    """就地改 analysis.json 某页的若干个键（其余一个不动）。
+
+    刻意不复用 :func:`_write_mistake_analysis`：那个函数吃的是 ``PageAnalysis``
+    对象，为改一个字段把整页「还原成对象、再序列化回去」，等于给无损往返埋一个
+    隐患 —— 哪天 ``to_dict()`` 漏掉某个字段，这次保存就会把整批页的切块元数据
+    悄悄削掉一层。这里只动 ``updates`` 里点名的键。
+    """
+
+    data = _read_mistake_analysis(batch_id)
+    pages = [item for item in (data.get("pages") or []) if isinstance(item, dict)]
+    for item in pages:
+        try:
+            matched = int(item.get("page_no") or 0) == page_no
+        except (TypeError, ValueError):
+            matched = False
+        if matched:
+            item.update(updates)
+    data["pages"] = pages
+    data["version"] = 6
+    data["generated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    write_private_text_atomic(
+        _mistake_analysis_file(batch_id),
+        json.dumps(data, ensure_ascii=False, indent=2),
+    )
+
+
+def _update_mistake_manual_boxes(batch_id: int, page_no: int, boxes: list) -> None:
+    """把某页的人工框写回 analysis.json。"""
+
+    _update_mistake_page_meta(batch_id, page_no, {"manual_boxes": boxes})
+
+
+def _update_mistake_manual_merges(batch_id: int, page_no: int, merges: list) -> None:
+    """把某页的人工合并组写回 analysis.json（拆分/改方向/调顺序都落在这里）。"""
+
+    _update_mistake_page_meta(batch_id, page_no, {"manual_merges": merges})
+
+
+def _update_mistake_hidden_blocks(batch_id: int, page_no: int, rects: list) -> None:
+    """把某页「被删除的题块」名单写回 analysis.json（恢复＝写空列表）。"""
+
+    _update_mistake_page_meta(batch_id, page_no, {"hidden_blocks": rects})
+
+
+def _update_mistake_cross_page_merges(batch_id: int, merges: list) -> None:
+    """把批次级「跨页合并组」写回 analysis.json 顶层。
+
+    与页面级的几个写入口一样只动自己那一个键。跨页组的成员带页号，任一页的框选 /
+    重切都不该碰到它 —— 只有本函数与 :func:`_write_mistake_analysis` 会改。
+    """
+
+    data = _read_mistake_analysis(batch_id)
+    data["cross_page_merges"] = merges
+    data["version"] = 6
+    data["generated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    write_private_text_atomic(
+        _mistake_analysis_file(batch_id),
+        json.dumps(data, ensure_ascii=False, indent=2),
+    )
+
+
+def _sync_mistake_hidden_meta(batch_id: int, page_no: int, result: dict) -> None:
+    """框选/合并重建之后同步「已删题块」名单，只在真的变了时才写盘。
+
+    重建会把没命中任何项的矩形丢掉（几何变了），不同步的话它们会一直躺在文件里，
+    等哪天几何又撞上就凭空隐藏一道题。
+    """
+
+    matched = result.get("hidden_blocks")
+    if not isinstance(matched, list):
+        return
+    try:
+        stored = _normalize_mistake_hidden(
+            (_mistake_page_entry(batch_id, page_no) or {}).get("hidden_blocks")
+        )
+        same = len(stored) == len(matched) and all(
+            all(abs(left - right) < 1e-9 for left, right in zip(one, two))
+            for one, two in zip(stored, matched)
+        )
+        if not same:
+            _update_mistake_hidden_blocks(batch_id, page_no, matched)
+    except (OSError, MistakeAnalysisError) as exc:
+        print(f"[Mistake Page Hidden Meta Error] {type(exc).__name__}: {exc}")
+
+
+def _blocks_from_meta(entry: dict, page_no: int) -> list:
+    """把元数据里的 blocks（自动基线）还原成 ``BlockRegion`` 列表。"""
+
+    blocks = []
+    for item in entry.get("blocks") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            blocks.append(
+                BlockRegion(
+                    page_no=page_no,
+                    block_index=int(item.get("block_index") or 0),
+                    y_start=float(item.get("y_start") or 0.0),
+                    y_end=float(item.get("y_end") or 0.0),
+                    x_start=float(item.get("x_start") or 0.0),
+                    x_end=float(item.get("x_end") or 1.0),
+                    column_index=int(item.get("column_index") or 0),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return blocks
+
+
+def _page_column_boundary(entry: dict) -> float:
+    """取该页的分栏线（缺失或非法时给 1.0，语义是「整页一栏」）。"""
+
+    layout = entry.get("layout")
+    raw = layout.get("boundary") if isinstance(layout, dict) else entry.get("column_boundary")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _crop_mistake_page_blocks(batch_id: int, page_no: int, page_path, blocks: list) -> None:
+    """重裁本页块图（先落临时名，全部成功后再统一改名）。
+
+    直接往最终文件名上写会有个难查的中间态：裁到第 3 个块时失败，前两个块的图
+    已经被换掉、记录却还是旧的 —— 页面上的块图与记录对不上，而用户看到的只是
+    一个报错。先落临时名，全部成功再换名，失败时旧图原封不动。
+    """
+
+    blocks_dir = _mistake_blocks_dir(batch_id)
+    blocks_dir.mkdir(parents=True, exist_ok=True)
+    staging: list[tuple[Path, Path]] = []
+    try:
+        for block in blocks:
+            target = blocks_dir / f"p{page_no:03d}_b{block.block_index:02d}.png"
+            temp = blocks_dir / f".staging_{target.name}"
+            crop_region(
+                page_path,
+                temp,
+                y_start=block.y_start,
+                y_end=block.y_end,
+                x_start=block.x_start,
+                x_end=block.x_end,
+            )
+            staging.append((temp, target))
+    except Exception:
+        for temp, _target in staging:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+        raise
+    for temp, target in staging:
+        os.replace(temp, target)
+    # 序号变少时清掉旧图，避免「记录数 < 块图数」的孤儿图一直堆在目录里
+    keep = {target.name for _temp, target in staging}
+    for path in blocks_dir.glob(f"p{page_no:03d}_b*.png"):
+        if path.name not in keep:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _ensure_cross_page_block_images(
+    batch_id: int, page_no: int, groups: list, cache: dict
+) -> None:
+    """把跨页组里**属于别页**的成员块图按当前几何裁好。
+
+    单页重建只裁本页的块，而跨页拼图要读对页的 ``p{页}_b{块}.png``。不先裁，拼出来
+    的可能是上一版几何的图，或者压根读不到文件 —— 后者的异常会被兜底成「保留成员
+    图」，用户看到的是「合并了但图没拼上」，控制台只有一行 print。
+    """
+
+    others = sorted(
+        {
+            member["page_no"]
+            for group in groups or []
+            for member in group.get("members") or []
+            if member["page_no"] != page_no
+        }
+    )
+    for other in others:
+        blocks = _mistake_page_blocks(batch_id, other, cache)
+        if not blocks:
+            continue
+        page_path = _mistake_pages_dir(batch_id) / f"page_{other}.png"
+        if not page_path.is_file():
+            continue
+        _crop_mistake_page_blocks(batch_id, other, page_path, blocks)
+
+
+
+# ---- 人工合并（一道题被切成多块时并为一条记录） ----
+#
+# 与「人工框」的区别：框是**遮蔽替换**（框内换成框的矩形），合并是**拼接保留**
+# （多块按方向拼成一张图，各块原图仍在）。因此合并组存「成员矩形的几何」而不是
+# 块序号 —— 重切会让块序号整体位移，但几何位置基本不动，按重叠仍能把成员找回。
+
+#: 成员矩形与题块的交叠面积占比低于此值就认为「这块已经不是原来那块了」
+MISTAKE_MERGE_MIN_OVERLAP = 0.3
+#: 小于此尺寸的矩形视为误点（约等于 A4 页上 2 mm）
+MISTAKE_MERGE_MIN_RECT = 0.004
+#: 相邻成员纵向重叠占比达到此值即判定为「左右分栏的两半」→ 横向拼
+MISTAKE_MERGE_SIDE_BY_SIDE = 0.3
+_MERGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+#: 「删除题块」的命中门槛：交叠面积占**两者中较小者**的比例。
+#:
+#: 与合并的 0.3 不同，这里必须更严：合并配错是把别人的半截拼进来，肉眼可见且能拆；
+#: 而删除配错会让一道**用户没动过的题**直接消失，且不看这条记录根本发现不了。用
+#: 「占较小者」而不是「占名单里那个矩形」也是同一个原因 —— 重切把一个块拆成两半后，
+#: 两半各自完全落在名单矩形里，各算 1.0，删除照样生效；反过来一个只与名单矩形擦边
+#: 的大块，比值很低，不会被误删。
+MISTAKE_HIDE_MIN_OVERLAP = 0.6
+#: 单页忽略名单的长度上限。用户不会删到这么多，超了只可能是脏数据在滚雪球。
+MISTAKE_HIDE_MAX_ENTRIES = 200
+
+
+def _new_mistake_merge_id() -> str:
+    return "m" + uuid.uuid4().hex[:8]
+
+
+def _normalize_mistake_rect(raw) -> Optional[list]:
+    """把一个 ``[x0, y0, x1, y1]`` 归一化到 0–1 且左下/右上顺序正确。"""
+
+    try:
+        x0, y0, x1, y1 = (float(value) for value in (raw or [])[:4])
+    except (TypeError, ValueError):
+        return None
+    x0, x1 = min(x0, x1), max(x0, x1)
+    y0, y1 = min(y0, y1), max(y0, y1)
+    x0, y0 = max(0.0, x0), max(0.0, y0)
+    x1, y1 = min(1.0, x1), min(1.0, y1)
+    if (x1 - x0) < MISTAKE_MERGE_MIN_RECT or (y1 - y0) < MISTAKE_MERGE_MIN_RECT:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _normalize_mistake_merges(raw) -> list:
+    """规范化人工合并组，丢掉不成组的（不足 2 个有效矩形）与非法 id。
+
+    ``id`` 由后端生成（``m<8 位十六进制>``）并被前端原样回传，用于「拆分 / 改
+    方向 / 调顺序」时定位到同一个组；用户手改坏了或撞号就换新 id，不会让两个组
+    共用同一个身份。
+    """
+
+    groups: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        rects = []
+        for rect in item.get("rects") or []:
+            fixed = _normalize_mistake_rect(rect)
+            if fixed is not None:
+                rects.append(fixed)
+        if len(rects) < 2:
+            continue
+        direction = str(item.get("direction") or "").strip().lower()
+        if direction not in ("v", "h"):
+            direction = ""
+        try:
+            primary = int(item.get("primary") or 0)
+        except (TypeError, ValueError):
+            primary = 0
+        primary = max(0, min(primary, len(rects) - 1))
+        merge_id = str(item.get("id") or "").strip()
+        if not _MERGE_ID_PATTERN.match(merge_id):
+            merge_id = _new_mistake_merge_id()
+        groups.append(
+            {
+                "id": merge_id,
+                "rects": rects,
+                "direction": direction,
+                "primary": primary,
+            }
+        )
+    seen: set[str] = set()
+    for group in groups:
+        while group["id"] in seen:
+            group["id"] = _new_mistake_merge_id()
+        seen.add(group["id"])
+    return groups
+
+
+def _guess_merge_direction(rects: list) -> str:
+    """猜拼接方向：成员两两纵向压着 → 左右拼（h）；纵向错开 → 上下拼（v）。
+
+    双栏卷上一道题常被切成「左栏一半 + 右栏一半」，两块纵坐标大量重叠；而跨页
+    眉/栏间接续的两块几乎不重叠。取**所有相邻对的最小值**，避免一个三块组里只
+    有一对重叠就整体误判成横向。
+    """
+
+    if len(rects) < 2:
+        return "v"
+    ratios = []
+    for first, second in zip(rects, rects[1:]):
+        overlap = min(first[3], second[3]) - max(first[1], second[1])
+        reference = min(first[3] - first[1], second[3] - second[1])
+        ratios.append(max(0.0, overlap) / reference if reference > 0 else 0.0)
+    return "h" if min(ratios) >= MISTAKE_MERGE_SIDE_BY_SIDE else "v"
+
+
+def _match_blocks_by_rects(rects: list, blocks: list) -> list:
+    """按矩形把题块配成成员，返回**块下标**列表（顺序同 ``rects``，配不上则缺）。
+
+    一对一贪心：交叠面积占矩形面积比例大的优先。宁可配不上（该成员缺席）也不
+    乱配 —— 配错的后果是把别的题的半截拼进这道题。
+    """
+
+    pairs = []
+    for rect_index, rect in enumerate(rects):
+        rect_area = max(1e-9, (rect[2] - rect[0]) * (rect[3] - rect[1]))
+        for block_index, block in enumerate(blocks or []):
+            width = min(rect[2], block.x_end) - max(rect[0], block.x_start)
+            height = min(rect[3], block.y_end) - max(rect[1], block.y_start)
+            if width <= 0 or height <= 0:
+                continue
+            ratio = (width * height) / rect_area
+            if ratio < MISTAKE_MERGE_MIN_OVERLAP:
+                continue
+            pairs.append((ratio, rect_index, block_index))
+    pairs.sort(key=lambda item: item[0], reverse=True)
+    used_rects: set[int] = set()
+    used_blocks: set[int] = set()
+    chosen: list = [None] * len(rects)
+    for _ratio, rect_index, block_index in pairs:
+        if rect_index in used_rects or block_index in used_blocks:
+            continue
+        used_rects.add(rect_index)
+        used_blocks.add(block_index)
+        chosen[rect_index] = block_index
+    return [index for index in chosen if index is not None]
+
+
+def _item_rect(members: list) -> list:
+    """渲染项的外接矩形（合并组＝成员并集）。忽略名单就是按它比对的。"""
+
+    return [
+        min(block.x_start for block in members),
+        min(block.y_start for block in members),
+        max(block.x_end for block in members),
+        max(block.y_end for block in members),
+    ]
+
+
+def _apply_manual_merges(blocks: list, merges: list) -> list:
+    """把合并组作用到题块列表上，返回「渲染项」（合并组 + 未合并块）。
+
+    每项 ``{"kind", "block_index", "members", "rect", "direction", "merge_id",
+    "primary_index"}``。合并组的 ``block_index`` 取成员中最小的那个，未合并块用
+    自己的 —— 两类中不会有重复（成员块已被占用，不会再单列）。
+    """
+
+    used: set[int] = set()
+    items: list[dict] = []
+    for group in merges or []:
+        indices = [
+            index
+            for index in _match_blocks_by_rects(group["rects"], blocks)
+            if index not in used
+        ]
+        if len(indices) < 2:
+            continue
+        used.update(indices)
+        members = [blocks[index] for index in indices]
+        member_rects = [
+            [block.x_start, block.y_start, block.x_end, block.y_end]
+            for block in members
+        ]
+        direction = group["direction"] or _guess_merge_direction(member_rects)
+        primary = group["primary"] if group["primary"] < len(members) else 0
+        items.append(
+            {
+                "kind": "merged",
+                "block_index": min(block.block_index for block in members),
+                "members": members,
+                "rect": _item_rect(members),
+                "direction": direction,
+                "merge_id": group["id"],
+                "primary_index": primary,
+            }
+        )
+    for index, block in enumerate(blocks or []):
+        if index in used:
+            continue
+        items.append(
+            {
+                "kind": "single",
+                "block_index": block.block_index,
+                "members": [block],
+                "rect": _item_rect([block]),
+                "direction": "v",
+                "merge_id": "",
+                "primary_index": 0,
+            }
+        )
+    items.sort(key=lambda item: item["block_index"])
+    return items
+
+
+# ---- 跨页合并（一道题被页边界切成两半：一半在上一页尾部，一半在下一页头部） ----
+#
+# 与页内合并的**唯一**结构差异：成员必须带页号。``page.manual_merges[].rects`` 是
+# 页内相对比例（0–1），页 9 的 0.891 与页 10 的 0.039 值域完全重叠 —— 后端没有任何
+# 办法判断哪个属于哪一页。所以跨页组只能挂在文件顶层，成员写成
+# ``{"page_no": 9, "rect": [x0, y0, x1, y1]}``。
+#
+# 由此带来三件必须一起处理的事：
+#   1. 记录落在哪一页 —— 取 ``primary`` 成员所在页，卡片与页图才对得上；
+#   2. 非宿主页上的那一半 —— 被「占用」，不再单独出记录，否则同一道题库里有两份；
+#   3. 拼图要跨页取图 —— 宿主页重建前必须先把对页的块图按当前几何裁好。
+
+#: 一个跨页组的成员上限。题干 + 选项 + 尾注是常态，再多只可能是脏数据。
+MISTAKE_CROSS_PAGE_MAX_MEMBERS = 8
+
+
+def _normalize_cross_page_members(raw) -> list:
+    """校验跨页组的成员：每个成员必须带合法页号与合法页内矩形。"""
+
+    members: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            page_no = int(item.get("page_no") or 0)
+        except (TypeError, ValueError):
+            continue
+        rect = _normalize_mistake_rect(item.get("rect"))
+        if page_no <= 0 or rect is None:
+            continue
+        members.append({"page_no": page_no, "rect": rect})
+    return members
+
+
+def _normalize_cross_page_merges(raw) -> list:
+    """校验跨页组列表。
+
+    刻意**拒绝**成员全在同一页的组：那种组属于 ``page.manual_merges``，放进来会让
+    同一件事有两套落盘位置，重建时谁先谁后就成了隐式约定。宁可在这里丢掉。
+    """
+
+    groups: list[dict] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        members = _normalize_cross_page_members(item.get("members"))
+        if len(members) < 2 or len(members) > MISTAKE_CROSS_PAGE_MAX_MEMBERS:
+            continue
+        if len({member["page_no"] for member in members}) < 2:
+            continue
+        merge_id = str(item.get("id") or "").strip()
+        if not _MERGE_ID_PATTERN.match(merge_id) or merge_id in seen:
+            merge_id = _new_mistake_merge_id()
+        seen.add(merge_id)
+        try:
+            primary = int(item.get("primary") or 0)
+        except (TypeError, ValueError):
+            primary = 0
+        groups.append(
+            {
+                "id": merge_id,
+                "members": members,
+                # 跨页组只有「上下拼」一个正确答案：两页的横向坐标各自独立，左右
+                # 拼没有意义。锁死在这里，前端也就不会长出必然被拒的入口。
+                "direction": "v",
+                "primary": max(0, min(primary, len(members) - 1)),
+            }
+        )
+    return groups
+
+
+def _cross_page_merges(batch_id: int) -> list:
+    """读回本批次的跨页合并组。
+
+    读不出来时按「没有」处理：调用点是重建流程，退化成「不合并」只是这次少拼一张
+    图，而抛异常会让一次普通的翻页/框选直接失败。
+    """
+
+    try:
+        return _normalize_cross_page_merges(
+            _read_mistake_analysis(batch_id).get("cross_page_merges")
+        )
+    except MistakeAnalysisError as exc:
+        print(f"[Mistake Cross Page Read Error] {type(exc).__name__}: {exc}")
+        return []
+
+
+def _mistake_page_blocks(batch_id: int, page_no: int, cache: dict) -> list:
+    """取某页「自动基线 + 人工框」的块列表（带缓存，页不存在返回空列表）。
+
+    跨页组要按矩形在**对页**上找成员，而重建一次的入口只带了一页的 entry。这里统一
+    走「查缓存 → 没有就按同一套规则重算」，保证同一个矩形在两边解出的是同一个块。
+    """
+
+    if page_no in cache:
+        return cache[page_no]
+    try:
+        entry = _mistake_page_entry(batch_id, page_no)
+    except MistakeAnalysisError:
+        entry = None
+    blocks: list = []
+    if entry:
+        blocks = merge_manual_boxes(
+            _blocks_from_meta(entry, page_no),
+            entry.get("manual_boxes") or [],
+            page_no=page_no,
+            column_boundary=_page_column_boundary(entry),
+        )
+    cache[page_no] = blocks
+    return blocks
+
+
+def _resolve_cross_page_group(batch_id: int, group: dict, cache: dict):
+    """把跨页组的成员逐个解成 ``(页号, 块)``；**任一成员配不上就整组作废**。
+
+    页内合并允许「凑够两块就行」，跨页组不能：只解到一半意味着这道题的另一半会以
+    独立卡片重新出现，用户看到的是「合了个寂寞」，还不如原样不动。
+    """
+
+    resolved: list = []
+    for member in group.get("members") or []:
+        blocks = _mistake_page_blocks(batch_id, member["page_no"], cache)
+        indices = _match_blocks_by_rects([member["rect"]], blocks)
+        if not indices:
+            return None
+        resolved.append((member["page_no"], blocks[indices[0]]))
+    return resolved or None
+
+
+def _apply_cross_page_merges(
+    batch_id: int, page_no: int, blocks: list, groups: list, cache: dict
+) -> tuple[list, set]:
+    """把跨页组作用到本页，返回 ``(本页的跨页合并项, 本页被占用的块编号)``。
+
+    - 宿主页（``primary`` 成员所在页）→ 产出合并项，成员图**跨页**取名；
+    - 非宿主页 → 只产出「占用」，那一半不再单独出记录。
+
+    项的形状与 :func:`_apply_manual_merges` 的产物一致，额外带 ``member_names`` /
+    ``member_count`` / ``primary_block_index``：成员可能不在本页，``members`` 只留
+    本页那几块（外接矩形、栏号都必须是页内的量）。
+    """
+
+    items: list[dict] = []
+    consumed: set = set()
+    for group in groups or []:
+        members = group.get("members") or []
+        if not any(member["page_no"] == page_no for member in members):
+            continue
+        resolved = _resolve_cross_page_group(batch_id, group, cache)
+        if resolved is None:
+            continue
+        local = [block for member_page, block in resolved if member_page == page_no]
+        if not local:
+            continue
+        consumed.update(block.block_index for block in local)
+        primary_page, primary_block = resolved[group["primary"]]
+        if primary_page != page_no:
+            continue
+        items.append(
+            {
+                "kind": "merged",
+                "cross": True,
+                "block_index": min(block.block_index for block in local),
+                "members": local,
+                "member_names": [
+                    f"p{member_page:03d}_b{block.block_index:02d}.png"
+                    for member_page, block in resolved
+                ],
+                "member_count": len(resolved),
+                "rect": _item_rect(local),
+                "direction": "v",
+                "merge_id": group["id"],
+                "primary_index": 0,
+                "primary_block_index": primary_block.block_index,
+            }
+        )
+    return items, consumed
+
+
+
+
+def _rect_area(rect: list) -> float:
+    return max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
+
+
+def _rect_intersection_area(first: list, second: list) -> float:
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    return width * height
+
+
+def _hidden_hit(rect: list, other: list) -> bool:
+    """名单里的矩形 ``rect`` 是否命中某个渲染项 ``other``（＝它就是被删的那一块）。
+
+    两个条件都要满足，缺一个都会出问题：
+
+    - 交叠占**较小者** ≥ 阈值：重切把一个块拆成两半后，两半各自完全落在名单矩形
+      里（比值 1.0），删除照样生效；只跟名单擦个边的大块比值很低，不会误删。
+    - 交叠占**这一项自身** ≥ 阈值：反向保护。用户删掉一个小碎片（页眉、选项残段）
+      之后，重切若把那一片并进了包含一道完整题的更大的块，必须判「不命中」——
+      否则一次重切就顺手吞掉一道用户从没动过的题，而且不看卡片列表根本发现不了。
+      真删错了让用户再点一次，比悄悄少一道题好。
+    """
+
+    overlap = _rect_intersection_area(rect, other)
+    if overlap <= 0:
+        return False
+    smallest = min(_rect_area(rect), _rect_area(other))
+    own = _rect_area(other)
+    if smallest <= 1e-9 or own <= 1e-9:
+        return False
+    return (
+        overlap / smallest >= MISTAKE_HIDE_MIN_OVERLAP
+        and overlap / own >= MISTAKE_HIDE_MIN_OVERLAP
+    )
+
+
+def _normalize_mistake_hidden(raw) -> list:
+    """规范化「被删除的题块」名单：一串 ``[x0,y0,x1,y1]`` 矩形。
+
+    存几何而不是块序号，理由与人工合并组相同 —— 重切后块号会变，几何不会。
+    """
+
+    rects: list[list] = []
+    seen: set[tuple] = set()
+    for item in raw or []:
+        fixed = _normalize_mistake_rect(item)
+        if fixed is None:
+            continue
+        key = tuple(fixed)
+        if key in seen:
+            continue
+        seen.add(key)
+        rects.append(fixed)
+        if len(rects) >= MISTAKE_HIDE_MAX_ENTRIES:
+            break
+    return rects
+
+
+def _apply_hidden_blocks(items: list, hidden: list) -> tuple[list, list]:
+    """剔掉被删除的渲染项，返回 ``(保留的项, 真正命中的矩形)``。
+
+    第二个返回值要写回元数据：没命中任何项的矩形（比如用户删完又重切、几何全变了）
+    留着只会在每次重建时做一遍无用比对，越积越多。
+    """
+
+    if not hidden:
+        return items, []
+    kept: list[dict] = []
+    matched: list[list] = []
+    for item in items:
+        hit = None
+        for rect in hidden:
+            if _hidden_hit(rect, item["rect"]):
+                hit = rect
+                break
+        if hit is None:
+            kept.append(item)
+        elif hit not in matched:
+            matched.append(hit)
+    return kept, matched
+
+
+def _compose_merged_block_image(sources: list, target: Path, direction: str) -> None:
+    """把成员块图拼成一张（白底）：v 上下堆（统一宽）、h 横向拼（统一高）。
+
+    不缩放的那张原样贴，其余等比例缩放 —— 双栏左右两半的裁图宽度本来就有 1–2
+    像素差，直接按原尺寸贴会留白缝。
+    """
+
+    images = []
+    for path in sources or []:
+        with Image.open(path) as handle:
+            images.append(handle.convert("RGB"))
+    if not images:
+        raise ValueError("合并组没有可拼接的块图。")
+    resample = getattr(Image, "LANCZOS", Image.BICUBIC)
+    if direction == "h":
+        height = max(image.height for image in images)
+        scaled = [
+            image
+            if image.height == height
+            else image.resize(
+                (max(1, round(image.width * height / image.height)), height), resample
+            )
+            for image in images
+        ]
+        canvas = Image.new("RGB", (max(1, sum(im.width for im in scaled)), max(1, height)), "white")
+        offset = 0
+        for image in scaled:
+            canvas.paste(image, (offset, 0))
+            offset += image.width
+    else:
+        width = max(image.width for image in images)
+        scaled = [
+            image
+            if image.width == width
+            else image.resize(
+                (width, max(1, round(image.height * width / image.width))), resample
+            )
+            for image in images
+        ]
+        canvas = Image.new("RGB", (max(1, width), max(1, sum(im.height for im in scaled))), "white")
+        offset = 0
+        for image in scaled:
+            canvas.paste(image, (0, offset))
+            offset += image.height
+    canvas.save(target, format="PNG")
+
+
+def _rebuild_mistake_page_records(db, batch, batch_id: int, page_no: int, page_path, entry: dict) -> dict:
+    """按「自动基线 + 人工框」重建一页的题块记录。
+
+    与整批切题共用同一套规则（合并 → 裁图 → 按矩形重叠继承作答状态 → 删旧插新），
+    区别只在范围限死一页：用户改一页不该等整批重新渲染，也不该把其他页没动过的
+    块图重裁一遍。
+    """
+
+    blocks = merge_manual_boxes(
+        _blocks_from_meta(entry, page_no),
+        entry.get("manual_boxes") or [],
+        page_no=page_no,
+        column_boundary=_page_column_boundary(entry),
+    )
+    if not blocks:
+        raise PageSplitError("本页没有可用的题块：请先切题，或画一个框。")
+    # 跨页组：本页可能是宿主（出记录），也可能只是另一半（被占用）。先把对页的块图
+    # 按当前几何裁好 —— 拼图跨页取文件，晚一步拿到的是上一版，或者根本没有。
+    blocks_cache: dict = {page_no: blocks}
+    cross_groups = _cross_page_merges(batch_id)
+    _ensure_cross_page_block_images(batch_id, page_no, cross_groups, blocks_cache)
+    cross_items, cross_consumed = _apply_cross_page_merges(
+        batch_id, page_no, blocks, cross_groups, blocks_cache
+    )
+    # 人工合并组：矩形→成员块，得到「合并组 + 未合并块」的渲染项列表。
+    # 被跨页组占用的块先摘掉，否则同一块会既进页内合并组、又进跨页项。
+    remaining = [block for block in blocks if block.block_index not in cross_consumed]
+    merges = _normalize_mistake_merges(entry.get("manual_merges"))
+    items = _apply_manual_merges(remaining, merges)
+    items = items + cross_items
+    items.sort(key=lambda item: item["block_index"])
+    # 方向没指定时由几何判定，判定结果要**回写进元数据**：否则落盘的是空方向，
+    # 前端拿不到「当前是上下还是左右」，也就无从提供切换入口。
+    resolved = {item["merge_id"]: item for item in items if item["kind"] == "merged"}
+    merges = [
+        {
+            **group,
+            "direction": resolved[group["id"]]["direction"],
+            "primary": resolved[group["id"]]["primary_index"],
+        }
+        for group in merges
+        if group["id"] in resolved
+    ]
+    # 被删掉的题块：在合并之后再剔，这样「删掉一整道合并题」＝名单里那个外接矩形
+    # 命中合并项，一次删干净，不用逐个成员去点。
+    hidden = _normalize_mistake_hidden(entry.get("hidden_blocks"))
+    items, hidden = _apply_hidden_blocks(items, hidden)
+
+    previous = (
+        db.query(MistakeRecord)
+        .filter(
+            MistakeRecord.batch_id == batch_id,
+            MistakeRecord.page_no == page_no,
+        )
+        .order_by(MistakeRecord.block_index.asc())
+        .all()
+    )
+    matched = _match_mistake_records(previous, blocks)
+
+    _crop_mistake_page_blocks(batch_id, page_no, page_path, blocks)
+    blocks_dir = _mistake_blocks_dir(batch_id)
+    composed: set[str] = set()
+    for item in items:
+        members = item["members"]
+        # 跨页项自带成员图名（成员不在本页）与 primary 的块号；页内项按本页拼。
+        # primary 必须按**块号**回查作答状态：跨页项的 primary_block_index 是它自己
+        # 那一页的块号，直接用 members[primary] 会在别的页上取错。
+        primary_index = item.get("primary_index", 0)
+        primary = members[primary_index] if primary_index < len(members) else members[0]
+        primary_block_index = item.get("primary_block_index", primary.block_index)
+        member_names = item.get("member_names") or [
+            f"p{page_no:03d}_b{block.block_index:02d}.png" for block in members
+        ]
+        if item["kind"] == "merged":
+            crop_name = f"p{page_no:03d}_m{item['merge_id']}.png"
+            staging = blocks_dir / f".staging_{crop_name}"
+            try:
+                _compose_merged_block_image(
+                    [blocks_dir / name for name in member_names],
+                    staging,
+                    item["direction"],
+                )
+            except (OSError, ValueError) as exc:
+                # 拼图失败就把成员当独立题块留下：宁可多一道题，也不能让这道题
+                # 从记录里消失。
+                print(f"[Mistake Merge Compose Error] {type(exc).__name__}: {exc}")
+                crop_name = member_names[item["primary_index"]]
+            else:
+                os.replace(staging, blocks_dir / crop_name)
+                composed.add(crop_name)
+        else:
+            crop_name = member_names[0]
+        columns = {block.column_index for block in members}
+        record = MistakeRecord(
+            batch_id=batch_id,
+            student_id=batch.student_id,
+            subject=batch.subject or "math",
+            page_no=page_no,
+            block_index=item["block_index"],
+            block_y_start=round(min(block.y_start for block in members), 6),
+            block_y_end=round(max(block.y_end for block in members), 6),
+            block_x_start=round(min(block.x_start for block in members), 6),
+            block_x_end=round(max(block.x_end for block in members), 6),
+            # 跨栏合并后不再属于某一栏；只有成员同栏才保留栏号
+            column_index=list(columns)[0] if len(columns) == 1 else 0,
+            image_block=_mistake_block_web_url(batch_id, crop_name),
+            recognize_status="pending",
+            grad_status="unknown",
+            merge_id=item["merge_id"] if item["kind"] == "merged" else "",
+            merged_block_count=item.get("member_count") or len(members),
+            block_images=json.dumps(
+                [_mistake_block_web_url(batch_id, name) for name in member_names],
+                ensure_ascii=False,
+            )
+            if item["kind"] == "merged"
+            else "[]",
+        )
+        origin = matched.get(primary_block_index)
+        if origin is not None:
+            for field_name in MISTAKE_CARRY_OVER_FIELDS:
+                setattr(record, field_name, getattr(origin, field_name))
+        db.add(record)
+    # 拆分后旧合成图会留在目录里变成孤儿（名字里带 merge id，不会被块图清理扫到）
+    for path in blocks_dir.glob(f"p{page_no:03d}_m*.png"):
+        if path.name not in composed:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    # 状态已经复制进新记录，旧记录整体删除（含没匹配上的）—— 留着就是同一道题
+    # 在库里存在两份，错题本与统计都会跟着翻倍。
+    for stale in previous:
+        db.delete(stale)
+    db.flush()
+    return {
+        "block_count": len(items),
+        "removed": len(previous),
+        "merges": merges,
+        "hidden_blocks": hidden,
+    }
+
+
+def run_mistake_cut_task(
+    task_id: str,
+    batch_id: int,
+    page_layouts: Optional[dict] = None,
+) -> None:
+    """切题任务：转页图 → 判栏 → 行投影切块 → 合并题块（裁剪题块图并写记录）。
+
+    ``page_layouts`` 非空表示人工改过栏目后重切：``{"1": "double"}`` 人工指定
+    的栏目（覆盖自动判栏），``{"1": {"mode": "double", "boundary": 0.6}}`` 还
+    带上用户拖过的分栏线。
+
+    重切会按纵向+横向重叠继承已有记录的作答状态。
+    """
+
+    db = _mistake_session()
+    step_key = MISTAKE_CUT_STEPS[0]["key"]
+    try:
+        batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+        if batch is None:
+            DOCUMENT_TASKS.fail(task_id, "批次不存在或已被删除。")
+            return
+        source = _mistake_source_path(batch_id)
+        if source is None:
+            DOCUMENT_TASKS.fail(task_id, "批次的源文件已丢失，请重新上传。")
+            return
+
+        # 先探一次元数据可读性：重切要把已有人工框/合并/删除名单带过去，而读失败时
+        # 只能拿空壳顶上 —— 那等于「一点重切、辛苦画的框全没了」，最后还会把空壳
+        # 写回文件。放在这里是为了在渲染整批页图之前就失败，不必白跑几分钟。
+        try:
+            _read_mistake_analysis(batch_id)
+        except MistakeAnalysisError as exc:
+            message = str(exc)
+            print(f"[Mistake Cut Error] batch={batch_id} 元数据不可读：{message}")
+            _mark_mistake_batch_failed(batch_id, message)
+            DOCUMENT_TASKS.step_error(task_id, step_key, message)
+            return
+
+        DOCUMENT_TASKS.step_start(task_id, step_key, "正在把扫描件转成页图…")
+        page_paths = render_source_to_pages(
+            source,
+            _mistake_pages_dir(batch_id),
+            dpi=MISTAKE_RENDER_DPI,
+            max_pages=MISTAKE_MAX_SOURCE_PAGES,
+            stem="page",
+        )
+        DOCUMENT_TASKS.check_cancelled(task_id)
+        batch.page_count = len(page_paths)
+        db.commit()
+        DOCUMENT_TASKS.update(
+            task_id, progress=30, log=f"已生成 {len(page_paths)} 张页图。"
+        )
+
+        step_key = "line_projection"
+        DOCUMENT_TASKS.step_start(task_id, step_key, "正在判栏并做行投影切块…")
+        # PDF 文本层：既用来判栏（电子版最准），也用来找题号切点（行投影切不开
+        # 密排单栏卷子，见 page_block_split 的「题号切点」一节）。整份只读一次，
+        # 带文字的那份顺手去掉文字就是判栏要的那份。
+        # 读取失败 / 纯扫描件时两者都为空：判栏自动回退图像，切点一个都不加。
+        page_text_lines = extract_pdf_text_lines(source)
+        page_text_rows = {
+            page_no: [(x0, x1, y0, y1) for x0, x1, y0, y1, _text in rows]
+            for page_no, rows in page_text_lines.items()
+        }
+        normalized_layouts = _normalize_mistake_page_layouts(page_layouts)
+        analyses = analyze_page_images(
+            page_paths,
+            start_page_no=1,
+            page_text_rows=page_text_rows,
+            page_text_lines=page_text_lines,
+            page_layouts=normalized_layouts,
+        )
+        # 人工框选：整批重切时把已存的人工框原样带过来。它们叠在 blocks 之上，
+        # 不属于「按行投影重算」的范围；不带上就成了「一点重切、辛苦画的框全没了」。
+        previous_pages = {
+            str(item.get("page_no")): item
+            for item in (_read_mistake_analysis(batch_id).get("pages") or [])
+            if isinstance(item, dict)
+        }
+        for analysis in analyses:
+            analysis.manual_boxes = _normalize_mistake_boxes(
+                (previous_pages.get(str(analysis.page_no)) or {}).get("manual_boxes")
+            )
+            # 人工合并同理：成员用几何定位，重切后按重叠找回来，因此原样带过即可
+            analysis.manual_merges = _normalize_mistake_merges(
+                (previous_pages.get(str(analysis.page_no)) or {}).get("manual_merges")
+            )
+            # 用户删掉的题块也带过：不落盘的话，一次重切就让它们全部复活
+            analysis.hidden_blocks = _normalize_mistake_hidden(
+                (previous_pages.get(str(analysis.page_no)) or {}).get("hidden_blocks")
+            )
+        DOCUMENT_TASKS.check_cancelled(task_id)
+
+        step_key = "merge_blocks"
+        DOCUMENT_TASKS.step_start(task_id, step_key, "正在裁剪题块图并写入记录…")
+        # 题块图按页内序号命名，重切后序号可能变少，先清空目录避免残留孤儿图
+        _reset_directory(_mistake_blocks_dir(batch_id))
+        blocks_dir = _mistake_blocks_dir(batch_id)
+        page_by_no = {index + 1: path for index, path in enumerate(page_paths)}
+
+        total_blocks = 0
+        page_total = max(1, len(analyses))
+        # 第一趟：把每一页的块图裁完。跨页组的成员跨两页，拼图要读对页的文件；原本
+        # 「裁一页 → 建这一页的记录」交替着来，先建的那页会拿到还没裁的对页。
+        blocks_by_page: dict = {}
+        for analysis in analyses:
+            page_path = page_by_no.get(analysis.page_no)
+            if page_path is None:
+                continue
+            # 落盘的 blocks 是「自动基线」，裁图用的是「基线 + 人工框」的合并结果。
+            # 两者分开，是为了让用户删掉一个画错的框后，被它压住的自动块能原样
+            # 回来（合并结果一旦写回 blocks，被吸收的碎片就再也找不回了）。
+            page_blocks = merge_manual_boxes(
+                analysis.blocks,
+                analysis.manual_boxes,
+                page_no=analysis.page_no,
+                column_boundary=analysis.layout.boundary,
+            )
+            blocks_by_page[analysis.page_no] = page_blocks
+            for block in page_blocks:
+                crop_path = (
+                    blocks_dir / f"p{analysis.page_no:03d}_b{block.block_index:02d}.png"
+                )
+                crop_region(
+                    page_path,
+                    crop_path,
+                    y_start=block.y_start,
+                    y_end=block.y_end,
+                    x_start=block.x_start,
+                    x_end=block.x_end,
+                )
+            DOCUMENT_TASKS.check_cancelled(task_id)
+
+        # 跨页组：成员找不全的组直接丢掉，不留一组永远解不开的成员在文件里
+        cross_groups = [
+            group
+            for group in _cross_page_merges(batch_id)
+            if _resolve_cross_page_group(batch_id, group, blocks_by_page) is not None
+        ]
+
+        # 第二趟：建记录（块图已齐，跨页拼图随时可读）
+        for analysis in analyses:
+            page_path = page_by_no.get(analysis.page_no)
+            if page_path is None:
+                continue
+            page_blocks = blocks_by_page.get(analysis.page_no) or []
+            previous = (
+                db.query(MistakeRecord)
+                .filter(
+                    MistakeRecord.batch_id == batch_id,
+                    MistakeRecord.page_no == analysis.page_no,
+                )
+                .order_by(MistakeRecord.block_index.asc())
+                .all()
+            )
+            matched = _match_mistake_records(previous, page_blocks)
+            cross_items, cross_consumed = _apply_cross_page_merges(
+                batch_id, analysis.page_no, page_blocks, cross_groups, blocks_by_page
+            )
+            # 人工合并：成员图已裁好，直接按方向合成，建**一条**记录
+            merges = _normalize_mistake_merges(analysis.manual_merges)
+            remaining = [
+                block
+                for block in page_blocks
+                if block.block_index not in cross_consumed
+            ]
+            items = _apply_manual_merges(remaining, merges)
+            items = items + cross_items
+            items.sort(key=lambda item: item["block_index"])
+            # 与单页重建一致：只保留真正成组的，并把几何判定出的方向写回元数据
+            resolved = {
+                item["merge_id"]: item for item in items if item["kind"] == "merged"
+            }
+            analysis.manual_merges = [
+                {
+                    **group,
+                    "direction": resolved[group["id"]]["direction"],
+                    "primary": resolved[group["id"]]["primary_index"],
+                }
+                for group in merges
+                if group["id"] in resolved
+            ]
+            # 被删掉的题块同理：几何锚定，重切后按重叠剔掉，命中的版本写回元数据，
+            # 没命中的（几何已变）自然从名单里掉出去，不会越积越多。
+            items, analysis.hidden_blocks = _apply_hidden_blocks(
+                items, _normalize_mistake_hidden(analysis.hidden_blocks)
+            )
+            for item in items:
+                members = item["members"]
+                # 跨页项自带成员图名（成员不在本页）与 primary 的块号
+                primary_index = item.get("primary_index", 0)
+                primary = (
+                    members[primary_index] if primary_index < len(members) else members[0]
+                )
+                primary_block_index = item.get(
+                    "primary_block_index", primary.block_index
+                )
+                member_names = item.get("member_names") or [
+                    f"p{analysis.page_no:03d}_b{block.block_index:02d}.png"
+                    for block in members
+                ]
+                if item["kind"] == "merged":
+                    crop_name = f"p{analysis.page_no:03d}_m{item['merge_id']}.png"
+                    try:
+                        _compose_merged_block_image(
+                            [blocks_dir / name for name in member_names],
+                            blocks_dir / crop_name,
+                            item["direction"],
+                        )
+                    except (OSError, ValueError) as exc:
+                        print(
+                            f"[Mistake Merge Compose Error] {type(exc).__name__}: {exc}"
+                        )
+                        crop_name = member_names[item["primary_index"]]
+                else:
+                    crop_name = member_names[0]
+                columns = {block.column_index for block in members}
+                record = MistakeRecord(
+                    batch_id=batch_id,
+                    student_id=batch.student_id,
+                    subject=batch.subject or "math",
+                    page_no=analysis.page_no,
+                    block_index=item["block_index"],
+                    block_y_start=round(min(b.y_start for b in members), 6),
+                    block_y_end=round(max(b.y_end for b in members), 6),
+                    block_x_start=round(min(b.x_start for b in members), 6),
+                    block_x_end=round(max(b.x_end for b in members), 6),
+                    column_index=list(columns)[0] if len(columns) == 1 else 0,
+                    image_block=_mistake_block_web_url(batch_id, crop_name),
+                    recognize_status="pending",
+                    grad_status="unknown",
+                    merge_id=item["merge_id"] if item["kind"] == "merged" else "",
+                    merged_block_count=item.get("member_count") or len(members),
+                    block_images=json.dumps(
+                        [
+                            _mistake_block_web_url(batch_id, name)
+                            for name in member_names
+                        ],
+                        ensure_ascii=False,
+                    )
+                    if item["kind"] == "merged"
+                    else "[]",
+                )
+                origin = matched.get(primary_block_index)
+                if origin is not None:
+                    for field_name in MISTAKE_CARRY_OVER_FIELDS:
+                        setattr(record, field_name, getattr(origin, field_name))
+                db.add(record)
+                total_blocks += 1
+            # 状态已经复制进新记录，旧记录整体删除（含没匹配上的）—— 否则同一道题
+            # 会在库里留两份：一份带状态、份不带，错题本与统计都会跟着翻倍。
+            for stale in previous:
+                db.delete(stale)
+            db.flush()
+            DOCUMENT_TASKS.update(
+                task_id,
+                progress=60 + int(analysis.page_no / page_total * 35),
+                log=(
+                    f"第 {analysis.page_no}/{len(analyses)} 页："
+                    f"切出 {len(items)} 个题块。"
+                ),
+            )
+            DOCUMENT_TASKS.check_cancelled(task_id)
+
+        _write_mistake_analysis(batch_id, analyses, cross_groups)
+        batch.status = "reviewing"
+        batch.note = ""
+        db.commit()
+        DOCUMENT_TASKS.step_complete_all(task_id)
+        DOCUMENT_TASKS.complete(
+            task_id,
+            batch_id=batch_id,
+            page_count=len(page_paths),
+            block_count=total_blocks,
+            log=f"切题完成：{len(page_paths)} 页，共 {total_blocks} 个题块。",
+        )
+    except TaskCancelled:
+        db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001 - 统一转成步骤级失败，前端能定位到哪一步
+        db.rollback()
+        message = str(exc) or type(exc).__name__
+        print(f"[Mistake Cut Error] batch={batch_id} step={step_key}: {message}")
+        _mark_mistake_batch_failed(batch_id, message)
+        DOCUMENT_TASKS.step_error(task_id, step_key, message)
+    finally:
+        db.close()
+
+
+# ---- 异步任务：识别 ----
+
+
+def run_mistake_recognize_task(
+    task_id: str, batch_id: int, record_ids: list, engine: str = ""
+) -> None:
+    """识别任务：逐块识别（N/M）→ 后处理归一 → 写入记录。
+
+    单块失败**不阻断整批**：该块标 ``recognize_status = failed``，错误汇总进任务状态，
+    前端可单块重试（沿用「失败卡片加重试」的既有模式）。识别进度条的 M 是选中题数，
+    不是总题块数 —— 未点选为错题的题块根本不进队列。
+    """
+
+    db = _mistake_session()
+    step_key = MISTAKE_RECOGNIZE_STEPS[0]["key"]
+    try:
+        batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+        if batch is None:
+            DOCUMENT_TASKS.fail(task_id, "批次不存在或已被删除。")
+            return
+
+        ordered_ids: list[int] = []
+        for raw in record_ids or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value not in ordered_ids:
+                ordered_ids.append(value)
+        if ordered_ids:
+            records = (
+                db.query(MistakeRecord)
+                .filter(
+                    MistakeRecord.batch_id == batch_id,
+                    MistakeRecord.id.in_(ordered_ids),
+                )
+                .order_by(MistakeRecord.page_no.asc(), MistakeRecord.block_index.asc())
+                .all()
+            )
+        else:
+            records = []
+        total = len(records)
+        if total == 0:
+            DOCUMENT_TASKS.step_complete_all(task_id)
+            DOCUMENT_TASKS.complete(
+                task_id, batch_id=batch_id, recognized=0, failed=0,
+                log="没有需要识别的题目。",
+            )
+            return
+
+        subject = batch.subject or "math"
+        # 教材树按学科取一次、整批共用（数学是活动大纲，物化是内置只读树）。
+        # 取错树比不取树更糟：拿数学树去套物理题会把物理题打上数学章节。
+        curriculum = get_subject_curriculum_tree(subject)
+        pending: list[int] = []
+        done_ids: list[int] = []
+        errors: list[str] = []
+        providers: list[str] = []
+
+        DOCUMENT_TASKS.step_start(task_id, step_key, f"共 {total} 道待识别…")
+        # 把队列挂到任务上：前端据此渲染「识别中 / 排队中」角标，并在轮到某道题时
+        # 把它锁成只读 —— 否则用户手写完，识别结果落库会无声覆盖。
+        DOCUMENT_TASKS.update(
+            task_id,
+            recognize_queue=[record.id for record in records],
+            recognize_done=[],
+            recognize_current=None,
+        )
+        for index, record in enumerate(records, start=1):
+            DOCUMENT_TASKS.check_cancelled(task_id)
+            DOCUMENT_TASKS.step_start(
+                task_id, step_key, f"正在识别第 {index}/{total} 题…"
+            )
+            DOCUMENT_TASKS.update(
+                task_id,
+                recognize_current=record.id,
+                progress=int((index - 1) / total * 95),
+                log=f"正在识别第 {index}/{total} 题…",
+            )
+            image_path, image_error = _mistake_record_image_path(record)
+            if image_path is None:
+                record.recognize_status = "failed"
+                errors.append(
+                    f"第 {index} 题（记录 {record.id}）：{image_error}"
+                )
+                done_ids.append(record.id)
+                db.commit()
+                DOCUMENT_TASKS.update(
+                    task_id,
+                    recognize_done=list(done_ids),
+                    progress=int(index / total * 95),
+                )
+                continue
+            try:
+                payload, label = recognize_mistake_block(
+                    str(image_path), subject, engine
+                )
+            except Exception as exc:  # noqa: BLE001 - 单块失败不阻断整批
+                record.recognize_status = "failed"
+                errors.append(f"第 {index} 题（记录 {record.id}）：{exc}")
+                done_ids.append(record.id)
+                db.commit()
+                DOCUMENT_TASKS.update(
+                    task_id,
+                    recognize_done=list(done_ids),
+                    progress=int(index / total * 95),
+                )
+                continue
+            record.recognize_status = "done"
+            if label not in providers:
+                providers.append(label)
+            # 模型结果立刻写进这条记录并提交 —— 原来是攒在内存里等整批跑完才统一归一，
+            # 于是「状态已就绪、点进去题面还是空的」，前端拿不到任何中间结果。
+            # 逐题落库之后，识别一道就能审校一道。
+            _apply_mistake_payload(record, payload, curriculum)
+            pending.append(record.id)
+            done_ids.append(record.id)
+            db.commit()
+            DOCUMENT_TASKS.update(
+                task_id,
+                recognize_done=list(done_ids),
+                progress=int(index / total * 95),
+            )
+
+        step_key = "write_records"
+        DOCUMENT_TASKS.step_start(task_id, step_key, "正在写入记录…")
+        DOCUMENT_TASKS.update(task_id, recognize_current=None)
+        db.commit()
+        DOCUMENT_TASKS.step_complete_all(task_id)
+        DOCUMENT_TASKS.complete(
+            task_id,
+            batch_id=batch_id,
+            recognized=len(pending),
+            failed=len(errors),
+            providers=providers,
+            errors=errors[:8],
+            log=(
+                f"识别完成：成功 {len(pending)} 道，失败 {len(errors)} 道。"
+                + (f" 失败详情：{'；'.join(errors[:3])}" if errors else "")
+            ),
+        )
+    except TaskCancelled:
+        db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        message = str(exc) or type(exc).__name__
+        print(f"[Mistake Recognize Error] batch={batch_id} step={step_key}: {message}")
+        DOCUMENT_TASKS.step_error(task_id, step_key, message)
+    finally:
+        db.close()
+
+
+# ---- 入库 ----
+
+
+def _import_mistake_record_to_bank(
+    db: Session, record: MistakeRecord, *, force: bool = False
+) -> dict:
+    """把一条错题记录写进题库，返回结构化结果（成功 / 已入库 / 撞车）。
+
+    幂等：``question_id`` 非空即视为已入库，重复调用直接返回 ``already``，不会
+    在题库里落第二份。命中查重且未显式 ``force`` 时**不静默丢弃** —— 把撞车信息
+    回传前端逐题确认（实施计划 §6）。
+    """
+
+    if record.question_id:
+        return {
+            "status": "already",
+            "record_id": record.id,
+            "question_id": record.question_id,
+            "message": "该题已入库，无需重复操作。",
+        }
+    # 一期「物化错题不进题库」的约束已作废 —— 用户决策：物理（教科版）、化学
+    # （人教版）同样要建错题库。三科都入库，差别只在 subject 字段与所挂的教材树；
+    # origin 记成 mistake，让题库能把错题与自录/导入题区分开。
+    subject_value = normalize_subject(record.subject or "math")
+    content = str(record.content or "").strip()
+    if not content:
+        return {
+            "status": "skipped",
+            "record_id": record.id,
+            "message": "题面尚未识别，无法入库。",
+        }
+
+    question_type = (
+        record.question_type
+        if record.question_type in MISTAKE_QUESTION_TYPES
+        else "detailed_answer"
+    )
+    prepared = _strip_leading_question_number(
+        normalize_choice_options_to_latex(normalize_fillin_macro(content))
+    )
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == record.batch_id).first()
+    # 来源优先级：审校页手填的 > 上次入库时的快照 > 批次标题 > 扫描文件名。
+    # 手填排第一是本轮的关键 —— 用户在审校页写了「2025 全国甲卷」，入库就该是它，
+    # 而不是被批次文件名（如「IMG_2043.jpg」）顶掉。
+    source = normalize_source(
+        record.source
+        or record.snapshot_source
+        or (batch.title if batch else "")
+        or (batch.source_name if batch else "")
+    )
+    # 学段/章节缺失时与题库录入表单同口径归入「未分类」：留空会让这道题在题库的
+    # 「章节」筛选里彻底找不到（既不属于任何章节，也不属于未分类桶）。
+    category_compulsory = str(record.category_compulsory or "").strip() or "未分类"
+    category_chapter = str(record.category_chapter or "").strip() or "未分类"
+    category_knowledge = str(record.category_knowledge or "").strip()
+
+    if not force:
+        dup_id, dup_sim = find_duplicate_question(
+            db, prepared, question_type, subject_value
+        )
+        if dup_id is not None:
+            payload = duplicate_warning_payload(db, dup_id, dup_sim)
+            payload.update(
+                {
+                    "status": "duplicate",
+                    "record_id": record.id,
+                    "question_no": record.question_no or "",
+                    "new_preview": prepared[:120],
+                }
+            )
+            return payload
+
+    question = Question(
+        subject=subject_value,
+        origin="mistake",
+        content=prepared,
+        content_fingerprint=_normalize_question_content(prepared),
+        question_type=question_type,
+        category_compulsory=category_compulsory,
+        category_chapter=category_chapter,
+        category_knowledge=category_knowledge,
+        difficulty=normalize_difficulty(record.difficulty or None),
+        source=source,
+        answer_markdown=record.answer_markdown or "",
+        knowledge_list=normalize_tag_list(record.knowledge_tags, field="knowledge_list"),
+        solve_method=normalize_tag_list(record.solve_method, field="solve_method"),
+        tags=str(record.tags or ""),
+        related_curriculums=parse_related_curriculums(record.related_curriculums),
+    )
+    question.image_paths = normalize_upload_asset_references(
+        list(record.figure_images or []),
+        uploads_dir=UPLOAD_DIR,
+        url_prefix=UPLOAD_DIR_REL,
+    )
+    db.add(question)
+    db.flush()
+
+    db.add(
+        QuestionCurriculum(
+            question_id=question.id,
+            version_code=get_subject_version_code(subject_value),
+            compulsory=category_compulsory,
+            chapter=category_chapter,
+            knowledge=category_knowledge,
+        )
+    )
+    record.question_id = question.id
+    record.snapshot_source = source
+    return {
+        "status": "imported",
+        "record_id": record.id,
+        "question_id": question.id,
+        "question_no": record.question_no or "",
+    }
+
+
+# ---- 端点：学生 / 批次 ----
+
+
+@app.get("/api/students")
+def list_students(db: Session = Depends(get_db)):
+    """错题工作台的学生列表（一期恒为单条，表结构按多学生设计）。"""
+
+    student = ensure_mistake_student(db)
+    db.commit()
+    return {"status": "success", "students": [student.to_dict()]}
+
+
+@app.post("/api/mistakes/batches")
+def create_mistake_batch(
+    file: UploadFile = File(...),
+    subject: str = Form("math"),
+    title: str = Form(""),
+    batch_date: str = Form(""),
+    student_name: str = Form(""),
+    student_grade: str = Form(""),
+    note: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """新建批次：只落盘源文件 + 建批次记录。
+
+    转页图与切块放在异步任务里（见 ``run_mistake_cut_task``）—— 12 页 200 DPI 渲染
+    要好几秒，放进这个请求会拖住首屏；而且切块步骤条的第 1 步本来就是「转页图」。
+    """
+
+    filename = file.filename or ""
+    extension = Path(filename).suffix.lower()
+    if extension not in MISTAKE_SOURCE_EXTENSIONS:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "只支持 PDF 或图片（png / jpg / webp / bmp / tif）。",
+            },
+            status_code=400,
+        )
+
+    subject_value = str(subject or "math").strip().lower()
+    if subject_value not in MISTAKE_SUBJECTS:
+        subject_value = "other"
+
+    try:
+        raw = read_stream_limited(file.file, MAX_MISTAKE_SOURCE_BYTES)
+    except UploadTooLargeError:
+        return JSONResponse(
+            content={"status": "error", "message": "文件过大，请上传 50MB 以内的扫描件。"},
+            status_code=413,
+        )
+    if extension == ".pdf" and not raw.lstrip().startswith(b"%PDF-"):
+        return JSONResponse(
+            content={"status": "error", "message": "文件内容不是有效的 PDF 文档。"},
+            status_code=400,
+        )
+
+    parsed_date = None
+    if str(batch_date or "").strip():
+        try:
+            parsed_date = datetime.date.fromisoformat(str(batch_date).strip())
+        except ValueError:
+            parsed_date = None
+    if parsed_date is None:
+        parsed_date = datetime.date.today()
+
+    try:
+        student = ensure_mistake_student(
+            db, name=student_name, grade=student_grade
+        )
+        batch = MistakeBatch(
+            student_id=student.id,
+            subject=subject_value,
+            title=str(title or "").strip()
+            or f"{parsed_date.isoformat()} {MISTAKE_SUBJECT_LABELS.get(subject_value, '理科')}错题",
+            batch_date=parsed_date,
+            source_name=filename[:200],
+            page_count=0,
+            status="pending",
+            note=str(note or "").strip(),
+        )
+        db.add(batch)
+        db.flush()
+
+        batch_dir = _mistake_batch_dir(batch.id)
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        source_path = batch_dir / f"source{extension}"
+        with open(source_path, "wb") as handle:
+            handle.write(raw)
+        harden_private_path(source_path)
+
+        payload = batch.to_dict(stats=_mistake_record_stats([]))
+        batch_id = batch.id
+        student_payload = student.to_dict()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[Mistake Batch Create Error] {type(e).__name__}: {e}")
+        return JSONResponse(
+            content={"status": "error", "message": f"新建批次失败: {str(e)}"},
+            status_code=500,
+        )
+
+    return {
+        "status": "success",
+        "batch": payload,
+        "student": student_payload,
+        "source_url": _mistake_web_url(batch_id, source_path.name),
+    }
+
+
+@app.get("/api/mistakes/batches")
+def list_mistake_batches(
+    page: int = 1,
+    page_size: int = 20,
+    subject: Optional[str] = None,
+    student_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """批次列表（分页）。统计用一条聚合查询取回，避免每行再查一次。"""
+
+    try:
+        page_value = max(1, int(page))
+        size_value = max(1, min(100, int(page_size)))
+    except (TypeError, ValueError):
+        page_value, size_value = 1, 20
+
+    query = db.query(MistakeBatch)
+    if subject and str(subject).strip().lower() in MISTAKE_SUBJECTS:
+        query = query.filter(MistakeBatch.subject == str(subject).strip().lower())
+    if student_id:
+        query = query.filter(MistakeBatch.student_id == int(student_id))
+
+    total = query.count()
+    batches = (
+        query.order_by(MistakeBatch.id.desc())
+        .offset((page_value - 1) * size_value)
+        .limit(size_value)
+        .all()
+    )
+
+    stats_map: dict[int, list] = {}
+    batch_ids = [batch.id for batch in batches]
+    if batch_ids:
+        rows = (
+            db.query(
+                MistakeRecord.batch_id,
+                MistakeRecord.grad_status,
+                MistakeRecord.recognize_status,
+                MistakeRecord.include_in_handout,
+                MistakeRecord.question_id,
+            )
+            .filter(MistakeRecord.batch_id.in_(batch_ids))
+            .all()
+        )
+        for row in rows:
+            stats_map.setdefault(row[0], []).append(
+                {
+                    "grad_status": row[1],
+                    "recognize_status": row[2],
+                    "include_in_handout": row[3],
+                    "question_id": row[4],
+                }
+            )
+
+    student = ensure_mistake_student(db)
+    db.commit()
+    items = [
+        batch.to_dict(stats=_mistake_record_stats(stats_map.get(batch.id, [])))
+        for batch in batches
+    ]
+    return {
+        "status": "success",
+        "total": total,
+        "page": page_value,
+        "page_size": size_value,
+        "students": [student.to_dict()],
+        "subjects": [
+            {"value": value, "label": MISTAKE_SUBJECT_LABELS[value]}
+            for value in MISTAKE_SUBJECTS
+        ],
+        "status_labels": MISTAKE_STATUS_LABELS,
+        "batches": items,
+    }
+
+
+@app.get("/api/mistakes/batches/{batch_id}")
+def get_mistake_batch(batch_id: int, db: Session = Depends(get_db)):
+    """批次详情：批次 + 页图与切块元数据 + 全部题目记录 + 错因词表。"""
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+
+    records = (
+        db.query(MistakeRecord)
+        .filter(MistakeRecord.batch_id == batch_id)
+        .order_by(MistakeRecord.page_no.asc(), MistakeRecord.block_index.asc())
+        .all()
+    )
+    try:
+        analysis = _read_mistake_analysis(batch_id)
+    except MistakeAnalysisError as exc:
+        # 不降级成空 pages：那样界面会把「元数据坏了」显示成「这个批次没有题块」，
+        # 用户看不到任何异常，接着按空状态重新切题 —— 正好把原件覆盖掉。
+        # 返回 409 后前端会 toast 提示并退回批次列表（mistake.js 的 !res.ok 分支）。
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=409
+        )
+    page_meta = {
+        str(item.get("page_no")): item
+        for item in analysis.get("pages") or []
+        if isinstance(item, dict)
+    }
+
+    pages: list[dict] = []
+    for page_no in range(1, int(batch.page_count or 0) + 1):
+        page_file = _mistake_pages_dir(batch_id) / f"page_{page_no}.png"
+        if not page_file.is_file():
+            continue
+        meta = page_meta.get(str(page_no), {})
+        pages.append(
+            {
+                "page_no": page_no,
+                "url": _page_web_url(batch_id, page_file.name),
+                "width": meta.get("width", 0),
+                "height": meta.get("height", 0),
+                "blocks": meta.get("blocks", []),
+                "gap_candidates": meta.get("gap_candidates", []),
+                "snap_points": meta.get("snap_points", []),
+                # 栏结构：前端据此画分栏线、显示「单栏/双栏」开关与置信度提示
+                "layout": meta.get("layout") or {
+                    "mode": COLUMN_SINGLE,
+                    "boundary": 1.0,
+                    "source": "assumed",
+                    "confidence": 1.0,
+                },
+                "column_boundary": meta.get("column_boundary", 1.0),
+                # 按栏吸附池 / 候选切点（key 为栏号字符串）
+                "column_snap_points": meta.get("column_snap_points") or {},
+                "column_gap_candidates": meta.get("column_gap_candidates") or {},
+                # 人工框选矩形（[[x0,y0,x1,y1], …]）—— 前端回显已有框、并与记录比对
+                # 出「哪些框还没落库」以决定要不要画预览卡片
+                "manual_boxes": meta.get("manual_boxes") or [],
+                # 人工合并组（[{id, rects, direction, primary}]）—— 前端据此给合并
+                # 后的卡片打「已合并 N 块」标记、并提供拆分 / 调序 / 切方向
+                "manual_merges": meta.get("manual_merges") or [],
+                # 被用户删掉的题块（[[x0,y0,x1,y1], …]）—— 前端显示「已隐藏 N 块」
+                # 与「恢复」入口；没有它，用户就无从知道自己删过什么、也没法反悔
+                "hidden_blocks": meta.get("hidden_blocks") or [],
+            }
+        )
+
+    # 库里存的是裸路径（识别取图、导出插图都要按路径找文件），指纹在出口补。
+    record_items = [
+        _mistake_record_client_payload(record, batch_id) for record in records
+    ]
+
+    student = (
+        db.query(Student).filter(Student.id == batch.student_id).first()
+        if batch.student_id
+        else None
+    )
+    return {
+        "status": "success",
+        "batch": batch.to_dict(stats=_mistake_record_stats(records)),
+        "student": student.to_dict() if student else None,
+        "subjects": [
+            {"value": value, "label": MISTAKE_SUBJECT_LABELS[value]}
+            for value in MISTAKE_SUBJECTS
+        ],
+        "status_labels": MISTAKE_STATUS_LABELS,
+        "grad_status_values": list(GRAD_STATUS_VALUES),
+        "question_types": DEFAULT_QUESTION_TYPES,
+        "difficulties": [
+            {"value": value} for value in sorted(DIFFICULTY_VALUES)
+        ],
+        "mistake_reasons": list_mistake_reasons(),
+        # 跨页合并组（[{id, members:[{page_no, rect}], direction, primary}]）—— 挂在
+        # 顶层而不是某一页上：成员带页号，页 9 的 0.891 与页 10 的 0.039 在不同坐标系
+        # 里，只有页号能把它们分开。前端据此标「跨页 N 块」并提供拆分入口。
+        "cross_page_merges": analysis.get("cross_page_merges") or [],
+        "pages": pages,
+        "records": record_items,
+    }
+
+
+@app.delete("/api/mistakes/batches/{batch_id}")
+def delete_mistake_batch(batch_id: int, db: Session = Depends(get_db)):
+    """删批次：记录级联删除 + 清掉该批次的整个工作目录。"""
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    try:
+        db.query(MistakeRecord).filter(MistakeRecord.batch_id == batch_id).delete(
+            synchronize_session=False
+        )
+        db.delete(batch)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"删除批次失败: {str(e)}"},
+            status_code=500,
+        )
+
+    shutil.rmtree(_mistake_batch_dir(batch_id), ignore_errors=True)
+    return {"status": "success", "batch_id": batch_id}
+
+
+# ---- 端点：切题 / 识别 ----
+
+
+@app.post("/api/mistakes/batches/{batch_id}/cut")
+def cut_mistake_batch(
+    batch_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """异步切题。
+
+    可选 body：
+
+    - ``page_layouts``：``{"1": "double"}`` 人工指定栏目，覆盖自动判栏；
+      ``{"1": {"mode": "double", "boundary": 0.6}}`` 还可带上拖过的分栏线。
+
+    省略即纯自动判栏切块。
+    """
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    if batch.status == "cutting":
+        return JSONResponse(
+            content={"status": "error", "message": "该批次正在切题，请等待当前任务结束。"},
+            status_code=409,
+        )
+    if _mistake_source_path(batch_id) is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次的源文件已丢失，请重新上传。"},
+            status_code=400,
+        )
+
+    body = payload if isinstance(payload, dict) else {}
+
+    task_id = f"mistake-cut-{batch_id}-{uuid.uuid4().hex[:8]}"
+    # 同步落 "cutting" 状态：异步任务开始前还有排队时间，前端应立即进入等待态
+    batch.status = "cutting"
+    db.commit()
+
+    try:
+        DOCUMENT_TASKS.create(
+            task_id,
+            status="pending",
+            log="任务已排队，正在准备切题…",
+            document_type="mistake_cut",
+            batch_id=batch_id,
+            temp_assets=[],
+        )
+        DOCUMENT_TASKS.init_steps(task_id, MISTAKE_CUT_STEPS)
+        DOCUMENT_TASKS.submit(
+            task_id,
+            run_mistake_cut_task,
+            task_id,
+            batch_id,
+            body.get("page_layouts"),
+        )
+    except TaskQueueFull as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        batch.status = "reviewing" if batch.page_count else "pending"
+        db.commit()
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=429
+        )
+    except Exception as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        batch.status = "cut_failed"
+        batch.note = str(exc)[:500]
+        db.commit()
+        return JSONResponse(
+            content={"status": "error", "message": f"切题任务创建失败: {str(exc)}"},
+            status_code=500,
+        )
+    return {"status": "success", "task_id": task_id, "batch_id": batch_id}
+
+
+def _mistake_recognize_targets(db: Session, batch_id: int, record_ids) -> list[int]:
+    """确定要识别的记录：显式传了就按传的，否则默认取本批次已标「错」的题。"""
+
+    explicit: list[int] = []
+    for raw in record_ids or []:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value not in explicit:
+            explicit.append(value)
+    if explicit:
+        return explicit
+    rows = (
+        db.query(MistakeRecord.id)
+        .filter(
+            MistakeRecord.batch_id == batch_id,
+            MistakeRecord.grad_status == "incorrect",
+        )
+        .order_by(MistakeRecord.page_no.asc(), MistakeRecord.block_index.asc())
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
+def _mistake_page_write_context(db, batch_id: int, page_no: int):
+    """校验「这一页现在可以改」，返回 ``(batch, page_path, entry)``。
+
+    不合法时返回 ``JSONResponse``（调用方直接 ``return`` 即可）。框选与合并两个
+    写入口共用同一套前置判断，避免一边放行一边拒绝。
+    """
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    if batch.status == "cutting":
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "该批次正在切题，请等待当前任务结束。",
+            },
+            status_code=409,
+        )
+    if page_no <= 0:
+        return JSONResponse(
+            content={"status": "error", "message": "页号不合法。"}, status_code=400
+        )
+
+    page_path = _mistake_pages_dir(batch_id) / f"page_{page_no}.png"
+    if not page_path.is_file():
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"第 {page_no} 页的页图不存在，请先切题。",
+            },
+            status_code=400,
+        )
+    try:
+        entry = _mistake_page_entry(batch_id, page_no)
+    except MistakeAnalysisError as exc:
+        # 关键：在读不出元数据时**在动任何数据之前**就退出。放行的话，接下来
+        # 「读回 → 改点名键 → 整份写回」会把读到的空壳写进 analysis.json，
+        # 整批人工框选/合并/删除名单一次性抹平，且不可恢复。
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": (
+                    f"{exc} 本页记录未改动。可先备份该批次目录下的 analysis.json，"
+                    "再对该批次执行一次「重新切题」以重建元数据。"
+                ),
+            },
+            status_code=409,
+        )
+    if entry is None:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"第 {page_no} 页还没有切块结果，请先切题。",
+            },
+            status_code=400,
+        )
+    return batch, page_path, entry
+
+
+@app.post("/api/mistakes/batches/{batch_id}/pages/{page_no}/blocks")
+def apply_mistake_page_boxes(
+    batch_id: int,
+    page_no: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """应用本页框选：写回人工框，并按「自动基线 + 人工框」重建这一页的记录。
+
+    body：``{"boxes": [[x0, y0, x1, y1], …]}``（0–1 归一化，y 向下）。
+    空数组＝清除本页人工框，回到纯自动结果。
+
+    为什么不复用 ``/cut``：整批重切要重新渲染全部页图、重算所有页的投影，还得
+    清空块图目录重裁一遍 —— 用户只改一页，代价不该按整批算。这里只碰一页。
+    """
+
+    context = _mistake_page_write_context(db, batch_id, page_no)
+    if isinstance(context, JSONResponse):
+        return context
+    batch, page_path, entry = context
+
+    body = payload if isinstance(payload, dict) else {}
+    boxes = _normalize_mistake_boxes(body.get("boxes"))
+    entry["manual_boxes"] = boxes
+    try:
+        result = _rebuild_mistake_page_records(
+            db, batch, batch_id, page_no, page_path, entry
+        )
+        db.commit()
+    except PageSplitError as exc:
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+    except Exception as exc:  # noqa: BLE001 - 兜底成 500，绝不让半截状态落库
+        db.rollback()
+        print(f"[Mistake Page Boxes Error] {type(exc).__name__}: {exc}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "应用框选失败，本页记录未改动。",
+            },
+            status_code=500,
+        )
+
+    try:
+        _update_mistake_manual_boxes(batch_id, page_no, boxes)
+    except (OSError, MistakeAnalysisError) as exc:
+        # 记录已经落库且是对的，元数据没写成功只会影响「下次整批重切时保留人工
+        # 框」。为这个把请求报成失败，反而让用户以为这次改动没生效。
+        # （正常情况下这里到不了：真正的损坏会在上面的写入口前置检查里被拦下。）
+        print(f"[Mistake Page Boxes Meta Error] {type(exc).__name__}: {exc}")
+
+    # 顺手同步「已删题块」名单：这次重建里没命中的矩形（几何变了）本来就已经失效，
+    # 不同步的话它会一直留在文件里，等哪天几何又撞上就凭空隐藏一道题。
+    _sync_mistake_hidden_meta(batch_id, page_no, result)
+
+    return {
+        "status": "success",
+        "page_no": page_no,
+        "box_count": len(boxes),
+        "block_count": result["block_count"],
+        "removed": result["removed"],
+    }
+
+
+@app.post("/api/mistakes/batches/{batch_id}/pages/{page_no}/merges")
+def apply_mistake_page_merges(
+    batch_id: int,
+    page_no: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """应用本页的**人工合并组**（全量覆盖）：落盘并按新分组重建这一页的记录。
+
+    body：``{"merges": [{"id": "m…", "rects": [[x0,y0,x1,y1], …],
+    "direction": "v"|"h", "primary": 0}]}``
+
+    - ``rects`` 即拼接顺序；成员用**几何**定位，重切后按重叠找回，不是块序号。
+    - ``direction`` 省略时按成员相对位置自动判定（纵向互相压着 → 左右拼）。
+    - ``primary`` 指状态以第几块为准（两块批改状态冲突时由前端面板定）。
+    - 全量覆盖：合并、拆分、调顺序、切方向都是「前端构造新的 merges 列表再提交」，
+      与人工框一个路子，幂等、无增量状态。
+    """
+
+    context = _mistake_page_write_context(db, batch_id, page_no)
+    if isinstance(context, JSONResponse):
+        return context
+    batch, page_path, entry = context
+
+    body = payload if isinstance(payload, dict) else {}
+    merges = _normalize_mistake_merges(body.get("merges"))
+    entry["manual_merges"] = merges
+    try:
+        result = _rebuild_mistake_page_records(
+            db, batch, batch_id, page_no, page_path, entry
+        )
+        db.commit()
+    except PageSplitError as exc:
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+    except Exception as exc:  # noqa: BLE001 - 兜底成 500，绝不让半截状态落库
+        db.rollback()
+        print(f"[Mistake Page Merges Error] {type(exc).__name__}: {exc}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "应用合并失败，本页记录未改动。",
+            },
+            status_code=500,
+        )
+
+    # 落盘的是「成组且方向已确定」的版本：没凑够成员的组不写回，否则下次重建会
+    # 反复尝试一个永远组不起来的合并。
+    merged_groups = result.get("merges") or []
+    try:
+        _update_mistake_manual_merges(batch_id, page_no, merged_groups)
+    except (OSError, MistakeAnalysisError) as exc:
+        print(f"[Mistake Page Merges Meta Error] {type(exc).__name__}: {exc}")
+
+    _sync_mistake_hidden_meta(batch_id, page_no, result)
+
+    return {
+        "status": "success",
+        "page_no": page_no,
+        "merge_count": len(merged_groups),
+        "block_count": result["block_count"],
+        "removed": result["removed"],
+        "manual_merges": merged_groups,
+    }
+
+
+@app.post("/api/mistakes/batches/{batch_id}/cross-merges")
+def apply_mistake_cross_page_merges(
+    batch_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """应用**跨页合并组**（全量覆盖）：落盘顶层元数据，并重建涉及的每一页。
+
+    body：``{"cross_merges": [{"id": "m…", "primary": 0,
+    "members": [{"page_no": 9, "rect": [x0,y0,x1,y1]}, …]}]}``
+
+    - 成员用 ``(页号, 页内矩形)`` 定位。页内矩形是相对比例，跨页不可比 —— 页号是
+      必需的，不能靠数值大小猜。
+    - 记录只落在 ``primary`` 成员所在页；其余页上的那一半被「占用」，不再单独出记录。
+    - 重建范围＝**新旧两个列表**的组员涉及的全部页：删掉一个组也得把它原来占的两页
+      重建回来，否则那两页上的记录会一直停在「已合并」的样子。
+    """
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    if batch.status == "cutting":
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "该批次正在切题，请等待当前任务结束。",
+            },
+            status_code=409,
+        )
+
+    body = payload if isinstance(payload, dict) else {}
+    merges = _normalize_cross_page_merges(body.get("cross_merges"))
+    try:
+        previous = _normalize_cross_page_merges(
+            _read_mistake_analysis(batch_id).get("cross_page_merges")
+        )
+    except MistakeAnalysisError as exc:
+        # 与页级写入口同一理由：读不出元数据时，接下来「整份写回」会把人工框选、
+        # 合并、删除名单一次性抹平。宁可失败也不覆盖。
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"{exc} 本次改动未执行。",
+            },
+            status_code=409,
+        )
+
+    pages = sorted(
+        {
+            member["page_no"]
+            for group in (list(merges) + list(previous))
+            for member in group["members"]
+        }
+    )
+    if not pages:
+        return {
+            "status": "success",
+            "cross_merge_count": 0,
+            "dropped": 0,
+            "rebuilt_pages": [],
+        }
+
+    for page_no in pages:
+        page_path = _mistake_pages_dir(batch_id) / f"page_{page_no}.png"
+        if not page_path.is_file():
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": f"第 {page_no} 页的页图不存在，请先切题。",
+                },
+                status_code=400,
+            )
+        try:
+            entry = _mistake_page_entry(batch_id, page_no)
+        except MistakeAnalysisError as exc:
+            return JSONResponse(
+                content={"status": "error", "message": str(exc)}, status_code=409
+            )
+        if entry is None:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": f"第 {page_no} 页还没有切块结果，请先切题。",
+                },
+                status_code=400,
+            )
+
+    try:
+        _update_mistake_cross_page_merges(batch_id, merges)
+        # 重建之前先把涉及页的块图裁好：跨页拼图要跨页取文件。
+        cache: dict = {}
+        for page_no in pages:
+            blocks = _mistake_page_blocks(batch_id, page_no, cache)
+            if blocks:
+                _crop_mistake_page_blocks(
+                    batch_id,
+                    page_no,
+                    _mistake_pages_dir(batch_id) / f"page_{page_no}.png",
+                    blocks,
+                )
+        # 成员找不全的组当场丢掉（留一组永远解不开的成员，下次重建还会失败一次）
+        survivors = [
+            group
+            for group in merges
+            if _resolve_cross_page_group(batch_id, group, cache) is not None
+        ]
+        if len(survivors) != len(merges):
+            _update_mistake_cross_page_merges(batch_id, survivors)
+
+        for page_no in pages:
+            page_path = _mistake_pages_dir(batch_id) / f"page_{page_no}.png"
+            entry = _mistake_page_entry(batch_id, page_no)
+            if entry is None:
+                continue
+            result = _rebuild_mistake_page_records(
+                db, batch, batch_id, page_no, page_path, entry
+            )
+            _sync_mistake_hidden_meta(batch_id, page_no, result)
+        db.commit()
+    except PageSplitError as exc:
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+    except Exception as exc:  # noqa: BLE001 - 兜底成 500，绝不让半截状态落库
+        db.rollback()
+        print(f"[Mistake Cross Page Merge Error] {type(exc).__name__}: {exc}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "应用跨页合并失败，本次改动未落库。",
+            },
+            status_code=500,
+        )
+
+    return {
+        "status": "success",
+        "cross_merge_count": len(survivors),
+        "dropped": len(merges) - len(survivors),
+        "rebuilt_pages": pages,
+    }
+
+
+@app.post("/api/mistakes/batches/{batch_id}/pages/{page_no}/hidden")
+def apply_mistake_page_hidden(
+    batch_id: int,
+    page_no: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """删除（隐藏）本页若干题块 —— 全量覆盖式，传空数组即「全部恢复」。
+
+    body：``{"rects": [[x0, y0, x1, y1], …]}``（0–1 归一化，y 向下）。
+
+    - 「删除」＝把这块从本页的渲染项里剔掉、连数据库记录一起不建：一次画框/合并都会
+      整页重建，所以只删记录必然复活，必须落盘到 ``analysis.json`` 的
+      ``hidden_blocks``。
+    - 矩形按**外接矩形**比对，因此「删掉一道已合并的题」＝名单里那一个矩形，不用逐
+      成员去点。
+    - 恢复＝传空数组。注意被删期间那条记录的状态（判定/错因/解析）随记录一起没了，
+      恢复回来是一道全新的未批题 —— 想留住状态就先别删。
+    """
+
+    context = _mistake_page_write_context(db, batch_id, page_no)
+    if isinstance(context, JSONResponse):
+        return context
+    batch, page_path, entry = context
+
+    body = payload if isinstance(payload, dict) else {}
+    rects = _normalize_mistake_hidden(body.get("rects"))
+    entry["hidden_blocks"] = rects
+    try:
+        result = _rebuild_mistake_page_records(
+            db, batch, batch_id, page_no, page_path, entry
+        )
+        db.commit()
+    except PageSplitError as exc:
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+    except Exception as exc:  # noqa: BLE001 - 兜底成 500，绝不让半截状态落库
+        db.rollback()
+        print(f"[Mistake Page Hidden Error] {type(exc).__name__}: {exc}")
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "删除失败，本页记录未改动。",
+            },
+            status_code=500,
+        )
+
+    # 只把**真正命中**的矩形写回：没命中的（比如重切后几何全变了）留着只会在每次
+    # 重建时白跑一遍比对，还会让「已隐藏 N 块」这个数字对不上实际。
+    matched = result.get("hidden_blocks") or []
+    try:
+        _update_mistake_hidden_blocks(batch_id, page_no, matched)
+    except (OSError, MistakeAnalysisError) as exc:
+        # 同上：记录已提交，元数据没落盘只影响「下次重切时保留删除名单」。
+        print(f"[Mistake Page Hidden Meta Error] {type(exc).__name__}: {exc}")
+
+    return {
+        "status": "success",
+        "page_no": page_no,
+        "hidden_count": len(matched),
+        "block_count": result["block_count"],
+        "removed": result["removed"],
+        "hidden_blocks": matched,
+    }
+
+
+@app.post("/api/mistakes/batches/{batch_id}/pages/{page_no}/crop-figure")
+def crop_mistake_page_figure(
+    batch_id: int,
+    page_no: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """按前端框选的归一化坐标，从原卷页面上裁一张图。
+
+    「补图形 / 补解析截图」用：用户要补的图形本来就在原卷页面上，让人先去别处截成
+    文件再上传是绕路。坐标是 0–1（y 向下），与切块、人工框选同一套 —— 前端按显示
+    尺寸换算，服务端不碰像素。
+
+    产物落在批次目录的 ``figures/``：块图目录会在重切时被整体重置
+    （``_reset_directory(_mistake_blocks_dir(batch_id))``），人工补的图放那里会被清掉。
+
+    返回**裸** web 路径（不带 ``?v=``）：文件名带随机后缀，不存在同名覆盖，
+    也就不需要指纹（这一条很重要，见 .workbuddy/memory/2026-09-15.md 第六轮）。
+    """
+
+    import math
+
+    context = _mistake_page_write_context(db, batch_id, page_no)
+    if isinstance(context, JSONResponse):
+        return context
+    _batch, page_path, _entry = context
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        xmin = float(body.get("xmin"))
+        ymin = float(body.get("ymin"))
+        xmax = float(body.get("xmax"))
+        ymax = float(body.get("ymax"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            content={"status": "error", "message": "框选坐标不合法。"},
+            status_code=400,
+        )
+    if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax)):
+        return JSONResponse(
+            content={"status": "error", "message": "框选坐标必须是有限数值。"},
+            status_code=400,
+        )
+    if not (0.0 <= xmin < xmax <= 1.0 and 0.0 <= ymin < ymax <= 1.0):
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "框选区域必须落在页面内，且不能为空。",
+            },
+            status_code=400,
+        )
+    if (xmax - xmin) < 0.01 or (ymax - ymin) < 0.01:
+        return JSONResponse(
+            content={"status": "error", "message": "框选区域太小了，请重新框选。"},
+            status_code=400,
+        )
+
+    figures_dir = _mistake_batch_dir(batch_id) / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    crop_name = f"crop_p{page_no:03d}_{uuid.uuid4().hex[:10]}.png"
+    try:
+        crop_region(
+            page_path,
+            figures_dir / crop_name,
+            y_start=ymin,
+            y_end=ymax,
+            x_start=xmin,
+            x_end=xmax,
+        )
+    except Exception as exc:  # noqa: BLE001 - 裁图失败要把原因原样告诉用户
+        return JSONResponse(
+            content={"status": "error", "message": f"截取失败：{exc}"},
+            status_code=500,
+        )
+
+    with Image.open(figures_dir / crop_name) as image:
+        width, height = image.size
+    return {
+        "status": "success",
+        "image_path": _mistake_web_url(batch_id, "figures", crop_name),
+        "width": width,
+        "height": height,
+    }
+
+
+@app.post("/api/mistakes/batches/{batch_id}/recognize")
+def recognize_mistake_batch(
+    batch_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """异步识别本批次的错题（不传 ``record_ids`` 时默认取 ``grad_status = incorrect``）。"""
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+
+    body = payload if isinstance(payload, dict) else {}
+    target_ids = _mistake_recognize_targets(db, batch_id, body.get("record_ids"))
+    if not target_ids:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "没有待识别的题目：请先在点选区标记错题，或显式传入 record_ids。",
+            },
+            status_code=400,
+        )
+
+    engine = str(body.get("engine") or "").strip()
+    task_id = f"mistake-recognize-{batch_id}-{uuid.uuid4().hex[:8]}"
+    try:
+        DOCUMENT_TASKS.create(
+            task_id,
+            status="pending",
+            log="任务已排队，正在准备识别…",
+            document_type="mistake_recognize",
+            batch_id=batch_id,
+            record_count=len(target_ids),
+            temp_assets=[],
+        )
+        DOCUMENT_TASKS.init_steps(task_id, MISTAKE_RECOGNIZE_STEPS)
+        DOCUMENT_TASKS.submit(
+            task_id, run_mistake_recognize_task, task_id, batch_id, target_ids, engine
+        )
+    except TaskQueueFull as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=429
+        )
+    except Exception as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        return JSONResponse(
+            content={"status": "error", "message": f"识别任务创建失败: {str(exc)}"},
+            status_code=500,
+        )
+    return {
+        "status": "success",
+        "task_id": task_id,
+        "batch_id": batch_id,
+        "record_count": len(target_ids),
+    }
+
+
+@app.post("/api/mistakes/records/{record_id}/recognize")
+def recognize_mistake_record(
+    record_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """单题识别 / 重试（对应卡片上的单题按钮），走同一个异步任务。"""
+
+    record = db.query(MistakeRecord).filter(MistakeRecord.id == record_id).first()
+    if record is None:
+        return JSONResponse(
+            content={"status": "error", "message": "题目记录不存在。"}, status_code=404
+        )
+    engine = ""
+    if isinstance(payload, dict):
+        engine = str(payload.get("engine") or "").strip()
+
+    task_id = f"mistake-recognize-{record.batch_id}-{uuid.uuid4().hex[:8]}"
+    try:
+        DOCUMENT_TASKS.create(
+            task_id,
+            status="pending",
+            log="任务已排队，正在准备识别…",
+            document_type="mistake_recognize",
+            batch_id=record.batch_id,
+            record_count=1,
+            temp_assets=[],
+        )
+        DOCUMENT_TASKS.init_steps(task_id, MISTAKE_RECOGNIZE_STEPS)
+        DOCUMENT_TASKS.submit(
+            task_id,
+            run_mistake_recognize_task,
+            task_id,
+            record.batch_id,
+            [record_id],
+            engine,
+        )
+    except TaskQueueFull as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=429
+        )
+    except Exception as exc:
+        DOCUMENT_TASKS.remove(task_id)
+        return JSONResponse(
+            content={"status": "error", "message": f"识别任务创建失败: {str(exc)}"},
+            status_code=500,
+        )
+    return {"status": "success", "task_id": task_id, "record_id": record_id}
+
+
+# ---- 端点：更新单条记录 ----
+
+
+@app.put("/api/mistakes/records/{record_id}")
+def update_mistake_record(
+    record_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """更新单条记录（题面编辑、对错点选、错因、收录开关、解析、图形）。
+
+    点选语义：``grad_status`` 改动时，若本次没有显式给 ``include_in_handout``，
+    收录开关跟随对错（错 → 收录）。已识别过的题面**不回滚** —— 改对错只是改判对错，
+    不该把已经识别好的题面清掉（实施计划 §8.2）。
+    """
+
+    record = db.query(MistakeRecord).filter(MistakeRecord.id == record_id).first()
+    if record is None:
+        return JSONResponse(
+            content={"status": "error", "message": "题目记录不存在。"}, status_code=404
+        )
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            content={"status": "error", "message": "请求体必须是 JSON 对象。"},
+            status_code=400,
+        )
+
+    try:
+        if "question_no" in payload:
+            record.question_no = str(payload.get("question_no") or "").strip()[:50]
+        if "content" in payload:
+            content = str(payload.get("content") or "")
+            if content.strip():
+                content = normalize_fillin_macro(content)
+                content = normalize_choice_options_to_latex(content)
+                content = _strip_leading_question_number(content)
+            record.content = content
+        if "question_type" in payload:
+            value = str(payload.get("question_type") or "").strip()
+            if value in MISTAKE_QUESTION_TYPES:
+                record.question_type = value
+        if "difficulty" in payload:
+            record.difficulty = normalize_difficulty(
+                payload.get("difficulty"), default=record.difficulty or "normal"
+            )
+        if "knowledge_tags" in payload:
+            record.knowledge_tags = normalize_tag_list(
+                payload.get("knowledge_tags"), field="knowledge_list"
+            )
+        if "solve_method" in payload:
+            record.solve_method = normalize_tag_list(
+                payload.get("solve_method"), field="solve_method"
+            )
+        # 分类信息（审校页中栏，与题库录入表单同款）。来源/学段/章节/小节/关联章节/
+        # 自定义标签在 v1010 之前没有落脚点，只能丢掉；现在原样收下，入库时搬进题库。
+        if "source" in payload:
+            record.source = str(payload.get("source") or "").strip()[:200]
+        if "category_compulsory" in payload:
+            record.category_compulsory = str(payload.get("category_compulsory") or "").strip()[:100]
+        if "category_chapter" in payload:
+            record.category_chapter = str(payload.get("category_chapter") or "").strip()[:100]
+        if "category_knowledge" in payload:
+            record.category_knowledge = str(payload.get("category_knowledge") or "").strip()[:100]
+        if "related_curriculums" in payload:
+            record.related_curriculums = parse_related_curriculums(
+                payload.get("related_curriculums")
+            )
+        if "tags" in payload:
+            # 与题库录入/更新保持一致：自定义标签按原文存（只去首尾空白），
+            # 这里**不**走 normalize_tag_list —— 那会把逗号分隔改成半角并去重，
+            # 两个入口对同一个字段就会存出两种格式。
+            record.tags = str(payload.get("tags") or "").strip()
+        if "error_reason" in payload:
+            record.error_reason = normalize_mistake_reason_list(
+                payload.get("error_reason")
+            )
+        if "mastery_status" in payload:
+            mastery = str(payload.get("mastery_status") or "").strip()
+            if mastery in ("pending", "redone", "mastered"):
+                record.mastery_status = mastery
+        if "answer_markdown" in payload:
+            record.answer_markdown = str(payload.get("answer_markdown") or "")
+        if "answer_source" in payload:
+            source = str(payload.get("answer_source") or "none").strip().lower()
+            record.answer_source = source if source in ("none", "manual", "ai") else "none"
+        if "answer_reviewed" in payload:
+            record.answer_reviewed = bool(payload.get("answer_reviewed"))
+        if "answer_images" in payload:
+            record.answer_images = normalize_upload_asset_references(
+                payload.get("answer_images") or [],
+                uploads_dir=UPLOAD_DIR,
+                url_prefix=UPLOAD_DIR_REL,
+            )
+        if "figure_images" in payload:
+            record.figure_images = normalize_upload_asset_references(
+                payload.get("figure_images") or [],
+                uploads_dir=UPLOAD_DIR,
+                url_prefix=UPLOAD_DIR_REL,
+            )
+        if "image_block" in payload:
+            record.image_block = str(payload.get("image_block") or "")
+        for key in ("block_y_start", "block_y_end"):
+            if key in payload:
+                try:
+                    setattr(record, key, max(0.0, min(1.0, float(payload.get(key)))))
+                except (TypeError, ValueError):
+                    pass
+
+        grad_changed = False
+        if "grad_status" in payload:
+            grad = str(payload.get("grad_status") or "").strip()
+            if grad not in GRAD_STATUS_VALUES:
+                return JSONResponse(
+                    content={
+                        "status": "error",
+                        "message": f"对错状态只能是 {'/'.join(GRAD_STATUS_VALUES)}。",
+                    },
+                    status_code=400,
+                )
+            if grad != record.grad_status:
+                grad_changed = True
+            record.grad_status = grad
+
+        if "include_in_handout" in payload:
+            record.include_in_handout = bool(payload.get("include_in_handout"))
+        elif grad_changed:
+            record.include_in_handout = record.grad_status == "incorrect"
+
+        db.commit()
+        db.refresh(record)
+    except Exception as e:
+        db.rollback()
+        print(f"[Mistake Record Update Error] {type(e).__name__}: {e}")
+        return JSONResponse(
+            content={"status": "error", "message": f"更新题目失败: {str(e)}"},
+            status_code=500,
+        )
+
+    item = _mistake_record_client_payload(record, record.batch_id)
+    stats = _mistake_record_stats(
+        db.query(MistakeRecord).filter(MistakeRecord.batch_id == record.batch_id).all()
+    )
+    return {"status": "success", "record": item, "stats": stats}
+
+
+# ---- 端点：入库 ----
+
+
+@app.post("/api/mistakes/records/{record_id}/import-to-bank")
+def import_mistake_record_to_bank(
+    record_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """单题入库。body 可带 ``{"force": true}`` 跳过查重。"""
+
+    record = db.query(MistakeRecord).filter(MistakeRecord.id == record_id).first()
+    if record is None:
+        return JSONResponse(
+            content={"status": "error", "message": "题目记录不存在。"}, status_code=404
+        )
+    force = bool((payload or {}).get("force")) if isinstance(payload, dict) else False
+    try:
+        result = _import_mistake_record_to_bank(db, record, force=force)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[Mistake Import Error] record={record_id}: {type(e).__name__}: {e}")
+        return JSONResponse(
+            content={"status": "error", "message": f"入库失败: {str(e)}"},
+            status_code=500,
+        )
+    if result.get("status") == "duplicate":
+        return JSONResponse(content=result, status_code=409)
+    return {"status": "success", "result": result}
+
+
+@app.post("/api/mistakes/batches/{batch_id}/import-to-bank")
+def import_mistake_batch_to_bank(
+    batch_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """批量入库：默认全部已识别、尚未入库的题；撞车的逐题回传，不静默丢弃。"""
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    body = payload if isinstance(payload, dict) else {}
+    force = bool(body.get("force"))
+
+    explicit: list[int] = []
+    for raw in body.get("record_ids") or []:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value not in explicit:
+            explicit.append(value)
+
+    query = db.query(MistakeRecord).filter(MistakeRecord.batch_id == batch_id)
+    if explicit:
+        query = query.filter(MistakeRecord.id.in_(explicit))
+    else:
+        # 默认口径：本批次已识别、尚未入库的记录。**不在这里按学科过滤** ——
+        # 三科现在都入库，逐题逻辑负责给出「为什么没进」的原因，而不是在 SQL 层
+        # 悄悄筛掉、让前端收到一个全是 0 的响应。
+        query = query.filter(
+            MistakeRecord.recognize_status == "done",
+            MistakeRecord.question_id.is_(None),
+        )
+    records = (
+        query.order_by(MistakeRecord.page_no.asc(), MistakeRecord.block_index.asc())
+        .all()
+    )
+
+    imported: list[dict] = []
+    # 前端据此把刚入库的题直接放进组卷试题篮（并给解答题一个合理默认分值）。
+    imported_items: list[dict] = []
+    duplicates: list[dict] = []
+    skipped: list[dict] = []
+    already: list[dict] = []
+    for record in records:
+        try:
+            result = _import_mistake_record_to_bank(db, record, force=force)
+        except Exception as exc:  # noqa: BLE001 - 单题失败不该中断整批
+            db.rollback()
+            skipped.append(
+                {
+                    "record_id": record.id,
+                    "question_no": record.question_no or "",
+                    "message": f"入库失败: {exc}",
+                }
+            )
+            continue
+        status = result.get("status")
+        if status == "imported":
+            imported.append(result)
+            imported_items.append(
+                {
+                    "question_id": result.get("question_id"),
+                    "question_type": record.question_type or "detailed_answer",
+                }
+            )
+        elif status == "duplicate":
+            duplicates.append(result)
+        elif status == "already":
+            already.append(result)
+        else:
+            skipped.append(result)
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"批量入库提交失败: {exc}"},
+            status_code=500,
+        )
+
+    stats = _mistake_record_stats(
+        db.query(MistakeRecord).filter(MistakeRecord.batch_id == batch_id).all()
+    )
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "imported": len(imported),
+        "imported_items": imported_items,
+        "duplicates": duplicates,
+        "skipped": skipped,
+        "already": len(already),
+        "stats": stats,
+    }
+
+
+# ---- 端点：错题本导出 ----
+
+
+@app.post("/api/mistakes/batches/{batch_id}/export")
+def export_mistake_handout(
+    batch_id: int,
+    payload: Optional[dict] = None,
+    db: Session = Depends(get_db),
+):
+    """生成错题本 PDF。
+
+    只收录 ``include_in_handout = True`` 的记录（默认随「错」标记，但人工可改），
+    AI 生成的解析必须人工核对过才进 PDF —— 错题本里出现错误解析会直接误导学生。
+    """
+
+    batch = db.query(MistakeBatch).filter(MistakeBatch.id == batch_id).first()
+    if batch is None:
+        return JSONResponse(
+            content={"status": "error", "message": "批次不存在。"}, status_code=404
+        )
+    body = payload if isinstance(payload, dict) else {}
+
+    options = HandoutOptions(
+        solution_space_cm=body.get("solution_space_cm", 6.0),
+        include_reason=body.get("include_reason", True),
+        include_figures=body.get("include_figures", True),
+        answer_mode=body.get("answer_mode", "none"),
+        font_size=body.get("font_size", "3"),
+        show_original_number=body.get("show_original_number", True),
+    ).normalized()
+
+    explicit: list[int] = []
+    for raw in body.get("record_ids") or []:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value not in explicit:
+            explicit.append(value)
+
+    query = db.query(MistakeRecord).filter(MistakeRecord.batch_id == batch_id)
+    if explicit:
+        query = query.filter(MistakeRecord.id.in_(explicit))
+    else:
+        query = query.filter(MistakeRecord.include_in_handout.is_(True))
+    records = (
+        query.order_by(MistakeRecord.page_no.asc(), MistakeRecord.block_index.asc())
+        .all()
+    )
+    if not records:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "本批次没有需要收录的题目：请先在点选区把错题标记为「进错题本」。",
+            },
+            status_code=400,
+        )
+
+    # 导出前重排题号：错题本按「第 1..N 题」顺排，原卷题号走 question_no 快照展示
+    record_dicts = []
+    for record in records:
+        item = record.to_dict()
+        record_dicts.append(item)
+
+    student = (
+        db.query(Student).filter(Student.id == batch.student_id).first()
+        if batch.student_id
+        else None
+    )
+    try:
+        built = build_mistake_handout_latex(
+            title=batch.title or "错题本",
+            subject=batch.subject or "math",
+            student_name=student.name if student else "",
+            batch_date=batch.batch_date.isoformat() if batch.batch_date else "",
+            records=record_dicts,
+            options=options,
+            static_dir=STATIC_DIR,
+        )
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "error", "message": f"装配错题本 LaTeX 失败: {str(e)}"},
+            status_code=500,
+        )
+
+    exports_dir = _mistake_exports_dir(batch_id)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    pdf_name = f"mistakes_batch{batch_id}_{timestamp}.pdf"
+    tex_name = f"mistakes_batch{batch_id}_{timestamp}.tex"
+    pdf_path = exports_dir / pdf_name
+    try:
+        write_private_text_atomic(exports_dir / tex_name, built.tex_content)
+    except OSError as exc:
+        print(f"[Mistake Export Warning] 保存 TeX 源码失败: {exc}")
+
+    pdf_bytes, log_or_error = compile_tex_to_pdf(built.tex_content, built.image_paths)
+    if not pdf_bytes:
+        if is_xelatex_missing(log_or_error or ""):
+            diagnostic = build_local_latex_diagnostic(log_or_error or "", built.tex_content)
+        else:
+            diagnostic = explain_latex_compile_error(log_or_error, built.tex_content)
+        diagnostic.setdefault("tex_source", built.tex_content)
+        diagnostic.setdefault("full_log", (log_or_error or "")[:6000])
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": diagnostic.get("summary", "错题本 PDF 编译失败"),
+                "diagnostic": diagnostic,
+            },
+            status_code=400,
+        )
+
+    try:
+        pdf_path.write_bytes(pdf_bytes)
+        harden_private_path(pdf_path)
+    except OSError as exc:
+        return JSONResponse(
+            content={"status": "error", "message": f"保存错题本 PDF 失败: {exc}"},
+            status_code=500,
+        )
+
+    try:
+        batch.status = "done"
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - 状态落库失败不该丢掉已生成的 PDF
+        db.rollback()
+        print(f"[Mistake Export Warning] 批次状态更新失败: {exc}")
+
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "filename": pdf_name,
+        "download_name": f"{batch.title or '错题本'}.pdf",
+        "pdf_url": _mistake_web_url(batch_id, "exports", pdf_name),
+        "tex_url": _mistake_web_url(batch_id, "exports", tex_name),
+        "pdf_size": len(pdf_bytes),
+        "included_count": built.included_count,
+        "answer_count": built.answer_count,
+        "blocked_ai_answers": built.blocked_ai_answers,
+        "options": {
+            "solution_space_cm": options.solution_space_cm,
+            "include_reason": options.include_reason,
+            "include_figures": options.include_figures,
+            "answer_mode": options.answer_mode,
+            "font_size": options.font_size,
+            "show_original_number": options.show_original_number,
+        },
+    }
+
+
+@app.get("/api/mistakes/batches/{batch_id}/export/download")
+def download_mistake_handout(batch_id: int, filename: Optional[str] = None):
+    """下载导出产物；不给 ``filename`` 就取最近生成的那份。"""
+
+    exports_dir = _mistake_exports_dir(batch_id)
+    target: Optional[Path] = None
+    if filename:
+        candidate = (exports_dir / os.path.basename(str(filename))).resolve()
+        try:
+            candidate.relative_to(exports_dir.resolve())
+        except ValueError:
+            return JSONResponse(
+                content={"status": "error", "message": "非法的文件名。"}, status_code=400
+            )
+        if candidate.is_file():
+            target = candidate
+    if target is None:
+        try:
+            candidates = sorted(
+                (path for path in exports_dir.glob("*.pdf") if path.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            candidates = []
+        if candidates:
+            target = candidates[0]
+    if target is None:
+        return JSONResponse(
+            content={"status": "error", "message": "还没有生成错题本 PDF。"},
+            status_code=404,
+        )
+
+    return FileResponse(
+        str(target),
+        media_type="application/pdf",
+        filename=target.name,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
 
 # ----------------- Disable browser cache for static assets -----------------
 # 前端 JS/HTML/CSS 频繁改动，默认 StaticFiles 会让浏览器长期缓存，

@@ -111,6 +111,24 @@
                     return;
                 }
 
+                // E-2: 错题审校页打开着 → 这张截图是给「解析截图识别」的。
+                //     审校页里没有插图区也没有录入表单，若不在这里截住，会掉进下面的
+                //     兜底分支被 uploadIllustration 收进题库录入区，用户回到录入页
+                //     时会莫名多出一张插图。焦点落在题面框时只提示、不乱填解析。
+                const reviewView = document.getElementById('mistakeReviewView');
+                if (reviewView && reviewView.offsetParent !== null) {
+                    const reviewContent = document.getElementById('mrContent');
+                    if (activeEl && reviewContent && activeEl === reviewContent) {
+                        if (typeof window.showToast === 'function') {
+                            window.showToast('审校页的截图识别只写解析；题面截图请用「补图形」或「重新识别这道」', 'warning');
+                        }
+                    } else if (typeof window.runReviewAnswerOcr === 'function') {
+                        window.runReviewAnswerOcr(imageFile);
+                    }
+                    e.preventDefault();
+                    return;
+                }
+
                 // E-3: 焦点不在文本框时，若答案区的某个 tab 处于激活，则定向到对应答案区 drop zone
                 const tabOcr = document.getElementById('tabContent-ocr');
                 const tabImage = document.getElementById('tabContent-image');
@@ -1026,8 +1044,8 @@
             if (rep) rep.className = (mode === 'replace') ? onCls : offCls;
             if (app) app.className = (mode === 'append') ? onCls : offCls;
         }
-        window.refreshContentOcrModeUI = refreshContentOcrModeUI;
-        window.runContentOcrBatch = runContentOcrBatch;
+            window.refreshContentOcrModeUI = refreshContentOcrModeUI;
+            window.runContentOcrBatch = runContentOcrBatch;
 
         // 题干 OCR 成功后自动触发 AI 分类并填充录入表单（无弹窗，覆盖式填充，用户可手改）
         function autoClassifyFromContent() {

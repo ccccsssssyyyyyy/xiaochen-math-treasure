@@ -37,6 +37,9 @@
                 if (curId && savedId === curId && savedWs === 'paper') {
                     document.documentElement.classList.add('init-ws-paper');
                     window.__initWsIsPaper = true;
+                } else if (curId && savedId === curId && savedWs === 'mistake') {
+                    document.documentElement.classList.add('init-ws-mistake');
+                    window.__initWsIsMistake = true;
                 }
             } catch(e) {}
         })();
@@ -92,6 +95,17 @@
             <div id="appLogoMark" class="h-12 w-12 rounded-xl overflow-hidden shadow-sm shrink-0 flex items-center justify-center">
                 <img src="/static/logo.jpg" alt="小陈的数学宝藏 Logo" class="w-full h-full object-cover">
             </div>
+            <!-- 工作台入口（宽屏）：三个工作台平铺，一次点击到位 -->
+            <nav id="workspaceTopNav" class="flex items-center space-x-3">
+                <span class="font-semibold text-lg tracking-tight font-['Outfit'] brand-title">小陈的数学宝藏</span>
+                <div id="workspaceTabs" role="tablist" aria-label="切换工作台" class="ws-tabs">
+                    <button type="button" role="tab" id="ws-tab-bank" aria-selected="true" onclick="selectWorkspace('bank', '题库工作台')" class="ws-tab ws-tab-active">题库</button>
+                    <button type="button" role="tab" id="ws-tab-paper" aria-selected="false" onclick="selectWorkspace('paper', '组卷工作台')" class="ws-tab">组卷</button>
+                    <button type="button" role="tab" id="ws-tab-mistake" aria-selected="false" onclick="selectWorkspace('mistake', '错题工作台')" class="ws-tab">错题</button>
+                </div>
+            </nav>
+
+            <!-- 工作台入口（窄屏回退）：沿用原下拉，宽屏整块隐藏 -->
             <div class="relative" id="workspaceDropdownContainer">
                 <div onclick="toggleWorkspaceDropdown(event)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleWorkspaceDropdown(event)}" id="workspaceDropdownBtn" role="button" tabindex="0" aria-label="切换工作台" aria-haspopup="menu" aria-expanded="false" class="group cursor-pointer rounded-xl px-2 py-1 -mx-2 hover:bg-slate-200/50 dark:hover:bg-slate-800/60 active:scale-95 transition-all" title="点击切换工作台">
                     <span class="font-semibold text-lg tracking-tight font-['Outfit'] brand-title block">小陈的数学宝藏</span>
@@ -109,6 +123,10 @@
                     <button onclick="selectWorkspace('paper', '组卷工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between rounded-xl" id="ws-btn-paper">
                         <span>组卷工作台</span>
                         <i class="fa-solid fa-check text-[10px] text-brand-600 dark:text-brand-500 hidden" id="ws-check-paper"></i>
+                    </button>
+                    <button onclick="selectWorkspace('mistake', '错题工作台')" class="glass-dropdown-item w-full px-3.5 py-2.5 text-xs text-left flex items-center justify-between rounded-xl" id="ws-btn-mistake">
+                        <span>错题工作台</span>
+                        <i class="fa-solid fa-check text-[10px] text-brand-600 dark:text-brand-500 hidden" id="ws-check-mistake"></i>
                     </button>
                 </div>
             </div>
@@ -1092,6 +1110,454 @@
             </div>
         </div>
         <!-- End of Paper Workspace Section -->
+
+        <!-- Workspace 3: 错题工作台（扫描 → 切题 → 点选 → 识别 → 错题本 / 入库） -->
+        <div id="mistakeWorkspaceSection" class="w-full flex-1 min-h-0 flex flex-col overflow-hidden hidden bg-slate-50 dark:bg-slate-950">
+            <!-- ======== 一级页：批次列表 ======== -->
+            <div id="mistakeListView" class="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <div class="shrink-0 px-4 py-3 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60">
+                    <div class="flex items-center space-x-3">
+                        <i class="fa-solid fa-book-bookmark text-brand-600 text-lg"></i>
+                        <div>
+                            <div class="font-semibold text-sm">错题工作台</div>
+                            <div id="mistakeListSummary" class="text-[11px] text-slate-500">正在加载…</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <div id="mistakeStudentChip" class="text-[11px] px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">学生：—</div>
+                        <button type="button" id="mistakeToggleNewBatchBtn" onclick="toggleMistakeNewBatch()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5">
+                            <i class="fa-solid fa-plus text-[10px]"></i><span>新建批次</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 新建批次面板 -->
+                <div id="mistakeNewBatchPanel" class="hidden shrink-0 border-b border-slate-200/60 dark:border-slate-800 bg-white/80 dark:bg-slate-900/60 px-4 py-3">
+                    <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-3">
+                        <div id="mistakeDropZone" class="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl px-4 py-6 text-center cursor-pointer hover:border-brand-500 transition-colors flex flex-col items-center justify-center">
+                            <input type="file" id="mistakeFileInput" class="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff">
+                            <i class="fa-solid fa-file-arrow-up text-xl text-slate-400"></i>
+                            <div class="mt-1.5 text-xs text-slate-600 dark:text-slate-300">拖入或点选扫描件（PDF / 图片，单文件 ≤ 50MB，≤ 60 页）</div>
+                            <div class="mt-1 text-[10px] text-slate-400">输入图请先在上游工具里去掉手写作答与红笔批改</div>
+                            <div id="mistakeFileHint" class="mt-1.5 text-[11px] font-semibold text-brand-600 hidden"></div>
+                        </div>
+                        <div class="space-y-2">
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="block">
+                                    <span class="block text-[11px] text-slate-500 mb-0.5">学科</span>
+                                    <select id="mistakeSubjectInput" class="glass-select w-full text-xs px-2 py-1.5 rounded-lg"></select>
+                                </label>
+                                <label class="block">
+                                    <span class="block text-[11px] text-slate-500 mb-0.5">日期</span>
+                                    <input type="date" id="mistakeDateInput" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg">
+                                </label>
+                            </div>
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-0.5">标题（留空自动生成）</span>
+                                <input id="mistakeTitleInput" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg" placeholder="如：2026-09-12 物理错题">
+                            </label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="block">
+                                    <span class="block text-[11px] text-slate-500 mb-0.5">学生</span>
+                                    <input id="mistakeStudentNameInput" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg" placeholder="姓名">
+                                </label>
+                                <label class="block">
+                                    <span class="block text-[11px] text-slate-500 mb-0.5">学段</span>
+                                    <input id="mistakeStudentGradeInput" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg" placeholder="高一">
+                                </label>
+                            </div>
+                            <button type="button" onclick="submitMistakeBatch()" id="mistakeCreateBtn" class="glass-btn glass-btn-primary w-full py-2 text-xs font-semibold">上传并开始切题</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="mistakeBatchList" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-2.5"></div>
+            </div>
+
+            <!-- ======== 二级页：错题本审校（三栏：收录题目 / LaTeX 编辑 / 渲染预览） ======== -->
+            <div id="mistakeReviewView" class="flex-1 min-h-0 flex flex-col overflow-hidden hidden bg-slate-50 dark:bg-slate-950">
+                <div class="shrink-0 px-4 py-2.5 border-b border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 flex items-center justify-between gap-3">
+                    <div class="flex items-center space-x-3 min-w-0">
+                        <button type="button" onclick="closeMistakeReview()" aria-label="返回批次详情" class="glass-btn w-8 h-8 flex items-center justify-center rounded-xl shrink-0"><i class="fa-solid fa-arrow-left text-xs"></i></button>
+                        <div class="min-w-0">
+                            <div id="mrTitle" class="font-semibold text-sm truncate">错题本审校</div>
+                            <div id="mrMeta" class="text-[11px] text-slate-500 truncate">—</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <span id="mrSaveState" class="text-[10px] text-slate-400"></span>
+                        <button type="button" id="mrRecognizeBtn" onclick="recognizeMissingForReview()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i><span>识别未完成的 0 道</span></button>
+                        <button type="button" id="mrGenerateBtn" onclick="generateReviewHandout()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-file-circle-check text-[10px]"></i><span>确认入库并送组卷</span></button>
+                    </div>
+                </div>
+
+                <div id="mrGateBar" class="hidden shrink-0 px-4 py-1.5 border-b border-amber-200/70 dark:border-amber-900/40 bg-amber-50/80 dark:bg-amber-900/20 text-[11px] text-amber-800 dark:text-amber-200 flex items-center space-x-2">
+                    <i class="fa-solid fa-triangle-exclamation text-[10px] shrink-0"></i>
+                    <span id="mrGateText"></span>
+                </div>
+
+                <div class="flex-1 min-h-0 flex overflow-hidden">
+                    <aside class="w-[248px] shrink-0 min-h-0 flex flex-col border-r border-slate-200/70 dark:border-slate-800 p-2.5">
+                        <div class="glass-panel rounded-2xl flex-1 min-h-0 flex flex-col overflow-hidden">
+                            <div class="shrink-0 px-3 py-2 border-b border-slate-200/60 dark:border-slate-800 flex items-center space-x-2">
+                                <i class="fa-solid fa-list-check text-slate-400 text-xs"></i>
+                                <span class="text-sm font-semibold text-slate-500">本次收录</span>
+                            </div>
+                            <div id="mrList" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2 space-y-1.5"></div>
+                        </div>
+                    </aside>
+
+                    <section class="flex-1 min-w-0 min-h-0 flex flex-col gap-2 border-r border-slate-200/70 dark:border-slate-800 p-2.5">
+                        <!-- 抬头条：与题库「录入新数学题」同款（玻璃条 + 图标 + 加粗标题） -->
+                        <div class="glass-panel rounded-2xl shrink-0 px-3 py-2 flex items-center justify-between gap-2">
+                            <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2 min-w-0">
+                                <i class="fa-solid fa-file-signature text-slate-400"></i>
+                                <span class="truncate">错题编辑</span>
+                            </h3>
+                            <span id="mrDocLabel" class="shrink-0 text-[11px] font-normal text-slate-400 truncate max-w-[160px]"></span>
+                        </div>
+                        <div id="mrLockHint" class="hidden shrink-0 px-2.5 py-1.5 rounded-xl border border-brand-200/70 dark:border-brand-800/60 bg-brand-50/80 dark:bg-brand-900/20 text-[11px] text-brand-700 dark:text-brand-200 flex items-center space-x-2">
+                            <i class="fa-solid fa-circle-notch fa-spin text-[10px] shrink-0"></i>
+                            <span id="mrLockHintText"></span>
+                        </div>
+                        <div class="shrink-0 flex items-center gap-1.5 flex-wrap">
+                            <button type="button" id="mrRetryOneBtn" onclick="recognizeCurrentReviewRecord()" title="对当前这道题重新跑一次识别（失败或认错时用）" class="glass-btn px-2 py-1 text-[10px]"><i class="fa-solid fa-rotate text-[9px]"></i> 重新识别这道</button>
+                            <button type="button" id="mrCropFigureBtn" onclick="openMistakeCropModal('figure_images')" title="在原卷页面上框选，补本题缺的图形" class="glass-btn px-2 py-1 text-[10px]"><i class="fa-solid fa-crop-simple text-[9px]"></i> 补图形</button>
+                            <button type="button" id="mrCropAnswerBtn" onclick="openMistakeCropModal('answer_images')" title="在原卷页面上框选解答区域，补解析截图" class="glass-btn px-2 py-1 text-[10px]"><i class="fa-solid fa-image text-[9px]"></i> 补解析截图</button>
+                            <button type="button" id="mrClearPlaceholderBtn" onclick="clearMistakePlaceholders()" title="把题面/解析里没打算补图的「[插图待补: 图N]」一次性清掉" style="display:none" class="glass-btn px-2 py-1 text-[10px]"><i class="fa-solid fa-eraser text-[9px]"></i> 清除残留占位符</button>
+                        </div>
+                        <!-- 中栏滚动区：三张卡片（分类信息 / 题干内容录入 / 解析录入）
+                             —— 与题库「录入新数学题」同款组织：区块标题 + 每字段 label + glass 控件。
+                             字段级学科适配见 applyReviewMetaSubjectUI()：物化只留 题型/来源/学段/章节/小节/关联章节。 -->
+                        <div class="flex-1 min-h-0 overflow-y-auto custom-scrollbar flex flex-col gap-2">
+                            <!-- 卡片 1：分类信息 -->
+                            <div id="mrMetaCard" class="glass-panel p-3 rounded-2xl space-y-3 shrink-0">
+                                <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2">
+                                    <i class="fa-solid fa-tags text-slate-400"></i>
+                                    <span>分类信息</span>
+                                </h3>
+                                <div id="mrMetaRow1" class="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">题型</label>
+                                        <select id="mrQType" onchange="scheduleMistakeReviewSave()" class="glass-select w-full px-2.5 text-xs rounded-xl"></select>
+                                    </div>
+                                    <div id="mrDifficultyWrap">
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">难度</label>
+                                        <select id="mrDifficulty" onchange="scheduleMistakeReviewSave()" class="glass-select w-full px-2.5 text-xs rounded-xl"></select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">来源</label>
+                                        <input type="text" id="mrSource" oninput="scheduleMistakeReviewSave()" placeholder="如：2025全国甲卷"
+                                               class="glass-input w-full px-2.5 text-xs rounded-xl">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">学段</label>
+                                        <select id="mrCompulsory" onchange="onReviewCompulsoryChange()" class="glass-select w-full px-2.5 text-xs rounded-xl">
+                                            <option value="">选择学段</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">章节</label>
+                                        <select id="mrChapter" onchange="onReviewChapterChange()" class="glass-select w-full px-2.5 text-xs rounded-xl disabled:opacity-50" disabled>
+                                            <option value="">先选学段</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1">小节</label>
+                                        <select id="mrKnowledge" onchange="scheduleMistakeReviewSave()" class="glass-select w-full px-2.5 text-xs rounded-xl disabled:opacity-50" disabled>
+                                            <option value="">先选章节</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div id="mrTagsRow" class="grid grid-cols-1 gap-3">
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                            <i class="fa-solid fa-lightbulb text-slate-400 mr-1"></i>
+                                            <span>知识点 (多标签，可 AI 自动打标)</span>
+                                        </label>
+                                        <div class="flex flex-wrap gap-1 items-center border border-slate-200 rounded-xl px-2.5 py-2 bg-white/50">
+                                            <span id="mrKnowledgeTagsChips" class="flex flex-wrap gap-1"></span>
+                                            <input type="text" id="mrKnowledgeTagInput" onkeydown="onReviewMetaTagKey(event,&#39;knowledge&#39;)" class="flex-1 min-w-[80px] bg-transparent text-xs outline-none" placeholder="输入后回车添加">
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                            <i class="fa-solid fa-wand-magic-sparkles text-slate-400 mr-1"></i>
+                                            <span>解题方法 (多标签，可 AI 自动打标)</span>
+                                        </label>
+                                        <div class="flex flex-wrap gap-1 items-center border border-slate-200 rounded-xl px-2.5 py-2 bg-white/50">
+                                            <span id="mrSolveMethodTagsChips" class="flex flex-wrap gap-1"></span>
+                                            <input type="text" id="mrSolveMethodTagInput" onkeydown="onReviewMetaTagKey(event,&#39;solve&#39;)" class="flex-1 min-w-[80px] bg-transparent text-xs outline-none" placeholder="输入后回车添加">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div id="mrRelChapterBox" class="p-3 rounded-xl border border-dashed border-slate-300 bg-slate-50/60">
+                                    <label class="block text-[11px] font-medium text-slate-600 mb-1.5 flex items-center">
+                                        <i class="fa-solid fa-layer-group text-slate-400 mr-1"></i>
+                                        <span>关联章节（融合题适用，可多选）</span>
+                                        <span class="ml-1 text-[10px] text-slate-400 font-normal">除主分类外，题目还涉及的章节</span>
+                                    </label>
+                                    <div class="grid grid-cols-3 gap-2">
+                                        <select id="mrRelCompulsory" onchange="onReviewRelCompulsoryChange()" class="glass-select w-full px-2 text-xs rounded-lg"></select>
+                                        <select id="mrRelChapter" onchange="onReviewRelChapterChange()" class="glass-select w-full px-2 text-xs rounded-lg" disabled></select>
+                                        <select id="mrRelKnowledge" class="glass-select w-full px-2 text-xs rounded-lg" disabled></select>
+                                    </div>
+                                    <div class="mt-2 flex items-center gap-2">
+                                        <button type="button" id="mrAddRelChapterBtn" onclick="addReviewRelatedChapter()" class="px-2.5 py-1 rounded-lg bg-brand-600 text-white text-xs font-medium hover:bg-brand-700 disabled:opacity-40" disabled>
+                                            <i class="fa-solid fa-plus mr-1"></i>添加关联章节
+                                        </button>
+                                        <span class="text-[10px] text-slate-400">添加后以标签展示，筛选该章节时也会命中本题</span>
+                                    </div>
+                                    <div id="mrRelChips" class="flex flex-wrap gap-1.5 mt-2"></div>
+                                </div>
+                                <div id="mrCustomTagsRow" class="mt-3">
+                                    <label class="block text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                        <i class="fa-solid fa-tags text-slate-400 mr-1"></i>
+                                        <span>自定义标签 (Tag)</span>
+                                    </label>
+                                    <input type="text" id="mrCustomTags" oninput="scheduleMistakeReviewSave()"
+                                           placeholder="如：高一, 期中, 真题 (使用逗号分隔)"
+                                           class="glass-input w-full px-2.5 text-xs rounded-xl">
+                                </div>
+                            </div>
+                            <!-- 卡片 2：题干内容录入 -->
+                            <div id="mrContentCard" class="glass-panel p-3 rounded-2xl shrink-0 flex flex-col">
+                                <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2">
+                                    <i class="fa-solid fa-file-signature text-slate-400"></i>
+                                    <span>题干内容录入</span>
+                                </h3>
+                                <label class="mt-3 text-[11px] font-medium text-slate-500 mb-1 flex items-center">
+                                    <i class="fa-solid fa-file-lines text-slate-400 mr-1"></i>
+                                    <span>题面</span>
+                                    <span class="ml-1 text-[10px] text-slate-400 font-normal">LaTeX 源码</span>
+                                </label>
+                                <!-- relative 包裹层：给「补这张图」浮层当定位参考（见 mrPlacePlaceholderAction） -->
+                                <div id="mrContentWrap" class="relative w-full shrink-0">
+                                    <textarea id="mrContent" spellcheck="false" oninput="scheduleMistakeReviewSave()"
+                                              class="h-64 w-full resize-y glass-input p-2.5 text-xs font-mono leading-relaxed rounded-xl"
+                                              placeholder="题面 LaTeX。例：求方程 $x^2-3x+2=0$ 的解。&#10;\begin{choices}\item $1$ \item $2$ \end{choices} \fillin"></textarea>
+                                    <!-- 补图入口：光标落在 [插图待补: 图N] 上才出现 -->
+                                    <div id="mrContentFigureAction" class="hidden absolute z-20"></div>
+                                </div>
+                            </div>
+                            <!-- 卡片 3：解析录入 -->
+                            <div id="mrAnswerCard" class="glass-panel p-3 rounded-2xl shrink-0 flex flex-col">
+                                <h3 class="text-sm font-semibold text-slate-500 flex items-center space-x-2">
+                                    <i class="fa-solid fa-lightbulb text-slate-400"></i>
+                                    <span>解析录入</span>
+                                </h3>
+                                <div class="mt-3 flex items-center justify-between gap-2">
+                                    <label class="text-[11px] font-medium text-slate-500 flex items-center">
+                                        <i class="fa-solid fa-square-root-variable text-slate-400 mr-1"></i>
+                                        <span>解析</span>
+                                        <span class="ml-1 text-[10px] text-slate-400 font-normal">可留空</span>
+                                    </label>
+                                    <!-- 识别结果的写入方式：追加=拼到现有解析末尾，替换=覆盖整段（记住选择） -->
+                                    <div class="shrink-0 flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100/80 dark:bg-slate-800/60"
+                                         title="识别结果怎么写进解析：追加=拼到现有解析末尾；替换=覆盖整段解析">
+                                        <button type="button" id="mrOcrModeAppend" onclick="setReviewOcrMode('append')"
+                                                class="px-2 py-0.5 rounded-md text-[10px] font-medium transition-all">追加</button>
+                                        <button type="button" id="mrOcrModeReplace" onclick="setReviewOcrMode('replace')"
+                                                class="px-2 py-0.5 rounded-md text-[10px] font-medium transition-all">替换</button>
+                                    </div>
+                                </div>
+                                <!-- 解析截图识别：点击上传 / 拖入 / 聚焦后 Ctrl+V 粘贴 → /api/ocr → 文字写入下方解析框 -->
+                                <div id="mrAnswerOcrZone" tabindex="0" role="button"
+                                     aria-label="上传或粘贴解析截图，自动识别成 LaTeX 填入解析框"
+                                     class="mt-2 border border-dashed border-slate-300 hover:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 bg-white/50 rounded-xl px-2.5 py-2 cursor-pointer transition-all flex items-center gap-2">
+                                    <input type="file" id="mrAnswerOcrFile" accept="image/*" class="hidden">
+                                    <div id="mrAnswerOcrIdle" class="flex items-center gap-2 min-w-0">
+                                        <i class="fa-solid fa-camera text-slate-300 shrink-0"></i>
+                                        <span class="text-[11px] text-slate-400 truncate">解析截图识别 · 点击上传 / 拖入 / 粘贴（Ctrl+V）</span>
+                                    </div>
+                                    <div id="mrAnswerOcrBusy" class="hidden items-center gap-2 min-w-0">
+                                        <i class="fa-solid fa-circle-notch fa-spin text-brand-500 shrink-0"></i>
+                                        <span id="mrAnswerOcrBusyText" class="text-[11px] text-brand-600 truncate">正在识别解析截图…</span>
+                                    </div>
+                                    <div id="mrAnswerOcrDone" class="hidden items-center gap-2 min-w-0">
+                                        <img id="mrAnswerOcrThumb" src="" alt="解析截图" class="h-6 w-6 shrink-0 rounded object-cover border border-slate-200">
+                                        <span id="mrAnswerOcrDoneText" class="text-[11px] text-green-600 truncate"></span>
+                                        <span class="ml-auto shrink-0 text-[10px] text-slate-400">再点一次换图</span>
+                                    </div>
+                                </div>
+                                <div id="mrAnswerWrap" class="relative w-full shrink-0">
+                                    <textarea id="mrAnswer" spellcheck="false" oninput="scheduleMistakeReviewSave()"
+                                              class="mt-2 h-40 w-full resize-y glass-input p-2.5 text-xs font-mono leading-relaxed rounded-xl"
+                                              placeholder="答案解析 LaTeX（可留空）"></textarea>
+                                    <!-- 补图入口：光标落在 [插图待补: 图N] 上才出现 -->
+                                    <div id="mrAnswerFigureAction" class="hidden absolute z-20"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <aside class="w-[36%] shrink-0 min-h-0 flex flex-col p-2.5">
+                        <div class="glass-panel rounded-2xl flex-1 min-h-0 flex flex-col overflow-hidden">
+                            <div class="shrink-0 px-3 py-2 border-b border-slate-200/60 dark:border-slate-800 flex items-center space-x-2">
+                                <i class="fa-solid fa-file-invoice text-slate-400 text-xs"></i>
+                                <span class="text-sm font-semibold text-slate-500">题目预览</span>
+                            </div>
+                            <div id="mrPreview" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-3"></div>
+                        </div>
+                    </aside>
+                </div>
+            </div>
+
+            <!-- ======== 二级页：批次详情 ======== -->
+            <div id="mistakeDetailView" class="flex-1 min-h-0 flex flex-col overflow-hidden hidden">
+                <div class="shrink-0 px-4 py-2.5 border-b border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 flex items-center justify-between gap-3">
+                    <div class="flex items-center space-x-3 min-w-0">
+                        <button type="button" onclick="backToMistakeList()" aria-label="返回批次列表" class="glass-btn w-8 h-8 flex items-center justify-center rounded-xl shrink-0"><i class="fa-solid fa-arrow-left text-xs"></i></button>
+                        <div class="min-w-0">
+                            <div id="mistakeDetailTitle" class="font-semibold text-sm truncate">—</div>
+                            <div id="mistakeDetailMeta" class="text-[11px] text-slate-500 truncate">—</div>
+                        </div>
+                    </div>
+                    <div id="mistakeStepBar" class="hidden items-start flex-1 max-w-[540px]"></div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <select id="mistakeEngineInput" class="glass-select text-[11px] px-2 py-1.5 rounded-lg" title="识别用的多模态引擎（默认按免费优先顺序自动故障转移）">
+                            <option value="">识图：默认（免费优先）</option>
+                            <option value="siliconflow">识图：硅基流动</option>
+                            <option value="ali_bailian">识图：阿里百炼</option>
+                            <option value="zhongzhan_gpt">识图：中转站 GPT</option>
+                            <option value="zhongzhan_claude">识图：中转站 Claude</option>
+                        </select>
+                        <button type="button" id="mistakeCutBtn" onclick="startMistakeCut()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-scissors text-[10px]"></i><span>切题 / 重切</span></button>
+                        <button type="button" id="mistakeRecognizeBtn" onclick="startMistakeRecognize()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i><span>识别已标记的 0 道错题</span></button>
+                        <button type="button" id="mistakeReviewBtn" onclick="openMistakeReview()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5" title="逐题核对识别出的 LaTeX，定稿后生成错题本并送入组卷"><i class="fa-solid fa-list-check text-[10px]"></i><span>错题本审校</span></button>
+                    </div>
+                </div>
+
+                <div class="shrink-0 px-4 py-1.5 border-b border-amber-200/70 dark:border-amber-900/40 bg-amber-50/80 dark:bg-amber-900/20 text-[11px] text-amber-800 dark:text-amber-200 flex items-center space-x-2">
+                    <i class="fa-solid fa-circle-info text-[10px]"></i>
+                    <span>输入图已去手写，判断依据请对照原件 / 纸质卷。</span>
+                </div>
+
+                <div id="mistakeTaskBar" class="hidden shrink-0 px-4 py-2 border-b border-slate-200/60 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-[11px] text-slate-600 dark:text-slate-300 flex items-center gap-2">
+                    <i id="mistakeTaskIcon" class="fa-solid fa-circle-notch fa-spin text-brand-600"></i>
+                    <span id="mistakeTaskText"></span>
+                </div>
+
+                <div class="flex-1 min-h-0 flex overflow-hidden">
+                    <!-- 左：整页图 + 切块线 -->
+                    <div class="w-[46%] shrink-0 flex flex-col border-r border-slate-200/70 dark:border-slate-800 overflow-hidden">
+                        <div class="shrink-0 px-3 py-1.5 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-800">
+                            <div class="flex items-center space-x-1.5">
+                                <button type="button" onclick="mistakePageStep(-1)" aria-label="上一页" class="glass-btn w-7 h-7 flex items-center justify-center rounded-lg"><i class="fa-solid fa-chevron-left text-[10px]"></i></button>
+                                <!-- 页号本身做成输入框：16 页的卷子翻到第 14 页要点 13 次箭头，直接输更快 -->
+                                <span id="mistakePageIndicator" class="text-[11px] font-semibold text-slate-600 dark:text-slate-300 flex items-center justify-center space-x-1 min-w-[4rem]">
+                                    <input id="mistakePageInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="1" aria-label="页码" title="输入页码，回车跳转（Esc 还原）" class="w-8 py-0.5 text-center text-[11px] font-semibold rounded bg-white/80 dark:bg-slate-800 border border-slate-300 dark:border-slate-600 focus:outline-none focus:border-brand-500" onkeydown="mistakePageInputKey(event)" onchange="mistakePageCommit()">
+                                    <span id="mistakePageTotal">/ 1</span>
+                                </span>
+                                <button type="button" onclick="mistakePageStep(1)" aria-label="下一页" class="glass-btn w-7 h-7 flex items-center justify-center rounded-lg"><i class="fa-solid fa-chevron-right text-[10px]"></i></button>
+                            </div>
+                            <div class="flex items-center space-x-1.5">
+                                <button type="button" id="mistakeBoxModeBtn" onclick="toggleMistakeBoxMode()" class="glass-btn px-2 py-1 text-[10px] font-semibold flex items-center space-x-1"><i class="fa-solid fa-vector-square text-[10px]"></i><span>画框</span></button>
+                                <button type="button" onclick="mistakeZoom(-0.25)" aria-label="缩小" class="glass-btn w-7 h-7 flex items-center justify-center rounded-lg"><i class="fa-solid fa-minus text-[10px]"></i></button>
+                                <span id="mistakeZoomLabel" class="text-[10px] text-slate-500 w-9 text-center">100%</span>
+                                <button type="button" onclick="mistakeZoom(0.25)" aria-label="放大" class="glass-btn w-7 h-7 flex items-center justify-center rounded-lg"><i class="fa-solid fa-plus text-[10px]"></i></button>
+                            </div>
+                        </div>
+                        <!-- 本页栏目：自动判栏会错（通栏页被腰斩 / 双栏页被并成一条），三态开关 + 分栏线拖动兜回来 -->
+                        <!-- flex-wrap：面板窄时「按新栏目重切」按钮整段换到第二行，而不是被 truncate 截掉 -->
+                        <div class="shrink-0 px-3 py-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-slate-200/60 dark:border-slate-800">
+                            <span class="shrink-0 text-[10px] text-slate-400">本页栏目</span>
+                            <div id="mistakeLayoutSwitch" class="flex items-center gap-0.5 rounded-lg p-0.5 bg-slate-100 dark:bg-slate-800"></div>
+                            <span id="mistakeLayoutHint" class="min-w-0 text-[10px] text-slate-500 dark:text-slate-400"></span>
+                        </div>
+                        <!-- 画框模式的操作条：提示、保存状态、清空、立即保存都在这一行，
+                             不放进滚动区，免得放大后按钮被滚出视野 -->
+                        <div id="mistakeBoxBar" class="hidden shrink-0 px-3 py-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-blue-200/70 dark:border-blue-900/40 bg-blue-50/70 dark:bg-blue-900/20">
+                            <span id="mistakeBoxHint" class="min-w-0 text-[10px] text-blue-800 dark:text-blue-200"></span>
+                            <span id="mistakeBoxCount" class="shrink-0 text-[10px] font-semibold text-blue-700 dark:text-blue-300"></span>
+                            <span id="mistakeBoxStatus" class="shrink-0 text-[10px] font-semibold text-blue-700 dark:text-blue-300"></span>
+                            <div class="ml-auto flex shrink-0 items-center gap-1.5">
+                                <button type="button" id="mistakeBoxRetryBtn" class="hidden glass-btn px-2 py-0.5 text-[10px] font-semibold text-red-600" onclick="retryMistakeBoxSave()">重试</button>
+                                <button type="button" class="glass-btn px-2 py-0.5 text-[10px] font-semibold" onclick="clearMistakePageBoxes()">清空本页框</button>
+                                <button type="button" id="mistakeBoxApplyBtn" class="glass-btn glass-btn-primary px-2 py-0.5 text-[10px] font-semibold" onclick="applyMistakePageBoxes()">立即保存</button>
+                            </div>
+                        </div>
+                        <div id="mistakePageScroll" class="flex-1 min-h-0 overflow-auto custom-scrollbar bg-slate-200/40 dark:bg-slate-950 p-3">
+                            <div id="mistakePageWrap" class="relative mx-auto">
+                                <img id="mistakePageImage" class="block w-full select-none rounded-md shadow" alt="扫描页图">
+                                <div id="mistakePageOverlay" class="absolute inset-0"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右：题块卡片 -->
+                    <div class="flex-1 min-w-0 flex flex-col overflow-hidden">
+                        <div class="shrink-0 px-3 py-1.5 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-800">
+                            <div id="mistakeCardFilters" class="flex items-center space-x-1"></div>
+                            <div id="mistakeCardCount" class="text-[11px] text-slate-500">0 题</div>
+                        </div>
+                        <div id="mistakeCardList" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-3 space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- 常驻操作条 -->
+                <div class="shrink-0 px-4 py-2 border-t border-slate-200/70 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 flex items-center justify-between gap-3">
+                    <div id="mistakeStats" class="flex items-center gap-3 text-[11px] text-slate-600 dark:text-slate-300"></div>
+                    <div class="flex items-center gap-2">
+                        <span class="hidden sm:inline text-[10px] text-slate-400">快捷键：⌘+点击 选多块 · ⏎ 合并 · ⌘Z 撤销 · Esc 取消 · J / K 翻页 · 1 对 · 2 错 · 3 清空判定</span>
+                        <button type="button" onclick="openMistakeExportPanel()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-file-pdf text-[10px]"></i><span>生成错题本 PDF</span></button>
+                        <button type="button" id="mistakeImportBtn" onclick="openMistakeReview()" class="glass-btn glass-btn-success px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5" title="逐题核对识别出的 LaTeX，定稿后入库并送入组卷试题篮"><i class="fa-solid fa-list-check text-[10px]"></i><span>审校并入库</span></button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 合并状态冲突确认面板（只有两块状态不一致时才弹） -->
+            <div id="mistakeMergeDialog" class="hidden"></div>
+
+            <!-- 导出选项面板 -->
+            <div id="mistakeExportPanel" role="dialog" aria-modal="true" aria-hidden="true" class="hidden fixed inset-0 glass-modal-overlay z-50 items-center justify-center">
+                <div class="glass-modal rounded-2xl w-full max-w-md p-5">
+                    <div class="flex items-center justify-between border-b border-slate-200/60 dark:border-slate-800 pb-2 mb-3">
+                        <h3 class="font-bold text-sm flex items-center space-x-2"><i class="fa-solid fa-file-pdf text-brand-600"></i><span>生成错题本 PDF</span></h3>
+                        <button type="button" onclick="closeMistakeExportPanel()" aria-label="关闭" class="glass-btn w-8 h-8 flex items-center justify-center rounded-xl"><i class="fa-solid fa-xmark text-sm"></i></button>
+                    </div>
+                    <div class="space-y-3 text-xs">
+                        <label class="block">
+                            <span class="block text-[11px] text-slate-500 mb-1">订正留白高度：<b id="mistakeSpaceLabel">6.0</b> cm</span>
+                            <input type="range" id="mistakeSpaceInput" min="0" max="12" step="0.5" value="6" class="w-full" oninput="document.getElementById('mistakeSpaceLabel').textContent = parseFloat(this.value).toFixed(1)">
+                        </label>
+                        <label class="block">
+                            <span class="block text-[11px] text-slate-500 mb-1">解析页来源</span>
+                            <select id="mistakeAnswerModeInput" class="glass-select w-full text-xs px-2 py-1.5 rounded-lg">
+                                <option value="none">不含解析页</option>
+                                <option value="manual">人工解析（截图 / 文字）</option>
+                                <option value="ai">AI 生成解析（须人工核对）</option>
+                                <option value="both">两者都收</option>
+                            </select>
+                        </label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-1">正文字号</span>
+                                <select id="mistakeFontSizeInput" class="glass-select w-full text-xs px-2 py-1.5 rounded-lg">
+                                    <option value="3">三号</option>
+                                    <option value="4">四号</option>
+                                    <option value="-4">小四</option>
+                                    <option value="5">五号</option>
+                                </select>
+                            </label>
+                            <div class="flex flex-col justify-end space-y-1.5 text-[11px]">
+                                <label class="flex items-center space-x-2"><input type="checkbox" id="mistakeIncludeReasonInput" class="rounded" checked><span>显示错因</span></label>
+                                <label class="flex items-center space-x-2"><input type="checkbox" id="mistakeIncludeFiguresInput" class="rounded" checked><span>插入图形</span></label>
+                                <label class="flex items-center space-x-2"><input type="checkbox" id="mistakeShowNumberInput" class="rounded" checked><span>显示原卷题号</span></label>
+                            </div>
+                        </div>
+                        <div id="mistakeExportResult" class="hidden text-[11px] rounded-lg px-3 py-2"></div>
+                    </div>
+                    <div class="flex items-center justify-end space-x-2 mt-4">
+                        <button type="button" onclick="closeMistakeExportPanel()" class="glass-btn px-3 py-1.5 text-xs">取消</button>
+                        <button type="button" id="mistakeExportBtn" onclick="exportMistakeHandout()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold">生成 PDF</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- End of Mistake Workspace Section -->
 
     </main>
 
@@ -2251,9 +2717,84 @@
     <script src="/static/js/ocr.js?v=1.0.1"></script>
     <script src="/static/js/import.js?v=1.0.5"></script>
     <script src="/static/js/paper.js?v=1.0.1"></script>
+    <script src="/static/js/mistake.js?v=1.0.1"></script>
     <script src="/static/js/onboarding.js?v=1.0.0"></script>
     
     <!-- PDF PAGE VIEWER & MANUAL CROP LIGHTBOX MODAL - Apple Glass Style -->
+    <!-- 原卷框选补图：一个弹窗服务「本题配图」与「解析截图」两个目标 -->
+    <div id="mrCropModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="mrCropModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
+        <div class="glass-modal rounded-2xl w-full max-w-5xl h-[85vh] flex flex-col transform scale-95 transition-transform duration-300 overflow-hidden">
+            <div class="flex justify-between items-center border-b border-slate-200/50 px-6 py-4 shrink-0">
+                <h3 id="mrCropModalTitle" class="font-bold text-base text-slate-800 flex items-center space-x-2">
+                    <i class="fa-solid fa-crop-simple text-brand-600"></i>
+                    <span id="mrCropTitleText">原卷框选 · 补本题配图</span>
+                    <span id="mrCropSubtitle" class="text-[11px] font-normal text-slate-500"></span>
+                </h3>
+                <div class="flex items-center space-x-3">
+                    <div class="flex items-center space-x-1.5 bg-slate-100 border border-slate-200 rounded-lg px-1.5 py-1">
+                        <button type="button" onclick="mrCropStepPage(-1)" aria-label="上一页" class="w-7 h-7 flex items-center justify-center rounded-md bg-white hover:bg-slate-200 text-slate-500 transition-colors">
+                            <i class="fa-solid fa-chevron-left text-[10px]"></i>
+                        </button>
+                        <span class="text-xs text-slate-500 font-bold min-w-[58px] text-center" id="mrCropPageIndicator">第 1 / 1 页</span>
+                        <button type="button" onclick="mrCropStepPage(1)" aria-label="下一页" class="w-7 h-7 flex items-center justify-center rounded-md bg-white hover:bg-slate-200 text-slate-500 transition-colors">
+                            <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                        </button>
+                    </div>
+                    <button type="button" onclick="closeMistakeCropModal()" aria-label="关闭原卷框选弹窗" class="glass-btn w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-all">
+                        <i class="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex-1 flex overflow-hidden">
+                <div class="w-48 border-r border-slate-300/60 p-3 flex flex-col space-y-2 bg-slate-50/50 overflow-y-auto custom-scrollbar" id="mrCropThumbs"></div>
+                <div class="flex-1 flex flex-col bg-slate-900 overflow-hidden relative">
+                    <div class="flex-1 overflow-auto flex p-6 select-none relative" id="mrCropWrapper">
+                        <div class="absolute top-4 right-4 z-10 flex items-center space-x-1.5 bg-slate-950/80 backdrop-blur border border-slate-800 rounded-xl p-1.5 shadow-lg select-none">
+                            <button type="button" onclick="zoomMrCropOut()" aria-label="缩小原卷页面" class="w-8 h-8 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
+                                <i class="fa-solid fa-minus text-[10px]"></i>
+                            </button>
+                            <span id="mrCropZoomText" class="text-[10px] font-bold text-slate-400 min-w-[36px] text-center">100%</span>
+                            <button type="button" onclick="zoomMrCropIn()" aria-label="放大原卷页面" class="w-8 h-8 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
+                                <i class="fa-solid fa-plus text-[10px]"></i>
+                            </button>
+                            <button type="button" onclick="resetMrCropZoom()" aria-label="重置缩放" class="w-8 h-8 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors" title="重置">
+                                <i class="fa-solid fa-rotate-left text-[10px]"></i>
+                            </button>
+                        </div>
+                        <div class="relative inline-block" id="mrCropImageBox" style="cursor: crosshair; margin: auto;">
+                            <img id="mrCropImage" src="" alt="原卷页面" class="select-none pointer-events-none shadow-2xl" style="max-width:none;max-height:none;">
+                            <!-- 琥珀虚线参考框：2026-09-15 起不再写文字标签，只留框本身。 -->
+                            <div id="mrCropBlockRect" class="absolute border-2 border-dashed border-amber-400/80 pointer-events-none hidden"></div>
+                            <!-- 框选只用线条表示：不画四角圆点（用户 2026-09-15 要求，圆点太大影响观感）。
+                                 缩放改按角坐标判定（mrCropHitHandle），页面上不留任何手柄元素。 -->
+                            <div id="mrCropSelectRect" class="absolute border-2 border-brand-500 bg-brand-500/25 hidden"></div>
+                        </div>
+                    </div>
+                    <div class="p-4 bg-slate-950 border-t border-slate-800 flex justify-between items-center shrink-0">
+                        <div id="mrCropHint" class="text-[10px] text-slate-400 flex items-center space-x-1.5">
+                            <i class="fa-solid fa-circle-info text-brand-500 shrink-0"></i>
+                            <span id="mrCropHintText">已自动跳到本题所在页</span>
+                        </div>
+                        <div class="flex items-center space-x-3 shrink-0">
+                            <span id="mrCropTargetBadge" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-brand-500/40 text-brand-300 font-bold text-[11px] whitespace-nowrap">
+                                <i class="fa-solid fa-location-arrow text-brand-500"></i>
+                                <span id="mrCropTargetBadgeText">补入位置：本题配图</span>
+                            </span>
+                            <button id="mrCropClearBtn" onclick="clearMrCropSelection()" class="whitespace-nowrap px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-700 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
+                                <span>清除框选</span>
+                            </button>
+                            <button id="mrCropConfirmBtn" onclick="submitMrCrop()" class="whitespace-nowrap px-5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none" disabled>
+                                <i class="fa-solid fa-crop-simple mr-1.5"></i>
+                                <span>确认截取并补入</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="pdfCropModal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="pdfCropModalTitle" class="fixed inset-0 glass-modal-overlay z-50 flex items-center justify-center hidden opacity-0 transition-opacity duration-300">
         <div class="glass-modal rounded-2xl w-full max-w-5xl h-[85vh] flex flex-col transform scale-95 transition-transform duration-300 overflow-hidden">
             <!-- Modal Header -->

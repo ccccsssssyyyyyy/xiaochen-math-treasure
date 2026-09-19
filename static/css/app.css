@@ -6,6 +6,12 @@ html.init-ws-paper #bankWorkspaceSection { display: none !important; }
 html.init-ws-paper #paperWorkspaceSection { display: flex !important; }
 html.init-ws-paper #toggleSidebarBtn { display: none !important; }
 
+html.init-ws-mistake #bankWorkspaceSection { display: none !important; }
+html.init-ws-mistake #paperWorkspaceSection { display: none !important; }
+html.init-ws-mistake #bankTopFilterBar { display: none !important; }
+html.init-ws-mistake #mistakeWorkspaceSection { display: flex !important; }
+html.init-ws-mistake #toggleSidebarBtn { display: none !important; }
+
 /* Local Inter & Outfit Webfonts (100% Offline & Cross-Platform) */
 @font-face {
     font-family: 'Inter';
@@ -1080,6 +1086,75 @@ button, a, input, select, textarea {
     color: #ffffff !important;
 }
 
+/* ===== Workspace Tabs =====
+   宽屏下三个工作台平铺可见（一次点击到位），窄屏回落到底部的下拉。
+   两套入口的高亮由 api.js 的 selectWorkspace 用同一张表同步，不存在各改各的。 */
+.ws-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 12px;
+    background: rgba(148, 163, 184, 0.18);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.ws-tab {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 5px 12px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: #475569;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ws-tab:hover {
+    background: rgba(255, 255, 255, 0.75);
+    color: #0f172a;
+}
+
+.ws-tab:focus-visible {
+    outline: 2px solid rgb(var(--brand-500-rgb));
+    outline-offset: 1px;
+}
+
+.ws-tab.ws-tab-active {
+    background: #ffffff;
+    color: rgb(var(--brand-600-rgb));
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1), 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+
+.dark .ws-tabs {
+    background: rgba(51, 65, 85, 0.4);
+    border-color: rgba(148, 163, 184, 0.18);
+}
+
+.dark .ws-tab {
+    color: #cbd5e1;
+}
+
+.dark .ws-tab:hover {
+    background: rgba(71, 85, 105, 0.7);
+    color: #f8fafc;
+}
+
+.dark .ws-tab.ws-tab-active {
+    background: rgba(30, 41, 59, 0.98);
+    color: #e2e8f0;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* 宽屏用平铺 tab，下拉容器整块退出（display:none 也不会进无障碍树，标题不会读两遍） */
+#workspaceDropdownContainer {
+    display: none;
+}
+
 /* Tooltip - Apple Style */
 .glass-tooltip,
 .global-tooltip {
@@ -1587,6 +1662,15 @@ main {
         display: none !important;
     }
 
+    /* 工作台入口：窄屏放不下三个 tab，换回下拉（本断点已把它压成 44×44 图标） */
+    #workspaceTopNav {
+        display: none !important;
+    }
+
+    #workspaceDropdownContainer {
+        display: block !important;
+    }
+
     #workspaceDropdownBtn {
         min-width: 44px;
         min-height: 44px;
@@ -1930,4 +2014,27 @@ main {
 .question-card.active {
     box-shadow: 0 0 0 2px rgba(var(--brand-500-rgb), 0.22),
                 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+/* === 错题工作台：题块定位闪烁 === */
+
+/* 从右侧卡片点过来时，让页图上对应的那一块闪一下（不然还得自己在一页里找）。
+   刻意做成独立的一层子元素：父元素身上挂着 JS 生成的内联 background / box-shadow
+   （判定染色、选中环），同类属性上 CSS 动画打不过内联样式，只有独立元素才动得起来。 */
+@keyframes mistake-block-flash {
+    0% {
+        box-shadow: inset 0 0 0 3px rgba(37, 99, 235, 0.95),
+                    0 0 0 0 rgba(37, 99, 235, 0.45);
+    }
+    100% {
+        box-shadow: inset 0 0 0 3px rgba(37, 99, 235, 0),
+                    0 0 0 14px rgba(37, 99, 235, 0);
+    }
+}
+
+.mistake-block-flash {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    animation: mistake-block-flash 0.9s ease-out 1;
 }

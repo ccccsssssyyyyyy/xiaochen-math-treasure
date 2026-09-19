@@ -2072,24 +2072,24 @@
                 }
             }
 
-            const checkBank = document.getElementById('ws-check-bank');
-            const checkPaper = document.getElementById('ws-check-paper');
-            const btnBank = document.getElementById('ws-btn-bank');
-            const btnPaper = document.getElementById('ws-btn-paper');
+            // 工作台的三套入口共用这张表：宽屏平铺 tab、窄屏下拉菜单、下拉勾选态。
+            // 新增一个工作台只需往这里加一行，不必分别去改三处。
+            const workspaceChecks = ['bank', 'paper', 'mistake'];
+            workspaceChecks.forEach(function(wsId) {
+                const active = workspaceId === wsId;
 
-            if (checkBank && checkPaper) {
-                if (workspaceId === 'bank') {
-                    checkBank.classList.remove('hidden');
-                    checkPaper.classList.add('hidden');
-                    if (btnBank) btnBank.classList.add('font-medium');
-                    if (btnPaper) btnPaper.classList.remove('font-medium');
-                } else {
-                    checkBank.classList.add('hidden');
-                    checkPaper.classList.remove('hidden');
-                    if (btnBank) btnBank.classList.remove('font-medium');
-                    if (btnPaper) btnPaper.classList.add('font-medium');
+                const check = document.getElementById('ws-check-' + wsId);
+                if (check) check.classList.toggle('hidden', !active);
+
+                const btn = document.getElementById('ws-btn-' + wsId);
+                if (btn) btn.classList.toggle('font-medium', active);
+
+                const tab = document.getElementById('ws-tab-' + wsId);
+                if (tab) {
+                    tab.classList.toggle('ws-tab-active', active);
+                    tab.setAttribute('aria-selected', active ? 'true' : 'false');
                 }
-            }
+            });
 
             closeWorkspaceDropdown();
         };

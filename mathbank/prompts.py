@@ -43,6 +43,117 @@ def build_curriculum_text(curriculum: dict) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def build_mistake_curriculum_text(curriculum: dict) -> str:
+    """错题识别的教材范围片段：书 → 章节 → 小节，三级全列。
+
+    比 ``build_curriculum_text`` 多一层小节。错题识别要求模型**逐字**给出小节名，
+    只给到章节它就只能拿 knowledge_tags 自由发挥（「加速度」这类标签跟
+    「2.2 匀变速直线运动速度与时间的关系」永远匹配不上），小节字段必然长期为空。
+    """
+
+    lines = []
+    for book, chapters in (curriculum or {}).items():
+        lines.append(f"- {book}")
+        for chapter, sections in (chapters or {}).items():
+            lines.append(f"    - {chapter}: {list(sections or [])}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def build_mistake_block_system_prompt(
+    subject: str = "math", curriculum: dict | None = None
+) -> str:
+    """错题工作台的「单题块识别」系统提示词。
+
+    与拆卷提示词（``build_pdf_parse_system_prompt``）的三点关键差异：
+
+    1. **教材定位照学科传树**：物理（教科版）/ 化学（人教版）的教材树随三科错题库
+       一起落地了，所以这里由调用方把**该学科的树**传进来，让模型逐字给出
+       学段 / 章节 / 小节，再由 ``normalize_category_fields`` 做受控归一。
+       传空树才退回「不判教材定位」—— 绝不拿数学树去套物理题，那会把物理题
+       打上数学章节（调用方见 ``main.get_subject_curriculum_tree``）。
+    2. **不输出解答与答案**：错题本的解析页另有来源（人工截图或单独的 AI 生成
+       步骤），识别阶段混入解答只会污染题面。
+    3. **规则刻意精简**：输入图已由上游工具完成去手写，这里不需要再堆
+       「忽略一切手写痕迹」这类反向约束 —— 实践中「严禁 X」与「必须 X」并列
+       会互相稀释，正是历史上选择题选项被整组剥离的诱因。
+    """
+
+    subject_label = {
+        "math": "数学",
+        "physics": "物理",
+        "chemistry": "化学",
+    }.get(str(subject or "").strip().lower(), "理科")
+
+    has_tree = isinstance(curriculum, dict) and bool(curriculum)
+    if has_tree:
+        books = "、".join(str(book) for book in curriculum.keys())
+        locate_block = (
+            "【教材范围 —— 本题必须落在其中，三级名称逐字照抄】\n"
+            f"{build_mistake_curriculum_text(curriculum)}"
+            f"【学段 compulsory 受控取值】: {books}\n"
+        )
+        locate_rule = (
+            "6. 顺带做教材定位，三档一起给：`compulsory` 只能填上方受控取值里的完整书名"
+            "（如「必修一」）；`chapter` 填该学段下的精确章节名、`category_knowledge` "
+            "填该章节下的精确小节名，两者都要**逐字**取自上方教材范围（含编号前缀与空格）。"
+            "严禁自造、缩写、改写或增删序号字词，也严禁填教辅自拟的专题名。"
+            "某一档确实拿不准就填空字符串 —— 宁缺勿错，留空的系统会归入「未分类」由人工补。\n"
+        )
+    else:
+        locate_block = ""
+        locate_rule = "6. 不判定教材章节、学段或知识点来源。\n"
+
+    category_json = ""
+    if has_tree:
+        category_json = (
+            '  "compulsory": "学段（受控取值里的完整书名，拿不准填空字符串）",\n'
+            '  "chapter": "章节（教材范围里的精确章节名，拿不准填空字符串）",\n'
+            '  "category_knowledge": "小节（教材范围里的精确小节名，拿不准填空字符串）",\n'
+        )
+
+    return (
+        f"你是一个把扫描题块转写为可编辑文本的助手。用户给你的是一张已经裁好的"
+        f"{subject_label}题块图片，图上是印刷体题干。请把它转写成干净的 LaTeX 文本。\n"
+        + locate_block +
+        "【转写规则】\n"
+        "1. 原样转写题干文字与数学符号，不增删、不改写、不做同义替换。题号照抄原文"
+        "（如「7」「12(2)」）；块内看不到题号就留空字符串。\n"
+        "2. 数学符号、公式、方程、集合、坐标一律用 LaTeX 包裹（行内 $...$，独立 $$...$$）；"
+        "中文用普通文本，不要整段裹进 LaTeX。\n"
+        "3. 选择题的选项统一写成 LaTeX 的 choices 环境：每项以 \\item 独占一行，"
+        "不要写 A./B./C./D. 标号（系统会自动编号）。示例：\n"
+        "   \\begin{choices}\n   \\item $a>0>b$\n   \\item $b>0>a$\n   \\end{choices}\n"
+        "4. 题块里的几何图、受力图、图象、表格一律**留位不画**：在它原来的位置另起一行、"
+        "只写一个占位标记（如 `[插图待补: 图1]`，按阅读顺序编号），并把 has_figure 置为 true。"
+        "这一行前后不要包任何 LaTeX 环境或图形命令 —— `tikzpicture`、"
+        "`\\includegraphics`、`\\begin{center}`、`\\begin{figure}`、`\\caption` 系统全都不渲染，"
+        "写进去只会变成一行乱码；也不要描述图形内容、不要画 ASCII 示意图。"
+        "`content` 字段里不得出现 `tikzpicture` 或 `includegraphics` 字样。\n"
+        "5. 推导步骤、小问（如 (1)、(2)、①②）之间用空行分隔。\n"
+        + locate_rule +
+        "7. 不输出答案、解析或解题过程。\n"
+        "8. 只输出一个合法 JSON 对象，不要任何 Markdown 代码块标记、前言或解释文字：\n"
+        "{\n"
+        '  "question_no": "原卷题号，无则空字符串",\n'
+        '  "content": "题干（LaTeX + markdown）",\n'
+        '  "question_type": "single_choice / multi_choice / fill_in_blank / detailed_answer",\n'
+        '  "difficulty": "easy_error / normal / challenge / qiangji",\n'
+        '  "knowledge_tags": ["知识点1", "知识点2"],\n'
+        '  "solve_method": ["方法1"],\n'
+        + category_json +
+        '  "has_figure": false,\n'
+        '  "figure_count": 0\n'
+        "}\n"
+        "question_type 判据：含 \\begin{choices} 且题干要求选一个为 single_choice，"
+        "要求选多个（题干含「多选」「至少」「所有」等）为 multi_choice；含 \\fillin 或下划线填空为 "
+        "fill_in_blank；其余为 detailed_answer。无法判断时给 detailed_answer。\n"
+        "difficulty 无法判断时给 normal。knowledge_tags 与 solve_method 用简短中文标签，"
+        f"没有把握就给空数组 —— 不要编造{subject_label}教材里不存在的小节名，"
+        "也不要编造教材范围里不存在的章节名或小节名。content 里再次确认：只写占位标记 "
+        "`[插图待补: 图N]`，一个字都不要写 TikZ 或 includegraphics。"
+    )
+
+
 def build_classification_system_prompt(curriculum: dict) -> str:
     curriculum_text = build_curriculum_text(curriculum)
     return (
