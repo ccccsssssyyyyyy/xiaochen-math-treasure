@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -18,7 +19,7 @@ from sqlalchemy.engine import Engine
 from mathbank.paths import SCHEMA_SNAPSHOT_DIR
 
 
-LATEST_SCHEMA_VERSION = 1004
+LATEST_SCHEMA_VERSION = 1010
 REQUIRED_TABLES = {"questions", "question_curriculums", "papers", "paper_questions"}
 
 
@@ -323,6 +324,288 @@ def _bump_to_fork_v1004(engine: Engine) -> dict[str, int]:
     return stats
 
 
+def _add_mistake_tables_v1005(engine: Engine) -> dict[str, int]:
+    """v1005：新增错题扫描三表（students / mistake_batches / mistake_records）。
+
+    本步骤**只建新表与新索引**，不改动 ``questions`` / ``papers`` /
+    ``question_curriculums`` / ``paper_questions`` 中的任何一列或任何一行数据 ——
+    这是「物化先不进题库」这一决策在数据层的直接体现。
+
+    建表走 ORM 的 ``Base.metadata.create_all``（``checkfirst=True``）而非手写
+    DDL，保证迁移建出的结构与 ``mathbank.database`` 的模型定义永不漂移；
+    本步骤因此天然幂等，可被重复执行。
+    """
+
+    from mathbank.database import Base  # 延迟导入：database 模块反向依赖本模块
+
+    before = set(inspect(engine).get_table_names())
+    Base.metadata.create_all(bind=engine)
+    created = sorted(set(inspect(engine).get_table_names()) - before)
+
+    with engine.begin() as connection:
+        # 组合索引（单列索引已由模型上的 index=True 带出）
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_mistake_records_student_subject "
+            "ON mistake_records (student_id, subject)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_mistake_batches_student "
+            "ON mistake_batches (student_id, batch_date)"
+        )
+        connection.exec_driver_sql("PRAGMA user_version=1005")
+
+    return {"created_mistake_tables": len(created)}
+
+
+def _add_mistake_block_columns_v1006(engine: Engine) -> dict[str, int]:
+    """v1006：``mistake_records`` 增加题块的横向范围与栏号。
+
+    v1005 建的 ``mistake_records`` 只有纵向范围（``block_y_start`` /
+    ``block_y_end``）—— 在单栏页面上够用，但双栏卷子上无法表达「这一块属于哪
+    一栏」。少了横向信息，裁块图会把左栏半道题和右栏半道题拼进同一张图。
+
+    本步骤只加三列：``block_x_start`` / ``block_x_end`` / ``column_index``。
+    旧记录**不回填**：默认值（x 0–1、column 0）恰好就是「整页一栏」的语义，
+    与它们当时在单栏算法下切出来的事实一致。
+
+    可重复执行：列已存在时跳过。
+    """
+
+    inspector = inspect(engine)
+    if "mistake_records" not in set(inspector.get_table_names()):
+        # 空库 / 尚未建表：无表可改，直接推进版本号；建表由
+        # _add_mistake_tables_v1005 与 Base.metadata.create_all 负责。
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA user_version=1006")
+        return {"added_mistake_block_columns": 0}
+
+    existing = {column["name"] for column in inspector.get_columns("mistake_records")}
+    additions = {
+        "block_x_start": "FLOAT DEFAULT 0.0",
+        "block_x_end": "FLOAT DEFAULT 1.0",
+        "column_index": "INTEGER DEFAULT 0",
+    }
+    added = 0
+    with engine.begin() as connection:
+        for name, ddl in additions.items():
+            if name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE mistake_records ADD COLUMN {name} {ddl}"
+            )
+            added += 1
+        connection.exec_driver_sql("PRAGMA user_version=1006")
+
+    return {"added_mistake_block_columns": added}
+
+
+def _add_mistake_merge_columns_v1007(engine: Engine) -> dict[str, int]:
+    """v1007：``mistake_records`` 增加「人工合并」三列。
+
+    一道题被分栏或排版切成多块时，用户会把它们并为一条记录。合并后的记录仍是
+    一条（``image_block`` 是合成后的一张图），但需要三个字段记住它来自哪几块：
+
+    - ``merge_id``：合并组标识（空＝未合并），拆分时据此定位；
+    - ``merged_block_count``：成员块数（1 ＝未合并）；
+    - ``block_images``：按拼接顺序存各成员块图 URL 的 JSON 数组。
+
+    旧记录**不回填**：三列的默认值（空 / 1 / 空数组）恰好就是「未合并」的语义。
+
+    可重复执行：列已存在时跳过。
+    """
+
+    inspector = inspect(engine)
+    if "mistake_records" not in set(inspector.get_table_names()):
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA user_version=1007")
+        return {"added_mistake_merge_columns": 0}
+
+    existing = {column["name"] for column in inspector.get_columns("mistake_records")}
+    additions = {
+        "merge_id": "VARCHAR(50) DEFAULT ''",
+        "merged_block_count": "INTEGER DEFAULT 1",
+        "block_images": "TEXT DEFAULT '[]'",
+    }
+    added = 0
+    with engine.begin() as connection:
+        for name, ddl in additions.items():
+            if name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE mistake_records ADD COLUMN {name} {ddl}"
+            )
+            added += 1
+        connection.exec_driver_sql("PRAGMA user_version=1007")
+
+    return {"added_mistake_merge_columns": added}
+
+
+def _add_question_subject_origin_v1008(engine: Engine) -> dict[str, int]:
+    """v1008：``questions`` 增加 ``subject`` / ``origin`` 两列（三科题库）。
+
+    背景：一期「物化错题不进题库」的约束作废 —— 物理（教科版）与化学（人教版）
+    错题也要入库；同时需要把「错题入库」的题与「题库工作台自录/导入」的题区分开。
+
+    - ``subject``：math / physics / chemistry。存量行全是数学，回填 ``math``；
+    - ``origin``：bank（题库工作台录入、导入试卷）/ mistake（错题工作台入库）。
+      存量行回填 ``bank`` —— 这是准确的：此前的错题从来没进过题库。
+
+    ``ALTER TABLE ... ADD COLUMN ... DEFAULT`` 由 SQLite 自动用默认值回填存量行，
+    因此 UPDATE 只是兜住「列已存在但值为空」的中间态（例如手工执行过 DDL）。
+    可重复执行：列已存在时跳过新增。
+    """
+
+    inspector = inspect(engine)
+    if "questions" not in set(inspector.get_table_names()):
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA user_version=1008")
+        return {"added_question_subject_origin": 0}
+
+    existing = {column["name"] for column in inspector.get_columns("questions")}
+    additions = {
+        "subject": "VARCHAR(50) DEFAULT 'math'",
+        "origin": "VARCHAR(20) DEFAULT 'bank'",
+    }
+    added = 0
+    with engine.begin() as connection:
+        for name, ddl in additions.items():
+            if name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE questions ADD COLUMN {name} {ddl}"
+            )
+            added += 1
+        connection.exec_driver_sql(
+            "UPDATE questions SET subject = 'math' "
+            "WHERE subject IS NULL OR subject = ''"
+        )
+        connection.exec_driver_sql(
+            "UPDATE questions SET origin = 'bank' "
+            "WHERE origin IS NULL OR origin = ''"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions (subject)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_questions_origin ON questions (origin)"
+        )
+        connection.exec_driver_sql("PRAGMA user_version=1008")
+
+    return {"added_question_subject_origin": added}
+
+
+def _strip_block_url_version_v1009(engine: Engine) -> dict[str, int]:
+    """v1009：把误写进库的块图 URL 版本号（``?v=<mtime_ns>``）剥掉。
+
+    背景：v2.3.x 早期为了修「同名覆盖 → 浏览器复用旧位图」，把带 ``?v=`` 的 URL
+    直接写进了 ``mistake_records.image_block`` / ``block_images``。但资产安全层
+    （``asset_security._reference_parts``）拒绝任何含 ``?`` 的引用，于是识别取图
+    100% 失败、整批标 ``failed``、题面全空（排查见
+    .workbuddy/memory/2026-09-15.md 第六轮）。
+
+    写入端已改为只存裸路径，但**已经切好的批次**库里仍然是脏的 —— 不洗就永远
+    识别不了，所以这一步是必需的，不是可选的清理。
+
+    幂等：不含 ``?`` 的行原样保留、也不会被 UPDATE。
+    """
+
+    if "mistake_records" not in set(inspect(engine).get_table_names()):
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA user_version=1009")
+        return {"stripped_block_url_version": 0}
+
+    def _strip(value: object) -> str:
+        text = str(value or "")
+        if "?" not in text:
+            return text
+        return text.split("?", 1)[0].split("#", 1)[0]
+
+    image_rows = 0
+    member_rows = 0
+    with engine.begin() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT id, image_block, block_images FROM mistake_records"
+        ).fetchall()
+        for row in rows:
+            record_id, raw_image, raw_images = row[0], row[1] or "", row[2] or ""
+            new_image = _strip(raw_image)
+            new_images = str(raw_images)
+            if raw_images:
+                try:
+                    members = json.loads(raw_images)
+                except (TypeError, ValueError):
+                    members = None
+                if isinstance(members, list):
+                    cleaned = [_strip(item) for item in members]
+                    if cleaned != members:
+                        new_images = json.dumps(cleaned, ensure_ascii=False)
+            changed_image = new_image != raw_image
+            changed_members = new_images != str(raw_images)
+            if changed_image:
+                image_rows += 1
+            if changed_members:
+                member_rows += 1
+            if changed_image or changed_members:
+                connection.exec_driver_sql(
+                    "UPDATE mistake_records SET image_block = ?, block_images = ? "
+                    "WHERE id = ?",
+                    (new_image, new_images, record_id),
+                )
+        connection.exec_driver_sql("PRAGMA user_version=1009")
+
+    return {
+        "stripped_block_url_version": image_rows,
+        "stripped_block_url_members": member_rows,
+    }
+
+
+def _add_mistake_classification_columns_v1010(engine: Engine) -> dict[str, int]:
+    """v1010：``mistake_records`` 增加「分类信息」六列（审校页可编辑，入库带进题库）。
+
+    用户 2026-09-15 定：错题本审校页中栏做成与题库录入表单同款的「分类信息」，
+    字段口径与 ``questions`` 表逐字对齐：
+
+    - ``source``：来源（试卷/出处），与 ``snapshot_source``（批次文件名快照）各记各的；
+    - ``category_compulsory`` / ``category_chapter`` / ``category_knowledge``：学段/章节/小节；
+    - ``related_curriculums``：关联章节 JSON 数组（融合题多章节归属）；
+    - ``tags``：自定义标签。
+
+    痛点是入库：迁移前 ``_import_mistake_record_to_bank`` 把学段/章节/小节写死成空字符串，
+    错题进题库后在「章节」筛选里根本找不到。加列只是给这些值一个落脚点，**不改动
+    任何既有行的语义** —— 默认值（空串 / ``[]``）恰好等于「未分类」。
+
+    可重复执行：列已存在时跳过。
+    """
+
+    inspector = inspect(engine)
+    if "mistake_records" not in set(inspector.get_table_names()):
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA user_version=1010")
+        return {"added_mistake_classification_columns": 0}
+
+    existing = {column["name"] for column in inspector.get_columns("mistake_records")}
+    additions = {
+        "source": "VARCHAR(200) DEFAULT ''",
+        "category_compulsory": "VARCHAR(100) DEFAULT ''",
+        "category_chapter": "VARCHAR(100) DEFAULT ''",
+        "category_knowledge": "VARCHAR(100) DEFAULT ''",
+        "related_curriculums": "TEXT DEFAULT '[]'",
+        "tags": "TEXT DEFAULT ''",
+    }
+    added = 0
+    with engine.begin() as connection:
+        for name, ddl in additions.items():
+            if name in existing:
+                continue
+            connection.exec_driver_sql(
+                f"ALTER TABLE mistake_records ADD COLUMN {name} {ddl}"
+            )
+            added += 1
+        connection.exec_driver_sql("PRAGMA user_version=1010")
+
+    return {"added_mistake_classification_columns": added}
+
+
 def migrate_database(
     engine: Engine,
     *,
@@ -370,6 +653,36 @@ def migrate_database(
             # 见 _bump_to_fork_v1004 函数文档。
             step_stats = _bump_to_fork_v1004(engine)
             current = 1004
+        elif current == 1004:
+            # v1005：错题扫描三表（students / mistake_batches / mistake_records）。
+            # 只建新表，不动既有表 —— 见 _add_mistake_tables_v1005 函数文档。
+            step_stats = _add_mistake_tables_v1005(engine)
+            current = 1005
+        elif current == 1005:
+            # v1006：mistake_records 补题块横向范围与栏号（双栏支持）。
+            # 只加列、不回填 —— 见 _add_mistake_block_columns_v1006 函数文档。
+            step_stats = _add_mistake_block_columns_v1006(engine)
+            current = 1006
+        elif current == 1006:
+            # v1007：mistake_records 补人工合并三列（merge_id / merged_block_count
+            # / block_images）—— 见 _add_mistake_merge_columns_v1007 函数文档。
+            step_stats = _add_mistake_merge_columns_v1007(engine)
+            current = 1007
+        elif current == 1007:
+            # v1008：questions 补 subject / origin 两列（三科题库 + 错题渠道区分）
+            # —— 见 _add_question_subject_origin_v1008 函数文档。
+            step_stats = _add_question_subject_origin_v1008(engine)
+            current = 1008
+        elif current == 1008:
+            # v1009：清洗误入库的块图 URL 版本号（?v=<mtime_ns>），
+            # 否则已切好的批次永远识别不了 —— 见该函数文档。
+            step_stats = _strip_block_url_version_v1009(engine)
+            current = 1009
+        elif current == 1009:
+            # v1010：mistake_records 补「分类信息」六列（审校页可编辑、入库带进题库）。
+            # 只加列、不回填 —— 见 _add_mistake_classification_columns_v1010 函数文档。
+            step_stats = _add_mistake_classification_columns_v1010(engine)
+            current = 1010
         else:
             raise RuntimeError(
                 f"未实现从版本 {current} 到 {LATEST_SCHEMA_VERSION} 的迁移，"

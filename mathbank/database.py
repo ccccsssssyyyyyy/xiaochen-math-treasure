@@ -4,9 +4,12 @@ import json
 import re
 from pathlib import Path
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -124,6 +127,10 @@ class Question(Base):
     __tablename__ = "questions"
 
     id = Column(Integer, primary_key=True, index=True)
+    subject = Column(String(50), default="math", index=True)  # math / physics / chemistry
+    # 题目来源渠道：bank（题库工作台录入或导入）/ mistake（错题工作台入库）。
+    # 用户要求错题与题库自录题可区分，故单列一个字段而不是塞进 tags 自由文本。
+    origin = Column(String(20), default="bank", index=True)
     content = Column(Text, nullable=False)  # 题干 (LaTeX + markdown)
     content_fingerprint = Column(String, nullable=True)  # 查重归一化指纹（normalize_question_content 结果）
     question_type = Column(String(50), default="single_choice", index=True)  # single_choice, multi_choice, fill_in_blank, detailed_answer
@@ -163,6 +170,8 @@ class Question(Base):
     def to_dict(self):
         return {
             "id": self.id,
+            "subject": self.subject or "math",
+            "origin": self.origin or "bank",
             "content": self.content,
             "question_type": self.question_type,
             "category_compulsory": self.category_compulsory,
@@ -188,6 +197,8 @@ class Question(Base):
     def to_summary_dict(self):
         return {
             "id": self.id,
+            "subject": self.subject or "math",
+            "origin": self.origin or "bank",
             "content": self.content,
             "question_type": self.question_type,
             "category_compulsory": self.category_compulsory,
@@ -268,6 +279,10 @@ class Paper(Base):
             "total_score": self.total_score,
             "show_secret": meta.get("show_secret", True),
             "show_notice": meta.get("show_notice", True),
+            # 抬头学科行（可手填，空串 = 不显示）与考试用时都随 metadata_json 走，
+            # 不单独加列 —— 它们纯属展示参数，不值得为它们做一次库迁移。
+            "subject_line": str(meta.get("subject_line") or ""),
+            "exam_duration": meta.get("exam_duration", 120),
             "is_template": bool(self.is_template),
             "metadata_json": self.metadata_json,
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
@@ -305,6 +320,230 @@ class PaperQuestion(Base):
             "order_index": self.order_index,
             "score": self.score
         }
+
+# ----------------- 错题扫描（学生 / 批次 / 题目记录） -----------------
+# 与题库解耦：错题是「某个学生某次做错的记录」，题库题是「可复用的备课素材」。
+# 同一道题会被不同学生错、题库题也会被编辑或删除，因此错题本导出只读快照字段，
+# 不 join questions，避免题库增删让已出的错题本变形。
+
+
+class Student(Base):
+    __tablename__ = "students"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    grade = Column(String(50), default="")  # 学段，如「高一」
+    note = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "grade": self.grade or "",
+            "note": self.note or "",
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
+        }
+
+
+class MistakeBatch(Base):
+    """一次扫描 = 一个批次（可为一周的多页 PDF、单页或单题）。"""
+
+    __tablename__ = "mistake_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(
+        Integer,
+        ForeignKey("students.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    subject = Column(String(50), default="math", index=True)  # math / physics / chemistry / other
+    title = Column(String(200), nullable=False, default="")
+    batch_date = Column(Date, nullable=True)
+    source_name = Column(String(200), default="")  # 原始扫描文件名
+    page_count = Column(Integer, default=0)
+    # pending（已建批次）/ cutting / cutting_failed / reviewing（待点选）/ done
+    status = Column(String(50), default="pending", index=True)
+    note = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    def to_dict(self, *, stats: dict | None = None):
+        def _date_str(value):
+            if value is None:
+                return None
+            return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+        payload = {
+            "id": self.id,
+            "student_id": self.student_id,
+            "subject": self.subject or "math",
+            "title": self.title or "",
+            "batch_date": _date_str(self.batch_date),
+            "source_name": self.source_name or "",
+            "page_count": self.page_count or 0,
+            "status": self.status or "pending",
+            "note": self.note or "",
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }
+        if stats:
+            payload.update(stats)
+        return payload
+
+
+class MistakeRecord(Base):
+    """批次内的**全部题目**记录（不只错题）。
+
+    粒度差别：每道题都有记录（页号 / 题块位置 / 三态 / 切块图），但只有被点选为
+    「错」的题会识别题面（``recognize_status = done``、``content`` 有值）。对 / 未批
+    的题 ``recognize_status = skipped``、``content`` 留空，属于留档记录，用于对错
+    分布与正确率统计，不进题库、不被题库检索。
+    """
+
+    __tablename__ = "mistake_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(
+        Integer,
+        ForeignKey("mistake_batches.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    student_id = Column(Integer, nullable=True, index=True)  # 冗余，便于按学生聚合
+    subject = Column(String(50), default="math")  # 冗余
+    page_no = Column(Integer, default=1)  # 所在页（1 起）
+    question_no = Column(String(50), default="")  # 题号原文，如「7」「12(2)」
+    block_index = Column(Integer, default=0)  # 页内题块序号（0 起）
+    block_y_start = Column(Float, default=0.0)  # 题块在页面的纵向占比 0-1
+    block_y_end = Column(Float, default=1.0)
+    # 题块在页面上的横向范围。单栏页面恒为 0/1；双栏页面上左栏块是 [0, 分栏线]、
+    # 右栏块是 [分栏线, 1]。没有这两列时块图会被裁成整页宽 —— 双栏卷上那意味着
+    # 一张图里左栏半道题 + 右栏半道题拼在一起。
+    block_x_start = Column(Float, default=0.0)
+    block_x_end = Column(Float, default=1.0)
+    # 所属栏：0=整页/通栏，1=左栏，2=右栏
+    column_index = Column(Integer, default=0)
+    content = Column(Text, default="")  # 干净题面（LaTeX + markdown）
+    answer_markdown = Column(Text, default="")  # 解析（可空）
+    question_type = Column(String(50), default="detailed_answer")
+    difficulty = Column(String(50), default="normal")
+    knowledge_tags = Column(Text, default="")  # 逗号分隔；物化用自由文本
+    solve_method = Column(Text, default="")  # 解题方法（数学）
+    # ---- 分类信息（审校页可编辑，入库时带进题库）----
+    # 用户 2026-09-15 定：审校页中栏做成与题库录入表单同款的「分类信息」。
+    # 这几列原本只存在于 questions 表，错题记录里没有落脚点，入库时被写死成空字符串，
+    # 于是错题入题库后学段/章节/小节全空、筛选里根本找不到。命名与 questions 表
+    # 逐字对齐，入库映射就是直接搬运，不做二次翻译。
+    source = Column(String(200), default="")  # 来源（试卷/出处）；与 snapshot_source（批次文件名快照）区分
+    category_compulsory = Column(String(100), default="")  # 学段
+    category_chapter = Column(String(100), default="")  # 章节
+    category_knowledge = Column(String(100), default="")  # 小节
+    related_curriculums = Column(Text, default="[]")  # 关联章节(JSON: [{compulsory,chapter,knowledge}])
+    tags = Column(Text, default="")  # 自定义标签
+    # 人工点选结果：correct / incorrect / unknown（默认 unknown，避免漏点即算对）
+    grad_status = Column(String(20), default="unknown", index=True)
+    # pending（切块后默认）/ done / failed / skipped（未选中未识别）
+    recognize_status = Column(String(20), default="pending")
+    # 是否收录进错题本。默认随 grad_status（错→true），但人工可改：未批的题也能收录
+    include_in_handout = Column(Boolean, default=False)
+    answer_image = Column(Text, default="[]")  # 人工上传的解析截图路径（JSON 数组）
+    answer_source = Column(String(20), default="none")  # none / manual / ai
+    # AI 生成的解析必须人工核对后才允许进 PDF（错题本出现错误解析会直接误导学生）。
+    # 实施计划要求这条约束，但不含记录其状态的字段，故在此补一个。
+    answer_reviewed = Column(Boolean, default=False)
+    error_reason = Column(Text, default="")  # 错因标签（逗号分隔）
+    image_block = Column(Text, default="")  # 题块图（输入即去手写后的干净件）
+    # 人工合并：一道题被分栏/排版切成多块时，用户把它们并为一条记录。
+    # merge_id 为空＝未合并；非空时 merged_block_count 是成员块数，block_images
+    # 按拼接顺序存各成员的块图 URL，而 image_block 始终是合成后的**一张**图 ——
+    # 识别、导出、预览都只认这一张，多图只是留档与「拆分」时的还原依据。
+    merge_id = Column(String(50), default="")
+    merged_block_count = Column(Integer, default=1)
+    block_images = Column(Text, default="[]")
+    image_figure = Column(Text, default="[]")  # 人工从干净件截取的图形（JSON 数组）
+    mastery_status = Column(String(20), default="pending")  # pending / redone / mastered
+    # 数学题入库后回填；非空即表示已入库，被查重拦下或人工跳过的题保持为空
+    question_id = Column(
+        Integer,
+        ForeignKey("questions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    snapshot_source = Column(String(200), default="")  # 入库时的来源快照
+    created_at = Column(DateTime, default=_utcnow_naive)
+    updated_at = Column(DateTime, default=_utcnow_naive, onupdate=_utcnow_naive)
+
+    @property
+    def answer_images(self):
+        return _safe_json_list(self.answer_image)
+
+    @answer_images.setter
+    def answer_images(self, value):
+        self.answer_image = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
+
+    @property
+    def figure_images(self):
+        return _safe_json_list(self.image_figure)
+
+    @figure_images.setter
+    def figure_images(self, value):
+        self.image_figure = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
+
+    @property
+    def block_image_list(self):
+        return _safe_json_list(self.block_images)
+
+    @block_image_list.setter
+    def block_image_list(self, value):
+        self.block_images = json.dumps(value if isinstance(value, list) else [], ensure_ascii=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "batch_id": self.batch_id,
+            "student_id": self.student_id,
+            "subject": self.subject or "math",
+            "page_no": self.page_no or 1,
+            "question_no": self.question_no or "",
+            "block_index": self.block_index or 0,
+            "block_y_start": float(self.block_y_start or 0.0),
+            "block_y_end": float(self.block_y_end or 1.0),
+            "block_x_start": float(self.block_x_start if self.block_x_start is not None else 0.0),
+            "block_x_end": float(self.block_x_end if self.block_x_end is not None else 1.0),
+            "column_index": int(self.column_index or 0),
+            "content": self.content or "",
+            "answer_markdown": self.answer_markdown or "",
+            "question_type": self.question_type or "detailed_answer",
+            "difficulty": self.difficulty or "normal",
+            "knowledge_tags": self.knowledge_tags or "",
+            "solve_method": self.solve_method or "",
+            "source": self.source or "",
+            "category_compulsory": self.category_compulsory or "",
+            "category_chapter": self.category_chapter or "",
+            "category_knowledge": self.category_knowledge or "",
+            "related_curriculums": _safe_json_list(self.related_curriculums),
+            "tags": self.tags or "",
+            "grad_status": self.grad_status or "unknown",
+            "recognize_status": self.recognize_status or "pending",
+            "include_in_handout": bool(self.include_in_handout),
+            "answer_images": self.answer_images,
+            "answer_source": self.answer_source or "none",
+            "answer_reviewed": bool(self.answer_reviewed),
+            "error_reason": self.error_reason or "",
+            "image_block": self.image_block or "",
+            "figure_images": self.figure_images,
+            "merge_id": self.merge_id or "",
+            "merged_block_count": int(self.merged_block_count or 1),
+            "block_images": self.block_image_list,
+            "mastery_status": self.mastery_status or "pending",
+            "question_id": self.question_id,
+            "snapshot_source": self.snapshot_source or "",
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }
+
 
 # Dependency to get db session
 def get_db():
@@ -464,6 +703,11 @@ def init_db():
             # Create indexes on question_curriculums
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_question_curriculums_lookup ON question_curriculums (version_code, compulsory, chapter, knowledge)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_question_curriculums_qid ON question_curriculums (question_id)"))
+
+            # Create indexes on the mistake-scanning tables（按学生 + 学科聚合，
+            # 供三期学生档案使用；单列索引已由 ORM 的 index=True 建出）
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mistake_records_student_subject ON mistake_records (student_id, subject)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_mistake_batches_student ON mistake_batches (student_id, batch_date)"))
 
             # Auto-migrate legacy data to A-version question_curriculums
             cursor = conn.execute(text("SELECT COUNT(*) FROM question_curriculums"))
