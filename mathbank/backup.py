@@ -450,6 +450,17 @@ def create_full_backup(
     return output_path
 
 
+def create_pre_restore_backup() -> Path:
+    """在真的要动数据之前，先给「当前库」留一份完整备份。
+
+    落在 ``pre_restore`` 而不是 ``snapshots``：它不是一次日程备份，不该挤进用户
+    的快照列表、更不该被 retention 轮转掉。``restore_full_backup`` 自己也会在
+    换库前再存一份，这里多存的一份锁住了「用户按下还原那一刻」的状态。
+    """
+
+    return create_full_backup(output_dir=PRE_RESTORE_BACKUP_DIR, retention=None)
+
+
 def create_full_backup_if_due(
     *,
     minimum_interval_seconds: int = 24 * 60 * 60,
@@ -1154,3 +1165,257 @@ def restore_full_backup(
             metadata_path=metadata_path,
             safety_backup_dir=safety_backup_dir,
         )
+
+
+# ---------------------------------------------------------------------------
+# 快照清单与「延迟还原」（delayed restore）
+#
+# 服务在 init_db() 之前就持有 runtime lock，而 restore_full_backup() 需要同一把锁。
+# flock 是按「打开文件描述」生效的，同一个进程再开一个 fd 同样会撞锁，所以 HTTP
+# 处理函数永远拿不到这把锁——这不是权限或开关问题，是锁的设计使然。反过来，
+# 把锁去掉就等于允许「服务一边写、库一边被整个换掉」，会静默毁数据。
+#
+# 因此在线/离线只能这样分工：
+#   1) 在线：校验目标快照 → 完整备份当前库 → 落一条带时效的待还原请求；
+#   2) 离线：用户关闭服务并重启，启动钩子在持锁后、init_db() 之前落地还原。
+# 请求带 TTL，过期自动作废，避免几天后一次重启把新数据意外覆盖。
+# ---------------------------------------------------------------------------
+
+PENDING_RESTORE_FILE = DATA_BACKUP_DIR / "pending_restore.json"
+PENDING_RESTORE_FORMAT = "mathbank-pending-restore"
+PENDING_RESTORE_TTL_SECONDS = 30 * 60
+_FULL_BACKUP_NAME = re.compile(r"^mathbank-backup-[0-9]{8}T[0-9]{12}Z\.zip$")
+
+
+def _utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _to_iso_z(moment: dt.datetime) -> str:
+    return moment.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_z(value: Any) -> dt.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def read_backup_manifest_summary(archive_path: Path) -> dict[str, Any]:
+    """只读 manifest.json，给出快照的自述信息（不校验哈希与 SQLite 完整性）。"""
+
+    try:
+        with zipfile.ZipFile(Path(archive_path), "r") as archive:
+            manifest, _ = _validated_manifest(archive)
+    except Exception as exc:  # noqa: BLE001 - 单个坏包不该拖垮整个列表
+        return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    database = manifest.get("database")
+    if not isinstance(database, dict):
+        database = {}
+    row_counts = database.get("row_counts")
+    if not isinstance(row_counts, dict):
+        row_counts = {}
+    return {
+        "readable": True,
+        "format_version": manifest.get("format_version"),
+        "created_at": manifest.get("created_at"),
+        "app_version": manifest.get("app_version"),
+        "schema_version": database.get("schema_version"),
+        "row_counts": {
+            str(name): count
+            for name, count in row_counts.items()
+            if type(count) is int and count >= 0
+        },
+        "upload_file_count": manifest.get("upload_file_count"),
+        "metadata_included": bool(manifest.get("metadata_included")),
+    }
+
+
+def list_full_backups(*, output_dir: Path | None = None) -> list[dict[str, Any]]:
+    """按时间倒序列出可用完整快照（只读元信息，不做完整校验）。"""
+
+    directory = Path(output_dir or FULL_BACKUP_DIR)
+    if not directory.is_dir():
+        return []
+
+    snapshots: list[dict[str, Any]] = []
+    for path in directory.iterdir():
+        if not path.is_file() or not _FULL_BACKUP_NAME.match(path.name):
+            continue
+        try:
+            file_stat = path.stat()
+        except OSError:
+            continue
+        snapshots.append(
+            {
+                "file": path.name,
+                "size_bytes": file_stat.st_size,
+                "modified_at": _to_iso_z(
+                    dt.datetime.fromtimestamp(file_stat.st_mtime, dt.timezone.utc)
+                ),
+                "manifest": read_backup_manifest_summary(path),
+            }
+        )
+    snapshots.sort(
+        key=lambda item: item["manifest"].get("created_at") or item["modified_at"],
+        reverse=True,
+    )
+    return snapshots
+
+
+def resolve_full_backup(name: str, *, output_dir: Path | None = None) -> Path:
+    """把外部传来的文件名解析为快照目录内的真实路径，拒绝任何路径穿越。"""
+
+    if not isinstance(name, str) or not _FULL_BACKUP_NAME.match(name):
+        raise RuntimeError("快照文件名不合法")
+    directory = Path(output_dir or FULL_BACKUP_DIR).resolve()
+    candidate = (directory / name).resolve()
+    if candidate.parent != directory or not candidate.is_file():
+        raise RuntimeError("快照不存在")
+    return candidate
+
+
+def write_pending_restore(
+    archive_name: str,
+    *,
+    safety_backup: Path | str | None = None,
+    ttl_seconds: int = PENDING_RESTORE_TTL_SECONDS,
+    request_file: Path | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """记录一条待还原请求；真正的还原留到服务重启后的启动窗口执行。"""
+
+    if not isinstance(archive_name, str) or not _FULL_BACKUP_NAME.match(archive_name):
+        raise RuntimeError("快照文件名不合法")
+    moment = now or _utc_now()
+    payload = {
+        "format": PENDING_RESTORE_FORMAT,
+        "archive": archive_name,
+        "requested_at": _to_iso_z(moment),
+        "expires_at": _to_iso_z(moment + dt.timedelta(seconds=ttl_seconds)),
+        # 存完整路径而不是文件名：安全备份落在 pre_restore/，只给个裸文件名等于
+        # 让用户在两万条 zip 里捞——请求文件必须能自己说明去哪找回退路。
+        "safety_backup": str(_absolute_path(safety_backup)) if safety_backup else None,
+    }
+    target = Path(request_file or PENDING_RESTORE_FILE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp_path.chmod(0o600)
+        os.replace(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    harden_private_path(target)
+    _fsync_directory(target.parent)
+    return payload
+
+
+def clear_pending_restore(
+    *, reason: str = "", request_file: Path | None = None
+) -> bool:
+    """删除待还原请求；已不存在时返回 False。"""
+
+    target = Path(request_file or PENDING_RESTORE_FILE)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        print(f"[Restore Warning] 待还原请求清除失败: {type(exc).__name__}: {exc}")
+        return False
+    _fsync_directory(target.parent)
+    if reason:
+        print(f"[Restore] 已清除待还原请求（{reason}）")
+    return True
+
+
+def read_pending_restore(
+    *, request_file: Path | None = None, now: dt.datetime | None = None
+) -> dict[str, Any] | None:
+    """读取待还原请求；过期或不可解析时顺手清除并返回 None。"""
+
+    target = Path(request_file or PENDING_RESTORE_FILE)
+    if not target.is_file():
+        return None
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        clear_pending_restore(reason="请求文件损坏", request_file=target)
+        return None
+    if not isinstance(payload, dict) or payload.get("format") != PENDING_RESTORE_FORMAT:
+        clear_pending_restore(reason="请求格式无法识别", request_file=target)
+        return None
+    if not isinstance(payload.get("archive"), str) or not _FULL_BACKUP_NAME.match(
+        payload["archive"]
+    ):
+        clear_pending_restore(reason="请求缺少有效的快照文件名", request_file=target)
+        return None
+    expires_at = _parse_iso_z(payload.get("expires_at"))
+    if expires_at is None or expires_at <= (now or _utc_now()):
+        clear_pending_restore(reason="请求已过期", request_file=target)
+        return None
+    return payload
+
+
+def apply_pending_restore(
+    *,
+    request_file: Path | None = None,
+    output_dir: Path | None = None,
+    database_path: Path | None = None,
+    uploads_dir: Path | None = None,
+    metadata_path: Path | None = None,
+    safety_backup_dir: Path | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any] | None:
+    """在服务已停止的窗口里落地待还原请求；调用方必须已持有 runtime lock。"""
+
+    target = Path(request_file or PENDING_RESTORE_FILE)
+    payload = read_pending_restore(request_file=target, now=now)
+    if payload is None:
+        return None
+
+    try:
+        archive = resolve_full_backup(payload["archive"], output_dir=output_dir)
+    except Exception as exc:
+        # 目标快照不存在（被删、被 retention 轮转）时请求永远无法完成；留着它会让
+        # 每次重启都重放一次失败，并让界面一直显示"有待还原请求"。
+        clear_pending_restore(reason="目标快照已不可用", request_file=target)
+        print(f"[Restore Error] 待还原请求指向的快照不可用：{exc}")
+        raise
+
+    print(
+        f"[Restore] 检测到待还原请求：{archive.name}"
+        f"（请求于 {payload.get('requested_at')}）"
+    )
+    try:
+        safety_backup = _restore_full_backup_unlocked(
+            archive,
+            database_path=database_path,
+            uploads_dir=uploads_dir,
+            metadata_path=metadata_path,
+            safety_backup_dir=safety_backup_dir,
+        )
+    except Exception as exc:
+        # 失败就不留请求：否则一次坏快照会在每次重启时反复重放。
+        clear_pending_restore(reason="还原失败，避免反复重试", request_file=target)
+        print(f"[Restore Error] 待还原请求执行失败：{type(exc).__name__}: {exc}")
+        raise
+
+    clear_pending_restore(reason="还原已落地", request_file=target)
+    print(f"[Restore] 还原完成：{archive.name}；还原前数据已备份到 {safety_backup}")
+    return {
+        "archive": archive.name,
+        "safety_backup": str(safety_backup),
+        "requested_at": payload.get("requested_at"),
+    }

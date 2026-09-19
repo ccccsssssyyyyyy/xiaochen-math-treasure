@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 
 # 让 source_normalize 在测试中加载仓库根的 example 占位映射，而非个人化的
@@ -75,3 +76,58 @@ def client(db_session):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def backup_sandbox(tmp_path, monkeypatch):
+    """把 mathbank.backup 的所有落盘位置搬到临时目录。
+
+    任何一个漏掉的重定向都会让测试写进用户真实的 data_backup/ —— 那是「跑一次
+    测试就毁掉用户还原窗口」的经典事故。所以这里连 DATABASE_FILE 一起换掉，
+    并在结束时断言真实的待还原请求文件没被创建。备份相关测试一律用它。
+    """
+
+    import mathbank.backup as backup_module
+    from pathlib import Path
+
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    pre_restore = tmp_path / "pre_restore"
+    data_backup = tmp_path / "data_backup"
+    data_backup.mkdir()
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    database = tmp_path / "math_question_bank.db"
+    pending = data_backup / "pending_restore.json"
+
+    real_pending = Path(backup_module.PENDING_RESTORE_FILE)
+
+    for name, value in (
+        ("FULL_BACKUP_DIR", snapshots),
+        ("PRE_RESTORE_BACKUP_DIR", pre_restore),
+        ("DATA_BACKUP_DIR", data_backup),
+        ("UPLOADS_DIR", uploads),
+        ("DATABASE_FILE", database),
+        ("PENDING_RESTORE_FILE", pending),
+    ):
+        monkeypatch.setattr(backup_module, name, Path(value))
+
+    # main.py 只把 FULL_BACKUP_DIR 当展示字符串用，一并指到临时目录，
+    # 免得接口返回的路径和实际落盘位置对不上。
+    main_module = sys.modules.get("main")
+    if main_module is not None:
+        monkeypatch.setattr(main_module, "FULL_BACKUP_DIR", Path(snapshots))
+
+    yield {
+        "snapshots": snapshots,
+        "pre_restore": pre_restore,
+        "data_backup": data_backup,
+        "uploads": uploads,
+        "database": database,
+        "pending": pending,
+        "tmp": tmp_path,
+    }
+
+    assert not real_pending.exists(), (
+        f"测试污染了真实待还原请求文件: {real_pending}"
+    )

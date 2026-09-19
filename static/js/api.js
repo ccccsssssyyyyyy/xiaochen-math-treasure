@@ -1444,21 +1444,23 @@
             const btnMeta = document.getElementById('btn-settings-metadata');
             const btnAbout = document.getElementById('btn-settings-about');
             const btnFree = document.getElementById('btn-settings-free');
+            const btnBackup = document.getElementById('btn-settings-backup');
             const tabApi = document.getElementById('settings-tab-api');
             const tabMeta = document.getElementById('settings-tab-metadata');
             const tabAbout = document.getElementById('settings-tab-about');
             const tabFree = document.getElementById('settings-tab-free');
+            const tabBackup = document.getElementById('settings-tab-backup');
             const btnSave = document.getElementById('btnSettingsSave');
 
             // Reset all buttons
-            [btnApi, btnMeta, btnAbout, btnFree].forEach(b => {
+            [btnApi, btnMeta, btnAbout, btnFree, btnBackup].forEach(b => {
                 if (b) {
                     b.classList.remove('border-brand-500', 'text-brand-600');
                     b.classList.add('border-transparent', 'text-slate-500');
                 }
             });
             // Hide all tabs
-            [tabApi, tabMeta, tabAbout, tabFree].forEach(t => {
+            [tabApi, tabMeta, tabAbout, tabFree, tabBackup].forEach(t => {
                 if (t) t.classList.add('hidden');
             });
 
@@ -1508,6 +1510,17 @@
                 }
                 if (tabFree) tabFree.classList.remove('hidden');
                 if (btnSave) btnSave.classList.remove('hidden');
+            } else if (tabName === 'backup') {
+                if (btnBackup) {
+                    btnBackup.classList.add('border-brand-500', 'text-brand-600');
+                    btnBackup.classList.remove('border-transparent', 'text-slate-500');
+                }
+                if (tabBackup) tabBackup.classList.remove('hidden');
+                // 这个 tab 没有可保存的配置项，隐藏「保存配置」避免误点
+                if (btnSave) btnSave.classList.add('hidden');
+                if (typeof window.loadBackupPanel === 'function') {
+                    window.loadBackupPanel();
+                }
             }
         };
 

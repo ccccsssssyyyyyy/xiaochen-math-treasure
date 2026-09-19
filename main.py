@@ -55,7 +55,21 @@ _normalize_question_content = normalize_question_content
 from mathbank.paper_helper import build_latex_document, build_answer_sheet_latex, compile_tex_to_pdf, create_tex_zip_package, create_full_bundle_zip_package, collect_referenced_images, build_restricted_tex_environment
 from mathbank.word_export_helper import build_word_document, create_word_bundle_zip
 from mathbank.sync_helper import export_database_to_files
-from mathbank.backup import acquire_runtime_lock, create_full_backup, create_full_backup_if_due
+from mathbank.backup import (
+    DEFAULT_RETENTION,
+    PENDING_RESTORE_TTL_SECONDS,
+    acquire_runtime_lock,
+    apply_pending_restore,
+    clear_pending_restore,
+    create_full_backup,
+    create_full_backup_if_due,
+    create_pre_restore_backup,
+    list_full_backups,
+    read_pending_restore,
+    resolve_full_backup,
+    verify_full_backup,
+    write_pending_restore,
+)
 from mathbank.sample_library import (
     DEFAULT_MARKER_SOURCE as SAMPLE_QUESTIONS_SOURCE,
     import_sample_questions,
@@ -183,6 +197,7 @@ from mathbank.paths import (
     DATABASE_PATH,
     DATA_BACKUP_DIR,
     ENV_FILE,
+    FULL_BACKUP_DIR,
     PROJECT_ROOT,
     STATIC_CSS_DIR,
     STATIC_DIR,
@@ -225,6 +240,21 @@ IS_TESTING = "pytest" in sys.modules or any("pytest" in arg for arg in sys.argv)
 _RUNTIME_LOCK = None if IS_TESTING else acquire_runtime_lock()
 if _RUNTIME_LOCK is not None:
     atexit.register(_RUNTIME_LOCK.close)
+
+# 延迟还原：待还原请求只能在「服务已停止」的窗口里落地。此刻锁刚拿到、数据库还
+# 没打开，是唯一的合法时机；若放到数据库初始化之后，会先按旧库跑完迁移再换库。
+# 测试环境既不持锁、也不该动开发者本机的真实库，因此整段跳过。
+if _RUNTIME_LOCK is not None:
+    try:
+        _pending_restore_result = apply_pending_restore()
+    except Exception as exc:  # noqa: BLE001 - 还原失败不能让服务彻底起不来
+        print(
+            "[Restore Error] 待还原请求未完成，已按现有数据继续启动："
+            f"{type(exc).__name__}: {exc}"
+        )
+    else:
+        if _pending_restore_result:
+            print(f"[Restore] 已按待还原请求切回 {_pending_restore_result['archive']}")
 
 # Initialize DB
 init_db()
@@ -1734,6 +1764,170 @@ def create_backup_snapshot():
         "file": archive.name,
         "dir": str(archive.parent),
         "message": f"已创建完整备份：{archive.name}",
+    }
+
+
+def _snapshot_database_summary(manifest: dict) -> dict:
+    """从 manifest 里抽出界面要展示的那几个数，避免前端猜结构。"""
+
+    database = manifest.get("database")
+    if not isinstance(database, dict):
+        database = {}
+    row_counts = database.get("row_counts")
+    if not isinstance(row_counts, dict):
+        row_counts = {}
+    return {
+        "created_at": manifest.get("created_at"),
+        "app_version": manifest.get("app_version"),
+        "schema_version": database.get("schema_version"),
+        "row_counts": row_counts,
+        "upload_file_count": manifest.get("upload_file_count"),
+        "metadata_included": bool(manifest.get("metadata_included")),
+    }
+
+
+@app.get("/api/backups")
+def list_backup_snapshots():
+    """列出可用快照、上次备份时间与待还原请求（设置 → 备份与还原）。"""
+
+    try:
+        snapshots = list_full_backups()
+    except Exception as exc:  # noqa: BLE001 - 列表读不出来也要给界面一个可读原因
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"读取快照列表失败：{exc}",
+                "snapshots": [],
+            },
+            status_code=500,
+        )
+
+    last_backup_at = None
+    for snapshot in snapshots:
+        manifest = snapshot.get("manifest") or {}
+        if manifest.get("readable") and manifest.get("created_at"):
+            last_backup_at = manifest["created_at"]
+            break
+
+    return {
+        "status": "success",
+        "dir": str(FULL_BACKUP_DIR),
+        "retention": DEFAULT_RETENTION,
+        "last_backup_at": last_backup_at,
+        "snapshots": snapshots,
+        "pending_restore": read_pending_restore(),
+        "restore_ttl_seconds": PENDING_RESTORE_TTL_SECONDS,
+    }
+
+
+@app.post("/api/backup/verify")
+def verify_backup_snapshot(payload: dict):
+    """完整校验一个快照（哈希 + SQLite 完整性 + 图片引用），不做任何写入。"""
+
+    data = payload if isinstance(payload, dict) else {}
+    try:
+        archive = resolve_full_backup(str(data.get("file", "")).strip())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+
+    try:
+        manifest = verify_full_backup(archive)
+    except Exception as exc:  # noqa: BLE001 - 校验失败是预期结果，不是 500
+        return JSONResponse(
+            content={
+                "status": "error",
+                "file": archive.name,
+                "message": f"快照校验未通过：{exc}",
+            },
+            status_code=422,
+        )
+
+    return {
+        "status": "success",
+        "file": archive.name,
+        "size_bytes": archive.stat().st_size,
+        "message": "快照完整性与数据库校验通过",
+        **_snapshot_database_summary(manifest),
+    }
+
+
+@app.post("/api/backup/restore")
+def request_backup_restore(payload: dict):
+    """登记「延迟还原」请求：先在线校验并备份当前库，真正的还原在下次启动时落地。
+
+    为什么不在这里直接还原：服务持有 runtime lock，而还原需要同一把锁；同进程再开
+    一个 fd 也会撞锁。拆锁就等于允许「一边写、一边换库」，所以宁可多一次重启。
+    """
+
+    data = payload if isinstance(payload, dict) else {}
+    if data.get("confirm") is not True:
+        return JSONResponse(
+            content={"status": "error", "message": "缺少二次确认，已忽略该请求"},
+            status_code=400,
+        )
+
+    try:
+        archive = resolve_full_backup(str(data.get("file", "")).strip())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={"status": "error", "message": str(exc)}, status_code=400
+        )
+
+    try:
+        verify_full_backup(archive)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"快照校验未通过，未登记还原请求：{exc}",
+            },
+            status_code=422,
+        )
+
+    try:
+        safety_backup = create_pre_restore_backup()
+    except Exception as exc:  # noqa: BLE001 - 备份不出来就不允许进入还原
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"还原前的当前题库备份失败，已中止：{exc}",
+            },
+            status_code=500,
+        )
+
+    try:
+        request = write_pending_restore(archive.name, safety_backup=safety_backup)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={"status": "error", "message": f"登记待还原请求失败：{exc}"},
+            status_code=500,
+        )
+
+    minutes = max(1, PENDING_RESTORE_TTL_SECONDS // 60)
+    return {
+        "status": "success",
+        "file": archive.name,
+        "safety_backup": request["safety_backup"],
+        "expires_at": request["expires_at"],
+        "ttl_seconds": PENDING_RESTORE_TTL_SECONDS,
+        "message": (
+            f"已登记还原请求。请关闭题库并重新启动，{minutes} 分钟内启动即会自动完成还原。"
+        ),
+    }
+
+
+@app.delete("/api/backup/restore")
+def cancel_backup_restore():
+    """撤销待还原请求：重启后不会再改动数据。"""
+
+    if not clear_pending_restore(reason="用户取消"):
+        return {"status": "success", "removed": False, "message": "当前没有待还原请求"}
+    return {
+        "status": "success",
+        "removed": True,
+        "message": "已取消待还原请求；下次重启不会再改动数据",
     }
 
 
