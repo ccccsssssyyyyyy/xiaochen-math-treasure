@@ -7480,6 +7480,14 @@ def save_paper(payload: dict, background_tasks: BackgroundTasks, db: Session = D
             meta = {}
         meta["show_secret"] = payload.get("show_secret", True)
         meta["show_notice"] = payload.get("show_notice", True)
+        # 抬头学科行与考试用时都没有独立列，随 metadata_json 一起归档，
+        # 读回时由 Paper.to_dict 还原 —— 这样不必为两个展示字段做一次库迁移。
+        meta["subject_line"] = str(payload.get("subject_line") or "").strip()
+        try:
+            exam_duration = int(payload.get("exam_duration", 120))
+        except (TypeError, ValueError):
+            exam_duration = 120
+        meta["exam_duration"] = exam_duration if 0 < exam_duration <= 600 else 120
 
         paper = Paper(
             title=title,
@@ -7600,40 +7608,92 @@ def delete_paper(paper_id: int, background_tasks: BackgroundTasks, db: Session =
         db.rollback()
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
+def _paper_is_multi_subject(questions_data: list) -> bool:
+    """卷内是否含 ≥2 个学科。
+
+    一份卷子可以同时考数学 / 物理 / 化学。这时 exam-19 模板不适用 —— 它的题号锚点
+    （单选 1 / 多选 9 / 填空 12 / 解答 15）和配套的 A3 答题卡题块都是数学 19 题卷结构，
+    混入物化后题号会跳着走、答题卡也对不上题。
+    """
+
+    subjects = {
+        normalize_subject((item.get("question") or {}).get("subject"))
+        for item in questions_data
+    }
+    return len(subjects) > 1
+
+
+def _collect_paper_questions(db: Session, questions_input: list) -> tuple[list, list]:
+    """把试题篮 ``[{id, score, ...}]`` 展开成导出用的题目列表。
+
+    返回 ``(questions_data, missing_ids)``。
+
+    旧实现在四个导出端点里各写一份 ``if qid in q_map:`` —— 没有 else 分支，
+    试题篮里指向已删除题目的 id 会被无声跳过：导出照常成功，卷子里少一道题，
+    而用户看不到任何提示。这里把四处收敛成一份实现，并把「缺失」明确回传给
+    调用方，由调用方报错中止导出。
+    """
+
+    q_ids = [int(item.get("id")) for item in questions_input if item.get("id")]
+    q_map: dict = {}
+    if q_ids:
+        q_map = {
+            q.id: q.to_dict()
+            for q in db.query(Question).filter(Question.id.in_(q_ids)).all()
+        }
+
+    questions_data: list = []
+    missing_ids: list = []
+    for item in questions_input:
+        raw_id = item.get("id")
+        if not raw_id:
+            continue
+        qid = int(raw_id)
+        if qid not in q_map:
+            if qid not in missing_ids:
+                missing_ids.append(qid)
+            continue
+        q_dict = dict(q_map[qid])
+        if item.get("figure_align"):
+            q_dict["figure_align"] = item.get("figure_align")
+        q_item = {
+            "question": q_dict,
+            "score": int(item.get("score", 5)),
+        }
+        if item.get("solution_space"):
+            q_item["solution_space"] = item.get("solution_space")
+        questions_data.append(q_item)
+    return questions_data, missing_ids
+
+
 @app.post("/api/paper/export/tex")
 def export_paper_tex(payload: dict, db: Session = Depends(get_db)):
     """导出 LaTeX 源码 ZIP 压缩包"""
     try:
         title = payload.get("title", "2026年高中数学模拟考试试卷")
         subtitle = payload.get("subtitle", "")
+        subject_line = payload.get("subject_line", "")
+        exam_duration = payload.get("exam_duration", 120)
         paper_type = payload.get("paper_type", "exam")
         show_secret = payload.get("show_secret", True)
         show_notice = payload.get("show_notice", True)
         questions_input = payload.get("questions", [])
         
-        q_ids = [int(q.get("id")) for q in questions_input if q.get("id")]
-        questions_db = db.query(Question).filter(Question.id.in_(q_ids)).all()
-        q_map = {q.id: q.to_dict() for q in questions_db}
-        
-        questions_data = []
-        for item in questions_input:
-            qid = int(item.get("id"))
-            if qid in q_map:
-                q_dict = dict(q_map[qid])
-                if item.get("figure_align"):
-                    q_dict["figure_align"] = item.get("figure_align")
-                q_item = {
-                    "question": q_dict,
-                    "score": int(item.get("score", 5))
-                }
-                if item.get("solution_space"):
-                    q_item["solution_space"] = item.get("solution_space")
-                questions_data.append(q_item)
+        questions_data, missing_q_ids = _collect_paper_questions(db, questions_input)
+        if missing_q_ids:
+            return JSONResponse(content={
+                "status": "error",
+                "message": (
+                    f"试题篮中有 {len(missing_q_ids)} 道题已不在题库中（可能已被删除）："
+                    + "、".join(f"#{i}" for i in missing_q_ids)
+                    + "。为避免静默丢题，本次导出已中止；请把这些题从试题篮移除后重试。"
+                ),
+            }, status_code=400)
                 
-        tex_main = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=False, show_secret=show_secret, show_notice=show_notice)
-        tex_ans = build_latex_document(title + " (参考答案与解析)", subtitle, paper_type, questions_data, include_answers=True, show_secret=show_secret, show_notice=show_notice)
+        tex_main = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=False, show_secret=show_secret, show_notice=show_notice, subject_line=subject_line, exam_duration=exam_duration)
+        tex_ans = build_latex_document(title + " (参考答案与解析)", subtitle, paper_type, questions_data, include_answers=True, show_secret=show_secret, show_notice=show_notice, subject_line=subject_line, exam_duration=exam_duration)
         
-        if paper_type == "exam_19":
+        if paper_type == "exam_19" and not _paper_is_multi_subject(questions_data):
             tex_answer_sheet = build_answer_sheet_latex(title, subtitle, questions_data)
         else:
             tex_answer_sheet = None
@@ -7665,34 +7725,28 @@ def export_paper_bundle(payload: dict, db: Session = Depends(get_db)):
             }, status_code=200)
         title = payload.get("title", "2026年高中数学模拟考试试卷")
         subtitle = payload.get("subtitle", "")
+        subject_line = payload.get("subject_line", "")
+        exam_duration = payload.get("exam_duration", 120)
         paper_type = payload.get("paper_type", "exam")
         show_secret = payload.get("show_secret", True)
         show_notice = payload.get("show_notice", True)
         questions_input = payload.get("questions", [])
         
-        q_ids = [int(q.get("id")) for q in questions_input if q.get("id")]
-        questions_db = db.query(Question).filter(Question.id.in_(q_ids)).all()
-        q_map = {q.id: q.to_dict() for q in questions_db}
-        
-        questions_data = []
-        for item in questions_input:
-            qid = int(item.get("id"))
-            if qid in q_map:
-                q_dict = dict(q_map[qid])
-                if item.get("figure_align"):
-                    q_dict["figure_align"] = item.get("figure_align")
-                q_item = {
-                    "question": q_dict,
-                    "score": int(item.get("score", 5))
-                }
-                if item.get("solution_space"):
-                    q_item["solution_space"] = item.get("solution_space")
-                questions_data.append(q_item)
+        questions_data, missing_q_ids = _collect_paper_questions(db, questions_input)
+        if missing_q_ids:
+            return JSONResponse(content={
+                "status": "error",
+                "message": (
+                    f"试题篮中有 {len(missing_q_ids)} 道题已不在题库中（可能已被删除）："
+                    + "、".join(f"#{i}" for i in missing_q_ids)
+                    + "。为避免静默丢题，本次导出已中止；请把这些题从试题篮移除后重试。"
+                ),
+            }, status_code=400)
                 
-        tex_main = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=False, show_secret=show_secret, show_notice=show_notice)
-        tex_ans = build_latex_document(title + " (参考答案与解析)", subtitle, paper_type, questions_data, include_answers=True, show_secret=show_secret, show_notice=show_notice)
+        tex_main = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=False, show_secret=show_secret, show_notice=show_notice, subject_line=subject_line, exam_duration=exam_duration)
+        tex_ans = build_latex_document(title + " (参考答案与解析)", subtitle, paper_type, questions_data, include_answers=True, show_secret=show_secret, show_notice=show_notice, subject_line=subject_line, exam_duration=exam_duration)
         
-        if paper_type == "exam_19":
+        if paper_type == "exam_19" and not _paper_is_multi_subject(questions_data):
             tex_answer_sheet = build_answer_sheet_latex(title, subtitle, questions_data)
         else:
             tex_answer_sheet = None
@@ -7782,6 +7836,8 @@ def export_paper_pdf(payload: dict, db: Session = Depends(get_db)):
     try:
         title = payload.get("title", "2026年高中数学模拟考试试卷")
         subtitle = payload.get("subtitle", "")
+        subject_line = payload.get("subject_line", "")
+        exam_duration = payload.get("exam_duration", 120)
         paper_type = payload.get("paper_type", "exam_19")
         target = payload.get("target", "paper")  # "paper" or "sheet"
         include_answers = payload.get("include_answers", False)
@@ -7789,29 +7845,28 @@ def export_paper_pdf(payload: dict, db: Session = Depends(get_db)):
         show_notice = payload.get("show_notice", True)
         questions_input = payload.get("questions", [])
         
-        q_ids = [int(q.get("id")) for q in questions_input if q.get("id")]
-        questions_db = db.query(Question).filter(Question.id.in_(q_ids)).all()
-        q_map = {q.id: q.to_dict() for q in questions_db}
-        
-        questions_data = []
-        for item in questions_input:
-            qid = int(item.get("id"))
-            if qid in q_map:
-                q_dict = dict(q_map[qid])
-                if item.get("figure_align"):
-                    q_dict["figure_align"] = item.get("figure_align")
-                q_item = {
-                    "question": q_dict,
-                    "score": int(item.get("score", 5))
-                }
-                if item.get("solution_space"):
-                    q_item["solution_space"] = item.get("solution_space")
-                questions_data.append(q_item)
+        questions_data, missing_q_ids = _collect_paper_questions(db, questions_input)
+        if missing_q_ids:
+            return JSONResponse(content={
+                "status": "error",
+                "message": (
+                    f"试题篮中有 {len(missing_q_ids)} 道题已不在题库中（可能已被删除）："
+                    + "、".join(f"#{i}" for i in missing_q_ids)
+                    + "。为避免静默丢题，本次导出已中止；请把这些题从试题篮移除后重试。"
+                ),
+            }, status_code=400)
                 
         if target == "sheet":
+            # A3 答题卡是按数学 19 题卷切块的，卡面还写死「数学答题卡」，混科套不出可用的卡。
+            # 宁可明确拒绝，也不要吐一张对不上题的答题卡 —— 用户会拿它去印。
+            if _paper_is_multi_subject(questions_data):
+                return JSONResponse(content={
+                    "status": "error",
+                    "message": "卷内含多个学科，A3 答题卡只适用于数学 19 题卷。请改用试卷 PDF / Word 导出。",
+                }, status_code=400)
             tex_content = build_answer_sheet_latex(title, subtitle, questions_data)
         else:
-            tex_content = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=include_answers, show_secret=show_secret, show_notice=show_notice)
+            tex_content = build_latex_document(title, subtitle, paper_type, questions_data, include_answers=include_answers, show_secret=show_secret, show_notice=show_notice, subject_line=subject_line, exam_duration=exam_duration)
 
         image_paths = collect_referenced_images(questions_data, UPLOAD_DIR, UPLOAD_DIR_REL)
         pdf_bytes, log_or_err = compile_tex_to_pdf(tex_content, image_paths)
@@ -7853,6 +7908,8 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
     try:
         title = payload.get("title", "2026年高中数学模拟考试试卷")
         subtitle = payload.get("subtitle", "")
+        subject_line = payload.get("subject_line", "")
+        exam_duration = payload.get("exam_duration", 120)
         paper_type = payload.get("paper_type", "exam")
         show_secret = payload.get("show_secret", True)
         show_notice = payload.get("show_notice", True)
@@ -7860,25 +7917,16 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
         as_single_docx = bool(payload.get("as_single_docx", False))
         include_answers = bool(payload.get("include_answers", False))
 
-        q_ids = [int(q.get("id")) for q in questions_input if q.get("id")]
-        questions_db = db.query(Question).filter(Question.id.in_(q_ids)).all()
-        q_map = {q.id: q.to_dict() for q in questions_db}
-
-        questions_data = []
-        for item in questions_input:
-            qid = int(item.get("id"))
-            if qid not in q_map:
-                continue
-            q_dict = dict(q_map[qid])
-            if item.get("figure_align"):
-                q_dict["figure_align"] = item.get("figure_align")
-            q_item = {
-                "question": q_dict,
-                "score": int(item.get("score", 5)),
-            }
-            if item.get("solution_space") is not None:
-                q_item["solution_space"] = item.get("solution_space")
-            questions_data.append(q_item)
+        questions_data, missing_q_ids = _collect_paper_questions(db, questions_input)
+        if missing_q_ids:
+            return JSONResponse(content={
+                "status": "error",
+                "message": (
+                    f"试题篮中有 {len(missing_q_ids)} 道题已不在题库中（可能已被删除）："
+                    + "、".join(f"#{i}" for i in missing_q_ids)
+                    + "。为避免静默丢题，本次导出已中止；请把这些题从试题篮移除后重试。"
+                ),
+            }, status_code=400)
 
         if not questions_data:
             return JSONResponse(
@@ -7899,6 +7947,8 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
                 show_secret=show_secret,
                 show_notice=show_notice,
                 uploads_dir=UPLOAD_DIR,
+                subject_line=subject_line,
+                exam_duration=exam_duration,
             )
             suffix = "_含答案与解析" if include_answers else ""
             filename = f"{safe_title}{suffix}.docx"
@@ -7926,6 +7976,8 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
             show_secret=show_secret,
             show_notice=show_notice,
             uploads_dir=UPLOAD_DIR,
+            subject_line=subject_line,
+            exam_duration=exam_duration,
         )
         ans_docx, ans_diag = build_word_document(
             title,
@@ -7936,6 +7988,8 @@ def export_paper_word(payload: dict, db: Session = Depends(get_db)):
             show_secret=show_secret,
             show_notice=show_notice,
             uploads_dir=UPLOAD_DIR,
+            subject_line=subject_line,
+            exam_duration=exam_duration,
         )
 
         zip_bytes = create_word_bundle_zip(title, main_docx, ans_docx)

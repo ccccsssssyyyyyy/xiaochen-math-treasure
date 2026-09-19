@@ -9,6 +9,7 @@ import zipfile
 from collections import OrderedDict
 from io import BytesIO
 from sqlalchemy.orm import Session
+from mathbank.curriculums import SUBJECT_LABELS, SUBJECT_ORDER, normalize_subject
 from mathbank.database import Question, Paper, PaperQuestion, QuestionCurriculum
 from mathbank.paths import TEMPLATES_DIR
 from mathbank.latex_diagnostics import build_local_latex_diagnostic
@@ -55,6 +56,34 @@ TYPE_LABELS = {
 }
 
 TYPE_ORDER = ["single_choice", "multi_choice", "fill_in_blank", "detailed_answer"]
+
+# 学科分部分的大序号（第一部分 / 第二部分 …），与前端 partNums 同源。
+PART_NUMS = ["一", "二", "三", "四", "五"]
+
+
+def escape_plain_latex_text(text: str) -> str:
+    """把用户手填的短文本（抬头学科行）转义成可安全嵌进 LaTeX 的字面量。
+
+    只处理会破坏编译的 ASCII 元字符，中文标点一律不动 —— 之前试过连「·」也转义，
+    抬头会印成 ``\textperiodcentered``，比不转义更糟。
+    """
+
+    if not text:
+        return ""
+    out = text.replace("\\", r"\textbackslash{}")
+    for ch, rep in (
+        ("{", r"\{"),
+        ("}", r"\}"),
+        ("$", r"\$"),
+        ("&", r"\&"),
+        ("#", r"\#"),
+        ("%", r"\%"),
+        ("_", r"\_"),
+        ("^", r"\textasciicircum{}"),
+        ("~", r"\textasciitilde{}"),
+    ):
+        out = out.replace(ch, rep)
+    return out
 
 def clean_choice_stem_parentheses(text: str) -> str:
     """清洗选择题末尾的空括号，并保持数学定界符平衡。
@@ -213,7 +242,9 @@ def build_latex_document(
     questions_data: list,
     include_answers: bool = False,
     show_secret: bool = True,
-    show_notice: bool = True
+    show_notice: bool = True,
+    subject_line: str = "",
+    exam_duration: int = 120
 ) -> str:
     """
     Generate LaTeX source code based on exam-zh document class matching 试卷类模板.tex.
@@ -221,6 +252,18 @@ def build_latex_document(
     """
     paper_title = title.strip() or "2025 年普通高等学校招生全国统一考试(模拟卷)"
     sub_title = subtitle.strip()
+
+    # 抬头那行学科：原先写死「数学」。一份卷子可以同时含数学/物理/化学，印错学科比不印更糟，
+    # 所以内容完全交给用户手填，留空时渲染成空白占位（见下方 \subject）。
+    subject_text = escape_plain_latex_text(str(subject_line or "").strip())
+    # 考试用时：前端可改（物化单科 75、综合卷 150）。越界值一律回落 120，
+    # 免得印出「考试用时 分钟」这种半截句子。
+    try:
+        duration_minutes = int(exam_duration)
+    except (TypeError, ValueError):
+        duration_minutes = 120
+    if not 0 < duration_minutes <= 600:
+        duration_minutes = 120
     
     total_q_count = len(questions_data)
     total_score_sum = sum(q.get("score", 5) for q in questions_data)
@@ -253,6 +296,13 @@ def build_latex_document(
     lines.append(r"\usepackage[export]{adjustbox}")
     lines.append(r"\examsetup{")
     lines.append(r"  page/size=a4paper,")
+    # exam-zh 的页脚默认写死「数学试题第;页（共~;页）」，物理/化学卷会印成「数学试题」。
+    # 改成跟随抬头那行：留空时去掉学科词只留页码，填了就用用户填的字。
+    # 坑：foot-content 用 ASCII 分号当页码占位符，所以学科串里的分号必须换成全角，
+    # 否则「数学;物理」会被当成占位符切开，页脚印出半截句子。
+    foot_subject = subject_text.replace(";", "；")
+    foot_content = f"{foot_subject}试题第;页（共~;页）" if foot_subject else "第;页（共~;页）"
+    lines.append(f"  page/foot-content = {{{foot_content}}},")
     lines.append(r"  paren/show-paren=true,")
     if include_answers:
         lines.append(r"  paren/show-answer=true,")
@@ -275,7 +325,12 @@ def build_latex_document(
     lines.append(r"\everymath{\displaystyle}")
     lines.append("")
     lines.append(f"\\title{{{paper_title}}}")
-    lines.append(r"\subject{数学}")
+    # \subject 必须调用一次（\maketitle 靠它判断要不要印这一行），但留空时**不能**塞占位符：
+    # exam-zh 的 \subject 会用 \hbox_set:Nn 去量参数的自然宽度再做字距展开，
+    # \hphantom / \mbox 这类盒子会把那段展开逻辑撑坏，实测整卷报
+    # "! Incomplete \iffalse" 且编译不出 PDF。类里本来就用 \tl_if_blank 判过空值，
+    # 传空 = 不印学科行（正是「抬头完全手填」想要的效果），无需另找占位。
+    lines.append(f"\\subject{{{subject_text}}}")
     lines.append("")
     lines.append(r"\begin{document}")
     lines.append(r"\raggedbottom")
@@ -297,7 +352,7 @@ def build_latex_document(
         
     if is_exam_style:
         lines.append(r"\begin{center}")
-        lines.append(f"    本试卷共 \\pageref{{LastPage}} 页，{total_q_count} 题。全卷满分 {total_score_sum} 分。考试用时 120 分钟。")
+        lines.append(f"    本试卷共 \\pageref{{LastPage}} 页，{total_q_count} 题。全卷满分 {total_score_sum} 分。考试用时 {duration_minutes} 分钟。")
         lines.append(r"\end{center}")
         lines.append("")
         if show_notice:
@@ -314,19 +369,53 @@ def build_latex_document(
             lines.append(r"% \end{notice}")
         lines.append("")
 
-    # Group questions by question_type
-    grouped = {}
+    # 两层分组：学科 → 题型。单科卷时外层只有一个学科、且不插部分标题，
+    # 生成的 LaTeX 与改动前逐字一致（「单科卷零回归」的根据）。
+    by_subject: dict = {}
     for item in questions_data:
         q = item.get("question", {})
         q_type = q.get("question_type", "single_choice")
-        if q_type not in grouped:
-            grouped[q_type] = []
-        grouped[q_type].append(item)
+        subject_key = normalize_subject(q.get("subject"))
+        by_subject.setdefault(subject_key, {}).setdefault(q_type, []).append(item)
+
+    # 学科顺序固定 数学→物理→化学；未知学科值追加到末尾而不是丢弃，
+    # 否则整段题会从卷面上静默消失。
+    subject_keys = [s for s in SUBJECT_ORDER if s in by_subject]
+    subject_keys += [s for s in by_subject if s not in SUBJECT_ORDER]
+    is_multi_subject = len(subject_keys) > 1
+
+    # 混科卷不能走 exam_19：题号锚点（单选 1 / 多选 9 / 填空 12 / 解答 15）是数学新高考卷
+    # 结构，混入物化后题号会跳着走。前端已降级，这里再兜一层，防止直接调 API 时跳号。
+    if paper_type == "exam_19" and is_multi_subject:
+        paper_type = "exam"
+
+    plan = []
+    for subject_key in subject_keys:
+        if is_multi_subject:
+            plan.append(("divider", subject_key, None))
+        for q_type in TYPE_ORDER:
+            if by_subject[subject_key].get(q_type):
+                plan.append(("section", subject_key, q_type))
+
+    part_index = 0
         
-    for q_type in TYPE_ORDER:
-        if q_type not in grouped or not grouped[q_type]:
+    for step_kind, subject_key, q_type in plan:
+        if step_kind == "divider":
+            part_index += 1
+            part_items = [it for t in TYPE_ORDER for it in by_subject[subject_key].get(t, [])]
+            part_score = sum(it.get("score", 5) for it in part_items)
+            part_label = SUBJECT_LABELS.get(subject_key, subject_key)
+            part_num = PART_NUMS[part_index - 1] if part_index <= len(PART_NUMS) else str(part_index)
+            # 部分标题刻意不用 \section：那是题型的自动编号，混用会把「一、单选题」的
+            # 全卷连续编号打断。
+            lines.append("")
+            lines.append(r"\begin{center}")
+            lines.append(f"  {{\\large\\bfseries 第{part_num}部分\\quad {part_label}（共 {len(part_items)} 题，共 {part_score} 分）}}")
+            lines.append(r"\end{center}")
+            lines.append("")
             continue
-        items = grouped[q_type]
+
+        items = by_subject[subject_key][q_type]
         count = len(items)
         sec_score = sum(it.get("score", 5) for it in items)
         unit_score = items[0].get("score", 5) if count > 0 else 5
@@ -411,10 +500,11 @@ def build_latex_document(
             env_name = "problem" if q_type == "detailed_answer" else "question"
             points_arg = f"[points = {q_score}]" if q_type == "detailed_answer" else ""
 
-            default_fig_align = "bottom_right" if paper_type == "quiz" else "right"
+            # 插图默认居中（用户 2026-09-19 拍板）：不带 custom 标记的 'right' 是旧默认
+            # 残留，一并迁到居中；只有用户明确选过（custom_figure_align）才保留原排版。
             fig_align = q.get("figure_align")
-            if not fig_align or (paper_type == "quiz" and fig_align == "right" and not q.get("custom_figure_align")):
-                fig_align = default_fig_align
+            if not fig_align or (fig_align == "right" and not q.get("custom_figure_align")):
+                fig_align = "center"
             # 多张插图且原设定为右侧时，默认自动优化为下方居中 (center)
             if len(fig_elements) > 1 and fig_align == "right":
                 fig_align = "center"
@@ -509,17 +599,27 @@ def collect_referenced_images(
     image_paths = []
 
     def add_reference(reference: str) -> None:
-        try:
-            path = resolve_upload_asset(
-                reference,
-                uploads_dir=uploads_dir,
-                url_prefix=upload_url_prefix,
-            )
-        except (AssetSecurityError, TypeError):
+        reference = (reference or "").strip()
+        if not reference:
             return
-        absolute = str(path)
-        if absolute not in image_paths:
-            image_paths.append(absolute)
+        candidates = [reference]
+        # 兼容不带前缀的引用（如导出辅助代码直接传 "subdir/name.png"）：
+        # resolve_upload_asset 只认带 upload_url_prefix 的完整 URL。
+        if not reference.lstrip("/").startswith("static/uploads/"):
+            candidates.append("/static/uploads/" + reference.lstrip("/"))
+        for candidate in candidates:
+            try:
+                path = resolve_upload_asset(
+                    candidate,
+                    uploads_dir=uploads_dir,
+                    url_prefix=upload_url_prefix,
+                )
+            except (AssetSecurityError, TypeError):
+                continue
+            absolute = str(path)
+            if absolute not in image_paths:
+                image_paths.append(absolute)
+            return
 
     for item in questions_data:
         q = item.get("question", {})
@@ -527,12 +627,15 @@ def collect_referenced_images(
         if isinstance(imgs, list):
             for img_rel in imgs:
                 add_reference(img_rel)
-        
-        # Also parse content for Markdown image paths
+
+        # Also parse content for Markdown image paths.  注意必须保留完整 URL
+        # （含 /static/uploads/ 前缀）交给 resolve_upload_asset 校验；若在此处
+        # 剥掉前缀，子目录引用（mistakes/<id>/figures/x.png）会被安全层拒绝，
+        # 导致配图静默丢失、编译期报 File not found。
         content = q.get("content", "") + " " + q.get("answer_markdown", "")
-        found = re.findall(r'!\[.*?\]\((?:/static/uploads/|static/uploads/|/uploads/|uploads/)?([^)]+)\)', content)
-        for fname in found:
-            add_reference(fname)
+        found = re.findall(r'!\[[^\]]*\]\(\s*([^)\s]+)\s*\)', content)
+        for url in found:
+            add_reference(url)
 
     return image_paths
 

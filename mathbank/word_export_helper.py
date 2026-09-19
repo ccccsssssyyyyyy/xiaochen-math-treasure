@@ -29,6 +29,8 @@ from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Cm, Inches, Pt, RGBColor
 
+from mathbank.curriculums import SUBJECT_LABELS, SUBJECT_ORDER, normalize_subject
+
 
 MATH_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -745,8 +747,19 @@ class WordExamBuilder:
         paper_type: str,
         show_secret: bool,
         show_notice: bool,
+        subject_line: str = "",
+        exam_duration: int = 120,
     ) -> None:
         is_exam_style = paper_type in {"exam", "exam_19"}
+        # 抬头学科行与考试用时都跟随卷面参数：学科行留空就整段不输出
+        # （Word 不像 LaTeX 需要占位撑行高），考试用时越界一律回落 120。
+        subject_text = str(subject_line or "").strip()
+        try:
+            duration_minutes = int(exam_duration)
+        except (TypeError, ValueError):
+            duration_minutes = 120
+        if not 0 < duration_minutes <= 600:
+            duration_minutes = 120
         if show_secret and is_exam_style:
             p = self.doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -762,12 +775,14 @@ class WordExamBuilder:
         run = title_p.add_run(title or "未命名试卷")
         _set_run_font(run, 18, bold=True, cjk_font=CJK_TITLE_FONT)
 
-        if is_exam_style:
+        # 抬头学科行：原先写死「数  学」，现在跟随卷面手填值；留空则整段不输出。
+        # 输出前做字距展开，与 exam-zh 的 \subject 保持一致（「数学」→「数  学」）。
+        if is_exam_style and subject_text:
             subject_p = self.doc.add_paragraph()
             subject_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             subject_p.paragraph_format.space_before = Pt(2)
             subject_p.paragraph_format.space_after = Pt(4)
-            run = subject_p.add_run("数  学")
+            run = subject_p.add_run(_spread_subject_line(subject_text))
             _set_run_font(run, 15, bold=True, cjk_font=CJK_TITLE_FONT)
 
         if subtitle:
@@ -783,7 +798,7 @@ class WordExamBuilder:
             meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
             meta.paragraph_format.space_before = Pt(4)
             meta.paragraph_format.space_after = Pt(6)
-            run = meta.add_run(f"本试卷共 {total_count} 题。全卷满分 {total_score} 分。考试用时 120 分钟。")
+            run = meta.add_run(f"本试卷共 {total_count} 题。全卷满分 {total_score} 分。考试用时 {duration_minutes} 分钟。")
             _set_run_font(run, 10.5, cjk_font=CJK_BODY_FONT)
 
             if show_notice:
@@ -807,6 +822,24 @@ class WordExamBuilder:
                     p.paragraph_format.space_before = Pt(0)
                     p.paragraph_format.space_after = Pt(2) if idx < len(notices) - 1 else Pt(6)
                     self.add_mixed(p, line, 10.0)
+
+    def add_subject_heading(self, subject_key: str, items: list, part_index: int) -> None:
+        """学科分部分标题，形如「第一部分  数学（共 10 题，共 50 分）」。
+
+        题号与大题序号都不在这里重置，全卷连续 —— 换学科不该改变学生看到的题号。
+        """
+
+        label = SUBJECT_LABELS.get(subject_key, subject_key)
+        score = sum(item.score for item in items)
+        numerals = "一二三四五六七八九十"
+        prefix = numerals[part_index - 1] if 0 < part_index <= len(numerals) else str(part_index)
+        p = self.doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.keep_with_next = True
+        p.paragraph_format.space_before = Pt(12)
+        p.paragraph_format.space_after = Pt(6)
+        run = p.add_run(f"第{prefix}部分  {label}（共 {len(items)} 题，共 {score} 分）")
+        _set_run_font(run, SECTION_FONT_SIZE + 1, bold=True, cjk_font=CJK_TITLE_FONT)
 
     def add_section_heading(self, q_type: str, items: list[PreparedQuestion], paper_type: str, chinese_index: int) -> None:
         count = len(items)
@@ -1477,9 +1510,20 @@ def build_word_document(
     show_secret: bool = True,
     show_notice: bool = True,
     uploads_dir: str | Path | None = None,
+    subject_line: str = "",
+    exam_duration: int = 120,
 ) -> tuple[bytes, dict]:
     """Build an A4 editable DOCX and return bytes plus conversion diagnostics."""
     prepared = [_prepare_question(item, uploads_dir) for item in questions_data]
+    # 混科卷不能走 exam_19：题号锚点（单选 1 / 多选 9 / 填空 12 / 解答 15）是数学新高考卷
+    # 结构，混入物化后题号会跳着走；顺带也就没有数学专用的答题卡可省。
+    if paper_type == "exam_19":
+        _subjects = {
+            normalize_subject((item.get("question") or {}).get("subject"))
+            for item in questions_data
+        }
+        if len(_subjects) > 1:
+            paper_type = "exam"
     diagnostics = WordExportDiagnostics(answer_card_omitted=(paper_type == "exam_19"))
     if diagnostics.answer_card_omitted:
         diagnostics.warnings.append("Word 版本仅导出试卷正文，不包含答题卡。")
@@ -1505,18 +1549,42 @@ def build_word_document(
         paper_type,
         show_secret,
         show_notice,
+        subject_line,
+        exam_duration,
     )
 
-    grouped: dict[str, list[PreparedQuestion]] = {}
+    # 两层分组：学科 → 题型。单科卷时外层只有一个学科、且不插部分标题，
+    # 生成的 Word 与改动前一致（单科卷零回归）。
+    by_subject: dict = {}
     for item in prepared:
         q_type = item.question.get("question_type", "single_choice")
-        grouped.setdefault(q_type, []).append(item)
+        subject_key = normalize_subject(item.question.get("subject"))
+        by_subject.setdefault(subject_key, {}).setdefault(q_type, []).append(item)
+
+    subject_keys = [s for s in SUBJECT_ORDER if s in by_subject]
+    subject_keys += [s for s in by_subject if s not in SUBJECT_ORDER]
+    is_multi_subject = len(subject_keys) > 1
+
+    plan = []
+    for subject_key in subject_keys:
+        if is_multi_subject:
+            plan.append(("divider", subject_key, None))
+        for q_type in TYPE_ORDER:
+            if by_subject[subject_key].get(q_type):
+                plan.append(("section", subject_key, q_type))
 
     number_by_object: dict[int, int] = {}
     next_number = 1
     section_index = 0
-    for q_type in TYPE_ORDER:
-        items = grouped.get(q_type, [])
+    part_index = 0
+    for step_kind, subject_key, q_type in plan:
+        if step_kind == "divider":
+            part_index += 1
+            part_items = [it for t in TYPE_ORDER for it in by_subject[subject_key].get(t, [])]
+            builder.add_subject_heading(subject_key, part_items, part_index)
+            continue
+
+        items = by_subject[subject_key][q_type]
         if not items:
             continue
         section_index += 1

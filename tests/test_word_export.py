@@ -341,6 +341,8 @@ def test_word_export_api_rejects_empty_paper(client):
 
 
 def test_word_export_title_block_matches_exam_layout():
+    # 抬头学科行不再在模板里写死，由卷面（subject_line）传入；Word 侧对它做与
+    # exam-zh \subject 相同的字距展开，所以「数学」仍然印成「数  学」，外观不变。
     data, _ = build_word_document(
         "2026高中数学期末考试",
         "",
@@ -348,6 +350,7 @@ def test_word_export_title_block_matches_exam_layout():
         _sample_questions(),
         show_secret=True,
         show_notice=True,
+        subject_line="数学",
     )
     document = etree.fromstring(_document_xml(data))
     namespaces = {

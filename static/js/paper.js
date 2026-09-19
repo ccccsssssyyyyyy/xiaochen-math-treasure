@@ -11,6 +11,35 @@
     const STORAGE_KEY_CART = 'mathbank_paper_cart';
     const STORAGE_KEY_META = 'mathbank_paper_meta';
     const STORAGE_KEY_COLLAPSED = 'mathbank_paper_filter_collapsed';
+    const STORAGE_KEY_SAVED = 'mathbank_paper_saved_snapshot';
+
+    // 学科显示名与固定顺序：与题库顶部 Tab、后端 SUBJECT_ORDER 同源。
+    // 卷面正文分部分、题卡角标都读这一份，改这里等于改三处。
+    const SUBJECT_LABELS = { math: '数学', physics: '物理', chemistry: '化学' };
+    const SUBJECT_ORDER = ['math', 'physics', 'chemistry'];
+
+    function subjectLabel(subject) {
+        return SUBJECT_LABELS[String(subject || '').toLowerCase()] || '';
+    }
+
+    // 抬头学科行的预填值：按题库当前学科给一个起点，之后完全由用户在卷面上改。
+    // 刻意不做「按卷内题目自动推断」—— 一份卷子可以同时含三科，自动推断会写错学科。
+    function defaultSubjectLine() {
+        return subjectLabel(window.bankSubject) || '数学';
+    }
+
+    // 页脚前缀：原来写死「数学 &nbsp;」，现跟随抬头学科行；留空则只剩页码。
+    function footerSubjectPrefix(meta) {
+        const label = ((meta && meta.subject_line) || '').trim();
+        return label ? escapeHtml(label) + ' &nbsp; ' : '';
+    }
+
+    // 考试用时：默认 120，可改（物化单科 75、综合卷 150）。空值/非法值一律回落 120，
+    // 避免打印出「考试用时 分钟」这种半截句子。
+    function examDurationMinutes(meta) {
+        const raw = parseInt(meta && meta.exam_duration, 10);
+        return (isNaN(raw) || raw <= 0) ? 120 : raw;
+    }
 
     // Global Store State
     window.PaperStore = {
@@ -19,6 +48,13 @@
         meta: {
             title: '2026年高中数学模拟考试试卷',
             subtitle: '',
+            // 抬头那行学科（原先是写死的「数 学」）。默认空，首次进组卷台按题库当前学科预填一次，
+            // 之后由用户直接改；一份卷子可能同时含数学/物理/化学，所以不做自动推断。
+            subject_line: '',
+            // 用户是否亲手改过抬头学科行：改过就永不自动回填。没改过时，卷内只有一科
+            // 的话抬头/页脚会跟着卷子走（修「切到物理挑题、页脚还印数学」的学科残留）。
+            subject_line_custom: false,
+            exam_duration: 120,
             paper_type: 'exam_19',
             solution_space_default: '7.0',
             show_notice: true,
@@ -31,9 +67,15 @@
             question_type: '',
             difficulty: '',
             keyword: '',
+            subjects: SUBJECT_ORDER.slice(), // 学科多选：默认三科全选，等同改动前的「全库取题」
             tab: 'all' // 'all' or 'selected'
         },
         isFilterCollapsed: false,
+        // 与试卷库里那一版的对账基准：null = 还没成功保存过卷面
+        savedSignature: null,
+        savedAt: null,
+        saveInFlight: false,
+        lastSaveError: '',
         bankQuestions: [], // Loaded questions from DB based on filters
         questionsMap: {}, // qid -> Question Object
         answerCache: Object.create(null), // qid -> full answer_markdown, loaded on demand
@@ -42,6 +84,10 @@
         answerErrors: Object.create(null),
         activeWorkspace: 'bank'
     };
+
+    // 旧草稿（抬头写死「数 学」那一版）里没有 subject_line 这个键 → 进组卷台时补一次预填。
+    // 用户手动清空后会被存成空串，因此不会反复回填。
+    let needsSubjectPrefill = false;
 
     // Load State from LocalStorage
     function loadStateFromStorage() {
@@ -57,15 +103,37 @@
         try {
             const rawMeta = localStorage.getItem(STORAGE_KEY_META);
             if (rawMeta) {
-                window.PaperStore.meta = Object.assign({}, window.PaperStore.meta, JSON.parse(rawMeta));
+                const parsedMeta = JSON.parse(rawMeta);
+                window.PaperStore.meta = Object.assign({}, window.PaperStore.meta, parsedMeta);
+                if (!parsedMeta || typeof parsedMeta !== 'object' || !('subject_line' in parsedMeta)) {
+                    needsSubjectPrefill = true;
+                }
+            } else {
+                needsSubjectPrefill = true;
             }
         } catch (e) { }
 
         try {
             window.PaperStore.isFilterCollapsed = localStorage.getItem(STORAGE_KEY_COLLAPSED) === 'true';
         } catch (e) { }
+
+        // 上次成功存入试卷库时的卷面指纹，跟草稿一起跨刷新保留：否则刷新一次就会把已经
+        // 归档过的卷面重新报成「未保存」，用户会重复存出多份一模一样的归档。
+        try {
+            const rawSaved = localStorage.getItem(STORAGE_KEY_SAVED);
+            if (rawSaved) {
+                const parsedSaved = JSON.parse(rawSaved);
+                if (parsedSaved && typeof parsedSaved.sig === 'string') {
+                    window.PaperStore.savedSignature = parsedSaved.sig;
+                    window.PaperStore.savedAt = typeof parsedSaved.at === 'string' ? parsedSaved.at : null;
+                }
+            }
+        } catch (e) { }
     }
 
+    // 卷面的每次改动都会静静落到本机 localStorage，但只有「保存试卷」才会往数据库写归档。
+    // 这两个函数是「卷面变了」的唯一收口，所以存档状态刷新挂在这里：不管调用方有没有
+    // 重绘画布，提示都不会漏更新。
     function saveCartToStorage() {
         try {
             if (window.PaperStore.cart.length === 0) {
@@ -75,20 +143,126 @@
             }
         } catch (e) { }
         updateCartBadges();
+        renderPaperSaveStatus();
     }
 
     function saveMetaToStorage() {
         try {
             localStorage.setItem(STORAGE_KEY_META, JSON.stringify(window.PaperStore.meta));
         } catch (e) { }
+        renderPaperSaveStatus();
+    }
+
+    // 卷面标题/副标题的 onblur="saveMetaToStorage()" 是写在 HTML 属性里的，靠全局查找；
+    // 而函数声明在 IIFE 内部不会自动挂到 window，不显式导出会在失焦时抛 ReferenceError
+    // （改动其实已被 oninput 存下了，但控制台会一直刷红）。
+    window.saveCartToStorage = saveCartToStorage;
+    window.saveMetaToStorage = saveMetaToStorage;
+
+    // ---------------- 存档状态：本机草稿 vs 试卷库归档 ----------------
+    // 指纹只覆盖「保存试卷」真正写进数据库的字段（Paper.title/subtitle/paper_type +
+    // PaperQuestion.score）。留白高度、插图对齐都没进表，改它们不会让归档变旧，所以不参与
+    // 比对——否则调一下留白就被报成「未保存」，用户白存一份重复归档。
+    function computePaperSignature() {
+        const meta = window.PaperStore.meta || {};
+        const cart = Array.isArray(window.PaperStore.cart) ? window.PaperStore.cart : [];
+        const head = [
+            't:' + String(meta.title == null ? '' : meta.title),
+            's:' + String(meta.subtitle == null ? '' : meta.subtitle),
+            'p:' + String(meta.paper_type == null ? '' : meta.paper_type),
+            'n:' + (meta.show_notice !== false ? '1' : '0'),
+            'k:' + (meta.show_secret !== false ? '1' : '0')
+        ].join('|');
+        const body = cart.map(function (item) {
+            const id = (item && item.id !== undefined) ? item.id : '';
+            const score = (item && item.score !== undefined) ? item.score : '';
+            return id + ':' + score;
+        }).join(',');
+        return head + '#' + body;
+    }
+
+    function persistSavedSnapshot() {
+        try {
+            localStorage.setItem(STORAGE_KEY_SAVED, JSON.stringify({
+                sig: window.PaperStore.savedSignature,
+                at: window.PaperStore.savedAt
+            }));
+        } catch (e) { }
+    }
+
+    // 保存成功后 / 载入归档后调用：把「当前卷面」登记成与库中那一份一致
+    function markPaperSavedAs(atISO) {
+        window.PaperStore.savedSignature = computePaperSignature();
+        const at = atISO ? new Date(atISO) : new Date();
+        window.PaperStore.savedAt = (at && !isNaN(at.getTime())) ? at.toISOString() : new Date().toISOString();
+        window.PaperStore.lastSaveError = '';
+        persistSavedSnapshot();
+        renderPaperSaveStatus();
+    }
+
+    function formatSavedAtLabel(iso) {
+        const d = iso ? new Date(iso) : null;
+        if (!d || isNaN(d.getTime())) return '';
+        const pad = function (n) { return n < 10 ? '0' + n : String(n); };
+        const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+        const now = new Date();
+        const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+        if (sameDay) return hm;
+        const yest = new Date(now.getTime() - 86400000);
+        const isYesterday = d.getFullYear() === yest.getFullYear() && d.getMonth() === yest.getMonth() && d.getDate() === yest.getDate();
+        if (isYesterday) return '昨天 ' + hm;
+        return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+    }
+
+    function renderPaperSaveStatus() {
+        const node = document.getElementById('paperSaveStatus');
+        if (!node) return;
+
+        const setState = function (text, cls, tip) {
+            node.textContent = text;
+            node.className = cls;
+            if (tip) node.setAttribute('title', tip);
+            else node.removeAttribute('title');
+        };
+        const AMBER = 'min-w-0 text-[10px] font-semibold text-amber-600 dark:text-amber-400';
+
+        if (window.PaperStore.saveInFlight) {
+            setState('保存中…', 'min-w-0 text-[10px] font-semibold text-blue-700 dark:text-blue-300', '');
+            return;
+        }
+        if (window.PaperStore.lastSaveError) {
+            setState('保存失败，请重试', 'min-w-0 text-[10px] font-semibold text-red-600 dark:text-red-400',
+                window.PaperStore.lastSaveError);
+            return;
+        }
+        if ((window.PaperStore.cart || []).length === 0) {
+            setState('', '', '');
+            return;
+        }
+
+        const atLabel = formatSavedAtLabel(window.PaperStore.savedAt);
+        if (!window.PaperStore.savedSignature) {
+            setState('未保存 · 尚未写入试卷库', AMBER,
+                '这份卷面目前只在本机存了草稿。点「保存试卷」才会在试卷库里新增一条归档。');
+            return;
+        }
+        if (computePaperSignature() !== window.PaperStore.savedSignature) {
+            setState(atLabel ? ('有改动未保存 · 上次保存 ' + atLabel) : '有改动未保存', AMBER,
+                '当前卷面与试卷库里那一版不一致。再点一次「保存试卷」会另存一条新归档，不会覆盖旧的那条。');
+            return;
+        }
+        setState(atLabel ? ('已保存 · ' + atLabel) : '已保存',
+            'min-w-0 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400',
+            '当前卷面与最后一次存入试卷库的归档一致（按归档实际保存的字段比对：标题、副标题、模板、题号与分值）。');
     }
 
     function getQuestionFigAlign(q) {
-        const defaultAlign = (window.PaperStore.meta.paper_type === 'quiz') ? 'bottom_right' : 'right';
-        if (!q) return defaultAlign;
+        // 默认居中（用户 2026-09-19 拍板）：「题干右侧 / 下方居右」变成要主动选的排版。
+        // 存储值里不带 custom 标记的 'right' 是旧默认的残留，统一迁到居中。
+        if (!q) return 'center';
         if (q.custom_figure_align) return q.custom_figure_align;
         if (q.figure_align && q.figure_align !== 'right') return q.figure_align;
-        return defaultAlign;
+        return 'center';
     }
 
     function hasCachedPaperAnswer(qid) {
@@ -161,6 +335,34 @@
         return window.PaperStore.cart.some(item => item.id === qid);
     };
 
+    /**
+     * 批量入篮：错题工作台「入库后送入组卷」用。
+     *
+     * 与 addToCart 的差别只有一个：整批只写一次 localStorage、只重渲染一次、
+     * 只弹一条提示。逐题调 addToCart 会一次入库 20 道就打出 20 条 toast。
+     *
+     * pairs: [{id, score}]；已在本篮里的 id 会跳过。返回实际新增的道数。
+     */
+    window.addManyToCart = function (pairs) {
+        const added = [];
+        (pairs || []).forEach(function (pair) {
+            const qid = parseInt(pair && pair.id, 10);
+            if (!qid || window.isInCart(qid)) return;
+            window.PaperStore.cart.push({ id: qid, score: parseInt(pair.score, 10) || 5 });
+            added.push(qid);
+        });
+        if (added.length) {
+            saveCartToStorage();
+            syncSubjectLineWithCart();
+            updateCartBadges();
+            renderPart3QuestionStream();
+            if (window.PaperStore.activeWorkspace === 'paper' && typeof window.renderPaperCanvas === 'function') {
+                window.renderPaperCanvas();
+            }
+        }
+        return added.length;
+    };
+
     window.addToCart = function (qid, score = null) {
         qid = parseInt(qid, 10);
         if (!window.isInCart(qid)) {
@@ -172,6 +374,7 @@
             }
             window.PaperStore.cart.push({ id: qid, score: parseInt(score, 10) || 5 });
             saveCartToStorage();
+            syncSubjectLineWithCart();
             const seqNum = (q && q.seq_num !== undefined) ? q.seq_num : qid;
             if (window.showToast) window.showToast(`已将题目 #${seqNum} 加入试卷`, 'success');
             
@@ -186,6 +389,7 @@
         qid = parseInt(qid, 10);
         window.PaperStore.cart = window.PaperStore.cart.filter(item => item.id !== qid);
         saveCartToStorage();
+        syncSubjectLineWithCart();
         if (window.PaperStore.activeWorkspace === 'paper') {
             renderPart3QuestionStream();
             window.renderPaperCanvas();
@@ -207,7 +411,11 @@
     window.clearCart = function () {
         if (confirm('确定要清空已加入试卷的所有题目吗？')) {
             window.PaperStore.cart = [];
+            // 清空卷面等于开一张新卷：抬头学科行回到「按题库当前学科预填」的起点，
+            // 免得上一张卷的学科残留在这张新卷上。
+            window.PaperStore.meta.subject_line = defaultSubjectLine();
             saveCartToStorage();
+            saveMetaToStorage();
             if (window.PaperStore.activeWorkspace === 'paper') {
                 renderPart3QuestionStream();
                 window.renderPaperCanvas();
@@ -342,6 +550,73 @@
         }
     };
 
+    // 组卷页的学科勾选（默认三科全选）。返回值恒为有序、去重的合法学科 key，
+    // 调用方不必再操心「数组被写坏」「顺序乱掉」这类情况。
+    function paperFilterSubjects() {
+        const raw = window.PaperStore.filters.subjects;
+        const list = Array.isArray(raw) ? raw : SUBJECT_ORDER.slice();
+        return SUBJECT_ORDER.filter(s => list.indexOf(s) >= 0);
+    }
+
+    // 把若干学科的教材树合成一棵：同学段 / 同章节的 key 合并，小节去重。
+    // 单科时结果与 subjectTreeFor(单科) 同构 —— 单科用户看到的下拉内容与改动前一致。
+    function mergedSubjectTree(subjectKeys) {
+        const merged = {};
+        (subjectKeys || []).forEach(subjectKey => {
+            let one = null;
+            if (typeof subjectTreeFor === 'function') one = subjectTreeFor(subjectKey);
+            if (!one || typeof one !== 'object') one = window.categoryTree || null;
+            if (!one || typeof one !== 'object') return;
+            Object.keys(one).forEach(book => {
+                if (!merged[book]) merged[book] = {};
+                const chapters = one[book] || {};
+                Object.keys(chapters).forEach(ch => {
+                    const knowList = Array.isArray(chapters[ch]) ? chapters[ch] : [];
+                    if (!merged[book][ch]) merged[book][ch] = [];
+                    knowList.forEach(k => {
+                        if (merged[book][ch].indexOf(k) < 0) merged[book][ch].push(k);
+                    });
+                });
+            });
+        });
+        return merged;
+    }
+
+    // 卷内出现过的学科（按固定顺序、去重）。
+    function cartSubjects() {
+        const seen = {};
+        window.PaperStore.cart.forEach(item => {
+            const q = window.PaperStore.questionsMap[item.id];
+            if (!q) return;
+            seen[String(q.subject || 'math').toLowerCase()] = true;
+        });
+        return SUBJECT_ORDER.filter(s => seen[s])
+            .concat(Object.keys(seen).filter(s => SUBJECT_ORDER.indexOf(s) < 0));
+    }
+
+    // 抬头/页脚学科行跟随卷内学科：仅当用户没亲手改过（subject_line_custom）且
+    // 卷内恰好一科时生效；空卷与混科卷一律不动（混科卷学科写什么该由用户定）。
+    // 修的是「题库切到物理挑了 20 题，卷尾页脚还印着上一张卷的数学」。
+    function syncSubjectLineWithCart() {
+        const meta = window.PaperStore.meta;
+        if (meta.subject_line_custom) return;
+        const labeled = cartSubjects().filter(s => SUBJECT_LABELS[s]);
+        if (labeled.length !== 1) return;
+        const label = SUBJECT_LABELS[labeled[0]];
+        if ((meta.subject_line || '').trim() !== label) {
+            meta.subject_line = label;
+            saveMetaToStorage();
+        }
+    }
+
+    // 导出/保存时实际使用的模板：混科（卷内 ≥2 科）时把 exam_19 降级成普通考试卷，
+    // 与卷面预览的渲染口径一致 —— 否则会出现「预览题号连续、导出 PDF 却跳号」。
+    function paperTypeForPayload() {
+        const type = window.PaperStore.meta.paper_type || 'exam';
+        if (type !== 'exam_19') return type;
+        return cartSubjects().length > 1 ? 'exam' : type;
+    }
+
     // Fetch Questions from DB for Question Bank Stream
     async function fetchBankQuestions() {
         const f = window.PaperStore.filters;
@@ -369,6 +644,12 @@
             params.append('q', f.keyword);
             params.append('search', f.keyword);
         }
+        // 学科多选：三科全选时不传参数（等同原来的全库，库里万一有陌生学科值也不会漏），
+        // 只勾了部分学科才带上，避免「勾了数学却混进物理题」。
+        const pickedSubjects = paperFilterSubjects();
+        if (pickedSubjects.length > 0 && pickedSubjects.length < SUBJECT_ORDER.length) {
+            params.append('subject', pickedSubjects.join(','));
+        }
 
         try {
             const res = await fetch(`/api/questions?${params.toString()}`);
@@ -387,9 +668,21 @@
     // Render Full Paper Workspace (Part 2, Part 3, Part 4)
     window.renderPaperWorkspace = async function () {
         await fetchBankQuestions();
+        syncSubjectLineWithCart();
         renderPart2FilterSection();
         renderPart3QuestionStream();
         window.renderPaperCanvas();
+
+        // 抬头学科行的预填时机放在这里：进组卷台时题库学科一定已就绪，脚本加载期读它不可靠。
+        // 只补一次，补完立刻落盘，之后用户怎么改都不会被回填。
+        if (needsSubjectPrefill) {
+            needsSubjectPrefill = false;
+            if (!(window.PaperStore.meta.subject_line || '').trim()) {
+                window.PaperStore.meta.subject_line = defaultSubjectLine();
+                saveMetaToStorage();
+                window.renderPaperCanvas();
+            }
+        }
     };
 
     // 组卷体检报告渲染（供弹窗复用）
@@ -1235,8 +1528,20 @@
         const container = document.getElementById('paperFilterSection');
         if (!container) return;
 
-        const tree = window.categoryTree || {};
+        // 章节树取「勾选学科的并集」：物化的教材树与数学不是同一套，混科组卷时
+        // 只放当前题库 Tab 的那棵树，会把另一科的章节整个挡在下拉外面。
+        const pickedSubjectsForTree = paperFilterSubjects();
+        const tree = mergedSubjectTree(pickedSubjectsForTree.length ? pickedSubjectsForTree : SUBJECT_ORDER);
         const metadata = window.systemMetadata || {};
+
+        // 学科 chips：可多选，但至少留一科（全不勾等于没题可抽，比空列表更容易让人懵）。
+        const subjectChipsHtml = SUBJECT_ORDER.map(s => {
+            const on = pickedSubjectsForTree.indexOf(s) >= 0;
+            return `<button type="button" onclick="window.togglePaperFilterSubject('${s}')" aria-pressed="${on ? 'true' : 'false'}"
+                        class="px-2 py-0.5 rounded-lg text-xs font-semibold border transition-all ${on
+                    ? 'bg-brand-50 text-brand-600 border-brand-200/70 dark:bg-brand-900/30 dark:text-brand-200 dark:border-brand-900'
+                    : 'bg-white text-slate-400 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700'}">${escapeHtml(SUBJECT_LABELS[s])}</button>`;
+        }).join('');
 
         // 1. Build Compulsory Book options
         let bookOptions = `<option value="">-- 选择学段 --</option>`;
@@ -1296,6 +1601,12 @@
         container.innerHTML = `
             <div class="space-y-2 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 p-3 rounded-2xl shadow-sm">
                 <!-- 主标题/副标题/试卷类型：已迁移到右侧试卷预览区直接点击编辑（见 canvas-meta-title / canvas-meta-subtitle），左侧不再重复。 -->
+
+                <!-- 学科行：一份卷子可以跨学科，所以这里能同时勾多科 -->
+                <div class="flex items-center flex-wrap gap-1.5 pb-0.5">
+                    <span class="text-xs font-semibold text-slate-500 dark:text-slate-400 mr-0.5">学科</span>
+                    ${subjectChipsHtml}
+                </div>
 
                 <!-- Middle Row 1: 3-Level Cascade Curriculum Dropdowns (学段 -> 章节 -> 小节/知识点) -->
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800/60">
@@ -1376,6 +1687,29 @@
         `;
     }
 
+    // 学科 chips 开关。至少保留一科；切换后清掉学段/章节/小节 —— 那些选项目前是
+    // 按学科拼出来的，留着会让「学段停在物理必修一、库里却只有数学题」这种空结果出现。
+    window.togglePaperFilterSubject = function (subject) {
+        const key = String(subject || '').toLowerCase();
+        if (SUBJECT_ORDER.indexOf(key) < 0) return;
+        const current = paperFilterSubjects();
+        let next = current.indexOf(key) >= 0
+            ? current.filter(s => s !== key)
+            : SUBJECT_ORDER.filter(s => current.indexOf(s) >= 0 || s === key);
+        if (next.length === 0) {
+            if (window.showToast) window.showToast('至少要保留一个学科', 'warning');
+            next = current.slice();
+        }
+        window.PaperStore.filters.subjects = next;
+        window.PaperStore.filters.compulsory = '';
+        window.PaperStore.filters.chapter = '';
+        window.PaperStore.filters.knowledge = '';
+        renderPart2FilterSection();
+        fetchBankQuestions().then(() => {
+            renderPart3QuestionStream({ resetScroll: true });
+        });
+    };
+
     let filterDebounceTimer = null;
     window.onPaperFilterChange = function (key, value) {
         window.PaperStore.filters[key] = value;
@@ -1418,8 +1752,8 @@
                     if (node.innerText.trim() === '') node.innerHTML = '';
                 }
             });
-        } else if (key === 'subtitle') {
-            const nodes = document.querySelectorAll('.canvas-meta-subtitle');
+        } else if (key === 'subtitle' || key === 'subject_line') {
+            const nodes = document.querySelectorAll(key === 'subtitle' ? '.canvas-meta-subtitle' : '.canvas-meta-subject');
             nodes.forEach(node => {
                 if (node !== document.activeElement) {
                     if (!cleanVal) {
@@ -1436,6 +1770,10 @@
 
     window.updatePaperMeta = function (key, value) {
         window.PaperStore.meta[key] = value;
+        if (key === 'subject_line') {
+            // 用户亲手改了抬头学科行 → 之后自动跟随卷内学科的逻辑永久退避
+            window.PaperStore.meta.subject_line_custom = true;
+        }
         if (key === 'paper_type') {
             const newDefault = value === 'exam_19' ? '0.0' : '7.0';
             window.PaperStore.meta.solution_space_default = newDefault;
@@ -1447,11 +1785,25 @@
         }
         saveMetaToStorage();
 
-        if (key === 'title' || key === 'subtitle') {
+        if (key === 'title' || key === 'subtitle' || key === 'subject_line') {
             syncCanvasHeaderMeta(key, value);
         } else {
             window.renderPaperCanvas();
         }
+    };
+
+    // 考试用时没有输入框，直接在卷面那行上点改 —— 与「点击标题直接改」同一套交互。
+    window.editPaperExamDuration = function () {
+        const current = examDurationMinutes(window.PaperStore.meta);
+        const input = prompt('考试用时（分钟）：', String(current));
+        if (input === null) return;
+        const value = parseInt(input, 10);
+        if (isNaN(value) || value <= 0 || value > 600) {
+            if (window.showToast) window.showToast('考试用时需要是 1-600 之间的整数', 'error');
+            return;
+        }
+        window.updatePaperMeta('exam_duration', value);
+        if (window.showToast) window.showToast('考试用时已改为 ' + value + ' 分钟', 'info');
     };
 
     window.triggerAiPaperSelect = async function () {
@@ -1524,23 +1876,76 @@
     };
 
     // ============================================================
-    // Part 3: 虚拟滚动渲染 (定高卡片, 支持上万题)
+    // Part 3: 虚拟滚动渲染（高度自适应，支持上万题）
     // ============================================================
-    const PAPER_ITEM_HEIGHT = 264;   // 卡片固定高度(px)
-    const PAPER_ITEM_GAP = 16;       // 卡片间距(px)
-    const PAPER_STRIDE = PAPER_ITEM_HEIGHT + PAPER_ITEM_GAP;
+    // 2026-09-19 重写：以前是「每卡固定 264px」，但卡片容器不裁剪、content 的
+    // flex-1/min-h-0 在非 flex 父级下全部失效，内容一超高就整块溢出到下一张卡上，
+    // 且按绘制顺序**上一张卡的插图会盖住下一张卡的「加入试卷」按钮**
+    // （2026-09-18 用户截图实测：#1406 的 v-t 图正压在 #1405 的按钮行上）。
+    // 现在改为：卡片自然高度 + 渲染后实测回填 + 前缀和定位，装得下多少算多高。
+    const PAPER_ITEM_ESTIMATE = 264; // 未实测卡片的高度估计(px)，只影响滚动条手感
+    const PAPER_ITEM_GAP = 16;       // 卡片间距(px)，落在每张卡的 margin-bottom 上
     const PAPER_OVERSCAN = 4;        // 视口上下额外渲染条数
-    const PAPER_KATEX_DELIMS = [
-        { left: '$$', right: '$$', display: true },
-        { left: '$', right: '$', display: false },
-        { left: '\\(', right: '\\)', display: false },
-        { left: '\\[', right: '\\]', display: true }
-    ];
+    const PAPER_MEASURE_PASSES = 4;  // 实测回填后最多重排次数（防测量抖动死循环）
 
     const paperVirtual = {
         displayList: [],
         bound: false,
-        rafPending: false
+        rafPending: false,
+        heights: new Map(),          // q.id -> 实测卡高（不含间距），跨过滤/切页复用
+        resizeObs: null
+    };
+
+    /** 一张卡占的槽高 = 卡高(实测优先，未实测用估计) + 间距 */
+    function paperSlotHeight(q) {
+        const h = q ? paperVirtual.heights.get(q.id) : null;
+        return (h || PAPER_ITEM_ESTIMATE) + PAPER_ITEM_GAP;
+    }
+
+    /** 前缀和：offsets[i] = 第 i 张卡的顶部 y，offsets[n] = 总高 */
+    function paperVirtualOffsets(list) {
+        const offsets = [0];
+        let acc = 0;
+        for (let i = 0; i < list.length; i++) {
+            acc += paperSlotHeight(list[i]);
+            offsets.push(acc);
+        }
+        return offsets;
+    }
+
+    /** y 落在第几张卡：最大的 i 使 offsets[i] <= y（二分） */
+    function paperVirtualIndexAt(offsets, y) {
+        if (offsets.length <= 1) return 0;
+        let lo = 0, hi = offsets.length - 2;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (offsets[mid] <= y) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+    }
+
+    // 只读数学 + 实测缓存，供 vm 契约测试断言（不改任何行为）
+    window.PaperVirtualMath = {
+        offsets: paperVirtualOffsets,
+        indexAt: paperVirtualIndexAt,
+        slotHeightOf: paperSlotHeight,
+        measuredHeight: function (qid) { return paperVirtual.heights.get(qid); },
+        setMeasuredHeight: function (qid, h) { paperVirtual.heights.set(qid, h); },
+        resetMeasured: function () { paperVirtual.heights.clear(); },
+        ESTIMATE: PAPER_ITEM_ESTIMATE,
+        GAP: PAPER_ITEM_GAP
+    };
+
+    // 只读契约面：A4 预览分页 / 抬头学科行跟随 / 插图默认排版（vm 测试用）
+    window.PaperA4Pagination = {
+        paginate: function (blocks) { return paginateA4Blocks(blocks); },
+        heightOf: a4BlockHeight
+    };
+    window.PaperSubjectSync = {
+        sync: function () { syncSubjectLineWithCart(); }
+    };
+    window.PaperFigAlign = {
+        get: function (q) { return getQuestionFigAlign(q); }
     };
 
     function getPaperDisplayList() {
@@ -1584,6 +1989,15 @@
         `;
     }
 
+    // 题卡上的学科角标：只在同时勾了多科时出现。单科浏览时全是同一科，
+    // 挂一排重复标签只是噪音，界面与改动前保持一致。
+    function paperSubjectBadgeHtml(q) {
+        if (paperFilterSubjects().length < 2) return '';
+        const label = subjectLabel(q && q.subject);
+        if (!label) return '';
+        return `<span class="px-2 py-0.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200/70 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-900/60" title="所属学科">${escapeHtml(label)}</span>`;
+    }
+
     function renderPaperStreamCard(q, index) {
         const inCart = window.isInCart(q.id);
         const cartItem = window.PaperStore.cart.find(it => it.id === q.id);
@@ -1606,6 +2020,7 @@
             <div class="flex flex-col gap-2 pb-2 mb-2 border-b border-slate-100 sm:flex-row sm:items-center sm:justify-between dark:border-slate-700/60">
                 <div class="flex w-full items-center space-x-2 flex-wrap gap-y-1 sm:w-auto">
                     <span class="font-bold text-slate-800 dark:text-slate-100 text-sm">#${escapeHtml(q.seq_num !== undefined ? q.seq_num : q.id)}</span>
+                    ${paperSubjectBadgeHtml(q)}
                     <span class="px-2 py-0.5 rounded-lg text-xs font-semibold bg-brand-50 text-brand-600 border border-brand-200/50 dark:bg-brand-900/30 dark:text-brand-200 dark:border-brand-900/50">${escapeHtml(qTypeLabel)}</span>
                     ${diffTag}
                     ${q.category_compulsory ? `<span class="px-2 py-0.5 rounded-lg text-xs font-medium bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300">${escapeHtml(q.category_compulsory)}</span>` : ''}
@@ -1643,14 +2058,15 @@
         `;
 
         return `
-            <div class="p-4 rounded-2xl border ${cardBorderClass}" style="height:${PAPER_ITEM_HEIGHT}px">
+            <div class="p-4 rounded-2xl border overflow-hidden ${cardBorderClass}" data-vcard style="margin-bottom:${PAPER_ITEM_GAP}px">
                 ${controls}
                 ${content}
             </div>
         `;
     }
 
-    function updatePaperVirtualList() {
+    function updatePaperVirtualList(depth) {
+        depth = depth || 0;
         const container = document.getElementById('paperQuestionStream');
         const spacer = document.getElementById('paperVirtualSpacer');
         const viewport = document.getElementById('paperVirtualViewport');
@@ -1659,15 +2075,20 @@
         const total = list.length;
         if (total === 0) return;
 
+        // 前缀和定位：start/end 从「卡片顶部的 y」反查，而不是拿固定步长除。
+        // 未实测的卡按估计高度参与计算，实测后自动收敛。
+        const offsets = paperVirtualOffsets(list);
+        spacer.style.height = offsets[total] + 'px';
+
         const scrollTop = container.scrollTop;
         const viewportH = container.clientHeight;
-        let start = Math.floor(scrollTop / PAPER_STRIDE) - PAPER_OVERSCAN;
-        let end = Math.ceil((scrollTop + viewportH) / PAPER_STRIDE) + PAPER_OVERSCAN;
+        let start = paperVirtualIndexAt(offsets, Math.max(0, scrollTop)) - PAPER_OVERSCAN;
+        let end = paperVirtualIndexAt(offsets, scrollTop + viewportH) + PAPER_OVERSCAN;
         start = Math.max(0, start);
         end = Math.min(total - 1, end);
         if (start > end) { start = 0; end = Math.min(total - 1, PAPER_OVERSCAN * 2); }
 
-        viewport.style.transform = `translateY(${start * PAPER_STRIDE}px)`;
+        viewport.style.transform = `translateY(${offsets[start]}px)`;
         let html = '';
         for (let i = start; i <= end; i++) {
             html += renderPaperStreamCard(list[i], i);
@@ -1678,13 +2099,52 @@
         for (let i = start; i <= end; i++) {
             const q = list[i];
             const el = document.getElementById(`paper-q-render-${q.id}`);
-            if (el && typeof renderMathInElement === 'function') {
-                try {
-                    renderMathInElement(el, { delimiters: PAPER_KATEX_DELIMS, throwOnError: false });
-                    if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(el);
-                } catch (e) { }
+            if (el) {
+                window.MathRender.render(el, 'display');
+                if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(el);
             }
         }
+
+        // 实测回填：KaTeX / 选项栅格都定型之后再量（它们都会改变卡高）。
+        // 量出与缓存不同的高度就重算布局——递归有上限，图片懒加载等后续
+        // 变化由 viewport 的 ResizeObserver 兜住（见 ensurePaperVirtualResizeWatch）。
+        if (depth < PAPER_MEASURE_PASSES && viewport.children && viewport.children.length) {
+            let changed = false;
+            const cards = viewport.children;
+            for (let k = 0; k < cards.length && start + k < total; k++) {
+                const q = list[start + k];
+                const measured = cards[k].offsetHeight;
+                if (measured > 0 && paperVirtual.heights.get(q.id) !== measured) {
+                    paperVirtual.heights.set(q.id, measured);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                // 视觉锚点：上方卡片实测变高/变矮时，视口顶部那卡的新旧偏移差补回
+                // scrollTop，否则正在看的题会整体上下跳一截。
+                const newOffsets = paperVirtualOffsets(list);
+                const anchor = paperVirtualIndexAt(offsets, container.scrollTop);
+                const delta = newOffsets[anchor] - offsets[anchor];
+                if (delta) container.scrollTop = container.scrollTop + delta;
+                updatePaperVirtualList(depth + 1);
+            }
+        }
+    }
+
+    // 图片懒加载、字体就位都会在渲染完成后改变卡高。viewport 是绝对定位、高度随内容，
+    // 观察它就能兜住这些「渲染后才长高」的情况；rAF 去抖避免滚动帧里反复重排。
+    function ensurePaperVirtualResizeWatch() {
+        const viewport = document.getElementById('paperVirtualViewport');
+        if (!viewport || paperVirtual.resizeObs || typeof ResizeObserver === 'undefined') return;
+        paperVirtual.resizeObs = new ResizeObserver(() => {
+            if (paperVirtual.rafPending) return;
+            paperVirtual.rafPending = true;
+            requestAnimationFrame(() => {
+                paperVirtual.rafPending = false;
+                updatePaperVirtualList();
+            });
+        });
+        paperVirtual.resizeObs.observe(viewport);
     }
 
     function ensurePaperScrollBinding() {
@@ -1729,12 +2189,12 @@
             return;
         }
 
-        const spacerHeight = total * PAPER_STRIDE;
+        const offsets = paperVirtualOffsets(list);
         container.innerHTML = `
             <div class="sticky top-0 z-10 bg-slate-50/95 dark:bg-slate-950/95 backdrop-blur pb-2 mb-2 border-b border-slate-200/60 dark:border-slate-700/60">
                 ${paperStreamHeaderHtml()}
             </div>
-            <div id="paperVirtualSpacer" style="position:relative; height:${spacerHeight}px;">
+            <div id="paperVirtualSpacer" style="position:relative; height:${offsets[total]}px;">
                 <div id="paperVirtualViewport" style="position:absolute; top:0; left:0; right:0;"></div>
             </div>
         `;
@@ -1745,6 +2205,7 @@
             container.scrollTop = prevScroll;
         }
         ensurePaperScrollBinding();
+        ensurePaperVirtualResizeWatch();
         updatePaperVirtualList();
     }
 
@@ -1799,11 +2260,9 @@
         }
 
         const qEl = backdrop.querySelector('#paperDetailQuestion');
-        if (qEl && typeof renderMathInElement === 'function') {
-            try {
-                renderMathInElement(qEl, { delimiters: PAPER_KATEX_DELIMS, throwOnError: false });
-                if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(qEl);
-            } catch (e) { }
+        if (qEl) {
+            window.MathRender.render(qEl, 'display');
+            if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(qEl);
         }
         window.loadPaperDetailAnswer(qid);
     };
@@ -1814,8 +2273,8 @@
     };
 
     function renderDetailAnswerMath(el) {
-        if (el && typeof renderMathInElement === 'function') {
-            try { renderMathInElement(el, { delimiters: PAPER_KATEX_DELIMS, throwOnError: false }); } catch (e) { }
+        if (el) {
+            window.MathRender.render(el, 'display');
         }
     }
 
@@ -1863,6 +2322,11 @@
 
         const cart = window.PaperStore.cart;
         const meta = window.PaperStore.meta;
+
+        // 卷内 ≥2 科时没有可用的答题卡：现成的 A3 答题卡是按数学 19 题卷切块的
+        // （题块对应单选/多选/填空/解答的 19 题布局，卡面上还写死「数学答题卡」），
+        // 混科的题块与它对不上，所以直接把入口收起来。
+        const isMultiSubjectCart = cartSubjects().length > 1;
 
         const validCartStats = cart.filter(item => {
             const q = window.PaperStore.questionsMap[item.id];
@@ -1986,10 +2450,12 @@
                                 <i class="fa-solid fa-file-pdf"></i>
                                 <span>试卷 PDF 预览</span>
                             </button>
-                            <button onclick="exportPaperPdf('sheet')" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="编译并打开 A3 双面答题卡 PDF 预览">
-                                <i class="fa-solid fa-file-lines"></i>
-                                <span>答题卡 PDF 预览</span>
-                            </button>
+                            ${isMultiSubjectCart ? '' : `
+                                <button onclick="exportPaperPdf('sheet')" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="编译并打开 A3 双面答题卡 PDF 预览">
+                                    <i class="fa-solid fa-file-lines"></i>
+                                    <span>答题卡 PDF 预览</span>
+                                </button>
+                            `}
                             <button onclick="exportPaperWord()" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="导出可编辑 Word 试卷正文（不含答题卡）">
                                 <i class="fa-solid fa-file-word"></i>
                                 <span>Word 导出</span>
@@ -2013,6 +2479,12 @@
                             </button>
                         `}
                     </div>
+
+                    <!-- Row 4: 存档状态。草稿任何时候都在本机，只有「保存试卷」才写归档 -->
+                    <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pt-1.5 mt-0.5 border-t border-dashed border-slate-100 dark:border-slate-800/60">
+                        <span id="paperSaveStatus" class="min-w-0 text-[10px] font-semibold"></span>
+                        <span class="shrink-0 text-[10px] text-slate-400 dark:text-slate-500">草稿自动存本机 · 保存会新增一条归档</span>
+                    </div>
                 </div>
             </div>
 
@@ -2024,21 +2496,16 @@
 
         // Render math in A4 sheet
         const sheet = document.getElementById('a4PaperPreviewSheet');
-        if (sheet && typeof renderMathInElement === 'function') {
+        if (sheet) {
             try {
-                renderMathInElement(sheet, {
-                    delimiters: [
-                        { left: '$$', right: '$$', display: true },
-                        { left: '$', right: '$', display: false },
-                        { left: '\\(', right: '\\)', display: false },
-                        { left: '\\[', right: '\\]', display: true }
-                    ],
-                    throwOnError: false
-                });
+                window.MathRender.render(sheet, 'display');
                 if (typeof window.adaptChoicesGridLayout === 'function') {
                     window.adaptChoicesGridLayout(sheet);
                 }
             } catch (e) { }
+            // KaTeX/选项栅格定型后按实测块高重分页：估算分页在这里必然失真
+            // （公式、插图、留白的真实高度估不准），失真表现就是题目卡缝/页脚撞字。
+            repaginateA4Preview(3);
         }
 
         // 恢复更新前的滚动位置，保证调排版/留白/格式时在原视口位置零跳跃渲染
@@ -2057,7 +2524,23 @@
         if (typeof requestAnimationFrame === 'function') {
             requestAnimationFrame(restoreScroll);
         }
+
+        // 画布整体重绘会换掉提示节点，状态必须跟着重画一次
+        renderPaperSaveStatus();
     };
+
+    // 选了 19 题高考卷模板、但卷内混了学科时的提示条：说明为什么排版与平时不同，
+    // 免得用户以为是排版坏了。
+    function headerMultiSubjectHint(meta) {
+        if (!meta || meta.paper_type !== 'exam_19') return '';
+        if (cartSubjects().length < 2) return '';
+        return `
+            <div class="mb-3 text-[11px] text-center font-sans text-amber-800 bg-amber-50/80 border border-amber-200/80 rounded-lg py-1 px-2">
+                卷内含多个学科，已按普通考试卷排版 —— 19 题高考卷模板的题号是数学专用，混科会跳号；<br>
+                A3 答题卡也只按数学 19 题卷切块，混科套不上，答题卡入口已隐藏。
+            </div>
+        `;
+    }
 
     function renderA4Header(meta, totalCount, totalScore, totalPages) {
         const isExamType = (meta.paper_type === 'exam' || meta.paper_type === 'exam_19');
@@ -2093,7 +2576,13 @@
                     placeholder="+ 点击在此直接添加主标题"
                     class="canvas-meta-title text-2xl font-bold tracking-normal text-slate-900 font-serif mb-1.5 outline-none hover:bg-amber-50/60 focus:bg-white focus:ring-2 focus:ring-brand-200/80 rounded-lg px-3 py-0.5 transition-all cursor-text inline-block min-w-[200px]"
                     spellcheck="false">${(meta.title && meta.title.trim()) ? escapeHtml(meta.title) : ''}</h1>
-                <div class="text-xl font-bold text-slate-900 font-serif my-2 select-none">数 学</div>
+                <div contenteditable="true"
+                     oninput="updatePaperMeta('subject_line', this.innerText)"
+                     onblur="saveMetaToStorage()"
+                     title="点击填写学科或卷种（如：数学 / 物理 / 理科综合）"
+                     placeholder="+ 点击填写学科或卷种"
+                     class="canvas-meta-subject text-xl font-bold text-slate-900 font-serif my-2 outline-none hover:bg-amber-50/60 focus:bg-white focus:ring-2 focus:ring-brand-200/80 rounded-lg px-3 py-0.5 transition-all cursor-text min-w-[120px] inline-block"
+                     spellcheck="false">${(meta.subject_line && meta.subject_line.trim()) ? escapeHtml(meta.subject_line) : ''}</div>
                 <div contenteditable="true"
                      oninput="updatePaperMeta('subtitle', this.innerText)"
                      onblur="saveMetaToStorage()"
@@ -2103,9 +2592,13 @@
                      spellcheck="false">${(meta.subtitle && meta.subtitle.trim()) ? escapeHtml(meta.subtitle) : ''}</div>
             </div>
 
+            ${headerMultiSubjectHint(meta)}
+
             ${isExamType ? `
-                <div class="text-[12px] text-center font-serif text-slate-800 mb-4">
-                    本试卷共 ${totalPages} 页，${totalCount} 题。全卷满分 ${totalScore} 分。考试用时 120 分钟。
+                <div class="text-[12px] text-center font-serif text-slate-800 mb-4 cursor-pointer hover:bg-amber-50/60 rounded-lg transition-all duration-200"
+                     onclick="window.editPaperExamDuration()"
+                     title="点击修改考试用时">
+                    本试卷共 ${totalPages} 页，${totalCount} 题。全卷满分 ${totalScore} 分。考试用时 ${examDurationMinutes(meta)} 分钟。
                 </div>
 
                 <!-- Standard LaTeX Notice Block with Interactive Toggle -->
@@ -2142,7 +2635,7 @@
                 <div class="a4-paper-sheet w-full max-w-[794px] min-h-[1123px] bg-white text-slate-900 px-10 py-12 shadow-2xl rounded-sm border border-slate-300 font-serif leading-relaxed relative overflow-hidden select-none">
                     ${renderA4Header(meta, totalCount, totalScore, 1)}
                     <div class="text-center py-24 text-slate-400 font-sans text-xs">暂无试题数据，请在左侧点击“加入试卷”添加题目</div>
-                    <div class="absolute bottom-5 left-0 right-0 text-center text-xs font-serif text-slate-700 tracking-wider">数学 &nbsp; 第 1 页 (共 1 页)</div>
+                    <div class="absolute bottom-5 left-0 right-0 text-center text-xs font-serif text-slate-700 tracking-wider">${footerSubjectPrefix(meta)}第 1 页 (共 1 页)</div>
                 </div>
             `;
         }
@@ -2155,25 +2648,74 @@
         const cartItemsWithIndex = validCart.map((item, idx) => ({ ...item, cartIndex: idx }));
 
         const typeOrder = ['single_choice', 'multi_choice', 'fill_in_blank', 'detailed_answer'];
-        const grouped = {};
 
+        // 两层分组：学科 → 题型。单科卷时外层只有一个学科、且不插部分标题，遍历顺序与
+        // 生成的卷面结构同改动前完全一致（这是「单科卷零回归」的根据）。
+        const bySubject = {};
         cartItemsWithIndex.forEach(item => {
             const q = window.PaperStore.questionsMap[item.id];
             if (!q) return;
             const qType = q.question_type || 'single_choice';
-            if (!grouped[qType]) grouped[qType] = [];
-            grouped[qType].push(item);
+            const subj = String(q.subject || 'math').toLowerCase();
+            if (!bySubject[subj]) bySubject[subj] = {};
+            if (!bySubject[subj][qType]) bySubject[subj][qType] = [];
+            bySubject[subj][qType].push(item);
+        });
+
+        // 学科顺序固定 数学→物理→化学（与题库 Tab、后端 SUBJECT_ORDER 同源）。
+        // 万一库里冒出未知学科值，追加到末尾而不是丢掉 —— 整段题在卷面上消失比顺序难看严重得多。
+        const subjectKeys = SUBJECT_ORDER.filter(s => bySubject[s])
+            .concat(Object.keys(bySubject).filter(s => SUBJECT_ORDER.indexOf(s) < 0));
+        const isMultiSubject = subjectKeys.length > 1;
+
+        // 把 (学科 × 题型) 摊平成一张执行清单：单科时等价于原来那一层 typeOrder 遍历，
+        // 多学科时每个学科前多插一条「第 N 部分」标题。
+        const plan = [];
+        subjectKeys.forEach(subjectKey => {
+            if (isMultiSubject) plan.push({ kind: 'divider', subjectKey: subjectKey });
+            typeOrder.forEach(qType => {
+                const items = bySubject[subjectKey][qType];
+                if (items && items.length > 0) {
+                    plan.push({ kind: 'section', subjectKey: subjectKey, qType: qType, items: items });
+                }
+            });
         });
 
         const blocks = [];
         const secNums = ['一', '二', '三', '四', '五'];
+        const partNums = ['一', '二', '三', '四', '五'];
         let secIdx = 0;
-        const isExam19 = (meta.paper_type === 'exam_19');
+        let partIdx = 0;
+        // 混科卷按普通考试卷排版：exam_19 的题号锚点（单选 1 / 多选 9 / 填空 12 / 解答 15）
+        // 是数学新高考卷的结构，混入物化后题号会跳着走。
+        const isExam19 = (meta.paper_type === 'exam_19') && !isMultiSubject;
         let globalQIndex = 1;
 
-        typeOrder.forEach(qType => {
-            const items = grouped[qType];
-            if (!items || items.length === 0) return;
+        plan.forEach(step => {
+            if (step.kind === 'divider') {
+                // 学科分部分标题。题号（globalQIndex）与大题序号（secIdx）都不在这里重置，
+                // 全卷连续 —— 学生看题号不会因为换学科而产生歧义。
+                const partItems = [];
+                typeOrder.forEach(t => (bySubject[step.subjectKey][t] || []).forEach(it => partItems.push(it)));
+                const partScore = partItems.reduce((s, it) => s + (parseInt(it.score, 10) || 5), 0);
+                const partNum = partNums[partIdx] || (partIdx + 1);
+                partIdx++;
+                blocks.push({
+                    type: 'subject_divider',
+                    subjectKey: step.subjectKey,
+                    html: `
+                        <div class="paper-subject-block mb-2 mt-4" data-pb-idx="${blocks.length}" data-subject="${step.subjectKey}">
+                            <h2 class="text-center font-bold text-[14.5px] font-serif text-slate-900 tracking-wide border-b border-slate-300 pb-1.5 mb-1">第${partNum}部分　${escapeHtml(subjectLabel(step.subjectKey) || step.subjectKey)}（共 ${partItems.length} 题，共 ${partScore} 分）</h2>
+                        </div>
+                    `,
+                    estHeight: 58
+                });
+                return;
+            }
+
+            const qType = step.qType;
+            const items = step.items;
+            const sectionSubjectKey = isMultiSubject ? step.subjectKey : '';
 
             // For exam_19: set fixed starting question number according to Gaokao rules
             if (isExam19) {
@@ -2333,10 +2875,11 @@
                 const itemHtml = `
                     <div class="paper-q-item group relative text-[13px] leading-normal font-serif p-2 rounded-xl border border-transparent hover:border-brand-200 hover:bg-brand-50/30 transition-all duration-200 cursor-grab active:cursor-grabbing mb-2"
                         draggable="true"
+                        data-pb-idx="${blocks.length}"
                         data-qid="${q ? q.id : ''}"
-                        data-qtype="${qType}"
+                        data-qtype="${qType}"${isMultiSubject ? ` data-subject="${sectionSubjectKey}"` : ''}
                         data-sub-index="${subIdx}"
-                        ondragstart="onPaperCanvasDragStart(event, ${q ? q.id : 0}, ${subIdx}, '${qType}')"
+                        ondragstart="onPaperCanvasDragStart(event, ${q ? q.id : 0}, ${subIdx}, '${qType}'${isMultiSubject ? `, '${sectionSubjectKey}'` : ''})"
                         ondragover="onPaperCanvasDragOver(event)"
                         ondragenter="onPaperCanvasDragEnter(event)"
                         ondragleave="onPaperCanvasDragLeave(event)"
@@ -2346,10 +2889,10 @@
                         <!-- Hover Action Bar: Drag Handle & Quick Move/Remove Buttons -->
                         <div class="paper-canvas-toolbar absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-[10px] font-sans select-none z-10">
                             <span class="toolbar-label font-medium mr-0.5"><i class="fa-solid fa-grip-vertical"></i> 按住拖拽排序</span>
-                            <button onclick="event.stopPropagation(); window.movePaperQuestionWithinType('${qType}', ${subIdx}, 'up')" ${subIdx === 0 ? 'disabled' : ''} class="toolbar-btn p-0.5 disabled:opacity-30" title="上移">
+                            <button onclick="event.stopPropagation(); window.movePaperQuestionWithinType('${qType}', ${subIdx}, 'up'${isMultiSubject ? `, '${sectionSubjectKey}'` : ''})" ${subIdx === 0 ? 'disabled' : ''} class="toolbar-btn p-0.5 disabled:opacity-30" title="上移">
                                 <i class="fa-solid fa-chevron-up"></i>
                             </button>
-                            <button onclick="event.stopPropagation(); window.movePaperQuestionWithinType('${qType}', ${subIdx}, 'down')" ${subIdx === items.length - 1 ? 'disabled' : ''} class="toolbar-btn p-0.5 disabled:opacity-30" title="下移">
+                            <button onclick="event.stopPropagation(); window.movePaperQuestionWithinType('${qType}', ${subIdx}, 'down'${isMultiSubject ? `, '${sectionSubjectKey}'` : ''})" ${subIdx === items.length - 1 ? 'disabled' : ''} class="toolbar-btn p-0.5 disabled:opacity-30" title="下移">
                                 <i class="fa-solid fa-chevron-down"></i>
                             </button>
                             <button onclick="event.stopPropagation(); window.removeFromCart(${q ? q.id : 0})" class="toolbar-btn p-0.5 hover:text-rose-500" title="移出试卷">
@@ -2382,6 +2925,23 @@
             });
         });
 
+        // 交给实测重分页循环用的渲染上下文（repaginateA4Preview 读）
+        blocks.forEach((b, i) => { b.idx = i; });
+        paperA4Ctx = { blocks: blocks, meta: meta, totalCount: totalCount, totalScore: totalScore };
+
+        return renderA4SheetsHtml(paginateA4Blocks(blocks), meta, totalCount, totalScore);
+    }
+
+    // A4 预览的渲染上下文：generateA4PaperPagesHtml 写入，repaginateA4Preview 消费。
+    let paperA4Ctx = null;
+
+    // 块高口径：优先用渲染后实测的 offsetHeight，没有（未渲染/首帧）退回字符数估算。
+    // 块间还有 space-y-1.5 的 6px 间距，预算时要一起算。
+    function a4BlockHeight(blk) {
+        return (blk.measuredHeight || blk.estHeight) + 6;
+    }
+
+    function paginateA4Blocks(blocks) {
         // Group blocks into A4 Page cards
         const pages = [];
         let currentPage = [];
@@ -2390,20 +2950,30 @@
         const PAGE_N_MAX = 920; // Height budget for Page 2+
 
         blocks.forEach(blk => {
+            const h = a4BlockHeight(blk);
             const maxH = (pages.length === 0) ? PAGE_1_MAX : PAGE_N_MAX;
-            if (currentH + blk.estHeight > maxH && currentPage.length > 0) {
-                pages.push(currentPage);
-                currentPage = [blk];
-                currentH = blk.estHeight;
+            if (currentH + h > maxH && currentPage.length > 0) {
+                // 混科卷的「第 N 部分」标题不能孤零零落在页末：把页尾连续的标题一起带到下一页。
+                // 单科卷没有 divider 块，这段永不触发，分页结果与改动前一致。
+                const carried = [];
+                while (currentPage.length > 1 && currentPage[currentPage.length - 1].type === 'subject_divider') {
+                    carried.unshift(currentPage.pop());
+                }
+                if (currentPage.length > 0) pages.push(currentPage);
+                currentPage = carried.concat([blk]);
+                currentH = carried.reduce((s, b) => s + a4BlockHeight(b), 0) + h;
             } else {
                 currentPage.push(blk);
-                currentH += blk.estHeight;
+                currentH += h;
             }
         });
         if (currentPage.length > 0) {
             pages.push(currentPage);
         }
+        return pages;
+    }
 
+    function renderA4SheetsHtml(pages, meta, totalCount, totalScore) {
         const totalPages = pages.length;
 
         // Generate A4 Page Sheet DOM Cards
@@ -2415,14 +2985,14 @@
             pagesHtml += `
                 <div class="a4-paper-sheet w-full max-w-[794px] min-h-[1123px] bg-white text-slate-900 px-10 py-12 shadow-2xl rounded-sm border border-slate-300 font-serif leading-relaxed relative overflow-hidden select-none mb-8">
                     ${isFirstPage ? renderA4Header(meta, totalCount, totalScore, totalPages) : ''}
-                    
+
                     <div class="space-y-1.5 text-[13px]">
                         ${pgContent}
                     </div>
 
                     <!-- Page Footer -->
                     <div class="absolute bottom-5 left-0 right-0 text-center text-xs font-serif text-slate-700 tracking-wider">
-                        数学 &nbsp; 第 ${pgIdx + 1} 页 (共 ${totalPages} 页)
+                        ${footerSubjectPrefix(meta)}第 ${pgIdx + 1} 页 (共 ${totalPages} 页)
                     </div>
                 </div>
             `;
@@ -2431,13 +3001,63 @@
         return pagesHtml;
     }
 
+    // 实测重分页：分页最初只能按字符数估算（KaTeX 公式、选项栅格、插图、解答留白的
+    // 真实高度都估不准），渲染完 KaTeX 后逐块量 offsetHeight 回填，再按实测高度重分页；
+    // 分页结果变了就重渲染，直到稳定（有递归上限兜底）。修的是「题目溢出/卡缝、
+    // 页脚和题干撞车」这类估算失真问题——与组卷题卡流的实测回填同一思路。
+    function repaginateA4Preview(maxPasses) {
+        const sheet = document.getElementById('a4PaperPreviewSheet');
+        const ctx = paperA4Ctx;
+        if (!sheet || !ctx || !ctx.blocks.length) return;
+
+        const pagesSig = pages => pages.map(pg => pg.map(b => b.idx).join(',')).join('|');
+        let pages = paginateA4Blocks(ctx.blocks);
+        let sig = pagesSig(pages);
+
+        for (let pass = 0; pass < (maxPasses || 3); pass++) {
+            sheet.innerHTML = renderA4SheetsHtml(pages, ctx.meta, ctx.totalCount, ctx.totalScore);
+            try {
+                window.MathRender.render(sheet, 'display');
+                if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(sheet);
+            } catch (e) { }
+
+            ctx.blocks.forEach(blk => {
+                const el = sheet.querySelector('[data-pb-idx="' + blk.idx + '"]');
+                const measured = el ? el.offsetHeight : 0;
+                if (measured > 0) blk.measuredHeight = measured;
+            });
+
+            const nextPages = paginateA4Blocks(ctx.blocks);
+            const nextSig = pagesSig(nextPages);
+            if (nextSig === sig) return; // 当前 DOM 就是按稳定分页渲染的
+            pages = nextPages;
+            sig = nextSig;
+        }
+
+        // 达到递归上限：至少保证 DOM 与最后一次分页结果一致
+        sheet.innerHTML = renderA4SheetsHtml(pages, ctx.meta, ctx.totalCount, ctx.totalScore);
+        try {
+            window.MathRender.render(sheet, 'display');
+            if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(sheet);
+        } catch (e) { }
+    }
+    window.repaginateA4Preview = repaginateA4Preview;
+
     // Reorder Items strictly within the same Question Type section
-    function reorderItemsWithinType(cart, qType, fromSubIdx, toSubIdx) {
+    function reorderItemsWithinType(cart, qType, fromSubIdx, toSubIdx, subjectKey) {
+        // subjectKey 为空时退化成「只按题型」（单科卷的老口径）；混科卷必须连学科一起匹配，
+        // 否则「数学单选」与「物理单选」会互相串位。
+        const wantedSubject = String(subjectKey || '').toLowerCase();
+        const inSameGroup = (q) => {
+            const t = q ? q.question_type : 'single_choice';
+            if (t !== qType) return false;
+            if (!wantedSubject) return true;
+            return String((q && q.subject) || 'math').toLowerCase() === wantedSubject;
+        };
+
         const itemsOfType = [];
         cart.forEach((item) => {
-            const q = window.PaperStore.questionsMap[item.id];
-            const t = q ? q.question_type : 'single_choice';
-            if (t === qType) {
+            if (inSameGroup(window.PaperStore.questionsMap[item.id])) {
                 itemsOfType.push(item);
             }
         });
@@ -2452,9 +3072,7 @@
         const newCart = [...cart];
         let subIdx = 0;
         cart.forEach((item, idx) => {
-            const q = window.PaperStore.questionsMap[item.id];
-            const t = q ? q.question_type : 'single_choice';
-            if (t === qType) {
+            if (inSameGroup(window.PaperStore.questionsMap[item.id])) {
                 newCart[idx] = itemsOfType[subIdx];
                 subIdx++;
             }
@@ -2464,10 +3082,10 @@
     }
 
     // Move Question Order within same question type
-    window.movePaperQuestionWithinType = function (qType, subIndex, direction) {
+    window.movePaperQuestionWithinType = function (qType, subIndex, direction, subjectKey) {
         const cart = window.PaperStore.cart;
         const targetSubIdx = direction === 'up' ? subIndex - 1 : subIndex + 1;
-        window.PaperStore.cart = reorderItemsWithinType(cart, qType, subIndex, targetSubIdx);
+        window.PaperStore.cart = reorderItemsWithinType(cart, qType, subIndex, targetSubIdx, subjectKey);
         saveCartToStorage();
         renderPart3QuestionStream();
         window.renderPaperCanvas();
@@ -2477,7 +3095,7 @@
     let draggedItemData = null;
     let dragPlaceholder = null;
 
-    window.onPaperCanvasDragStart = function (e, qid, subIndex, qType) {
+    window.onPaperCanvasDragStart = function (e, qid, subIndex, qType, subjectKey) {
         const card = e.currentTarget.closest('.paper-q-item');
         if (!card) return;
 
@@ -2485,6 +3103,7 @@
             qid: parseInt(qid, 10), 
             fromSubIndex: parseInt(subIndex, 10),
             qType: qType,
+            subjectKey: String(subjectKey || ''),
             element: card
         };
 
@@ -2517,10 +3136,12 @@
         const targetCard = e.target.closest('.paper-q-item');
         if (!targetCard || targetCard === draggedItemData.element) return;
 
-        // Strict boundary: check if targetCard belongs to the SAME question type section!
+        // Strict boundary: targetCard must belong to the SAME question type AND the same subject.
+        // 混科卷里「数学单选」与「物理单选」是两段，跨段插入会让题号与部分归属同时错掉。
         const targetQType = targetCard.dataset.qtype;
-        if (targetQType !== draggedItemData.qType) {
-            // Different question type section! Disallow drag placeholder insertion
+        const targetSubject = String(targetCard.dataset.subject || '');
+        if (targetQType !== draggedItemData.qType || targetSubject !== draggedItemData.subjectKey) {
+            // Different section! Disallow drag placeholder insertion
             e.dataTransfer.dropEffect = 'none';
             return;
         }
@@ -2565,20 +3186,22 @@
                 if (child === dragPlaceholder) {
                     break;
                 }
-                if (child.classList && child.classList.contains('paper-q-item') && child !== draggedItemData.element) {
+                if (child.classList && child.classList.contains('paper-q-item') && child !== draggedItemData.element
+                    && child.dataset.qtype === qType && String(child.dataset.subject || '') === subjectKey) {
                     newSubIndex++;
                 }
             }
 
             const fromSubIndex = draggedItemData.fromSubIndex;
             const qType = draggedItemData.qType;
+            const subjectKey = draggedItemData.subjectKey;
             
             if (dragPlaceholder.parentNode) {
                 dragPlaceholder.parentNode.removeChild(dragPlaceholder);
             }
 
             if (fromSubIndex !== newSubIndex && fromSubIndex >= 0 && newSubIndex >= 0) {
-                window.PaperStore.cart = reorderItemsWithinType(window.PaperStore.cart, qType, fromSubIndex, newSubIndex);
+                window.PaperStore.cart = reorderItemsWithinType(window.PaperStore.cart, qType, fromSubIndex, newSubIndex, subjectKey);
 
                 saveCartToStorage();
                 renderPart3QuestionStream();
@@ -2720,7 +3343,9 @@
             const payload = {
                 title: window.PaperStore.meta.title,
                 subtitle: window.PaperStore.meta.subtitle,
-                paper_type: window.PaperStore.meta.paper_type,
+                subject_line: window.PaperStore.meta.subject_line || '',
+                exam_duration: examDurationMinutes(window.PaperStore.meta),
+                paper_type: paperTypeForPayload(),
                 show_notice: window.PaperStore.meta.show_notice !== false,
                 show_secret: window.PaperStore.meta.show_secret !== false,
                 target: target,
@@ -2956,7 +3581,9 @@
             const payload = {
                 title: window.PaperStore.meta.title,
                 subtitle: window.PaperStore.meta.subtitle,
-                paper_type: window.PaperStore.meta.paper_type,
+                subject_line: window.PaperStore.meta.subject_line || '',
+                exam_duration: examDurationMinutes(window.PaperStore.meta),
+                paper_type: paperTypeForPayload(),
                 show_notice: window.PaperStore.meta.show_notice !== false,
                 show_secret: window.PaperStore.meta.show_secret !== false,
                 questions: buildCartQuestionsPayload()
@@ -3044,7 +3671,9 @@
             const payload = {
                 title: window.PaperStore.meta.title,
                 subtitle: window.PaperStore.meta.subtitle,
-                paper_type: window.PaperStore.meta.paper_type,
+                subject_line: window.PaperStore.meta.subject_line || '',
+                exam_duration: examDurationMinutes(window.PaperStore.meta),
+                paper_type: paperTypeForPayload(),
                 show_notice: window.PaperStore.meta.show_notice !== false,
                 show_secret: window.PaperStore.meta.show_secret !== false,
                 questions: cartQuestions
@@ -3104,11 +3733,17 @@
             return;
         }
 
+        window.PaperStore.saveInFlight = true;
+        window.PaperStore.lastSaveError = '';
+        renderPaperSaveStatus();
+
         try {
             const payload = {
                 title: window.PaperStore.meta.title,
                 subtitle: window.PaperStore.meta.subtitle,
-                paper_type: window.PaperStore.meta.paper_type,
+                subject_line: window.PaperStore.meta.subject_line || '',
+                exam_duration: examDurationMinutes(window.PaperStore.meta),
+                paper_type: paperTypeForPayload(),
                 show_notice: window.PaperStore.meta.show_notice !== false,
                 show_secret: window.PaperStore.meta.show_secret !== false,
                 questions: cart
@@ -3122,12 +3757,19 @@
 
             const data = await res.json();
             if (data.status === 'success') {
+                // 保存成功才把当前卷面登记为基准；失败时基准不动，提示条继续报「有改动未保存」
+                markPaperSavedAs();
                 if (window.showToast) window.showToast('试卷已保存到数据库，题目引用次数已自动更新！', 'success');
             } else {
+                window.PaperStore.lastSaveError = data.message || '保存失败';
                 if (window.showToast) window.showToast(data.message || '保存失败', 'error');
             }
         } catch (e) {
+            window.PaperStore.lastSaveError = '保存试卷请求异常';
             if (window.showToast) window.showToast('保存试卷请求异常', 'error');
+        } finally {
+            window.PaperStore.saveInFlight = false;
+            renderPaperSaveStatus();
         }
     };
 
@@ -3278,7 +3920,13 @@
                 // Update metadata
                 window.PaperStore.meta.title = paper.title || '未命名试卷';
                 window.PaperStore.meta.subtitle = paper.subtitle || '';
+                window.PaperStore.meta.subject_line = paper.subject_line || '';
+                window.PaperStore.meta.exam_duration = examDurationMinutes({ exam_duration: paper.exam_duration });
                 window.PaperStore.meta.paper_type = paper.paper_type || 'exam';
+                // 载入归档即已明确学科行，不要再被预填逻辑覆盖成题库当前学科。
+                needsSubjectPrefill = false;
+                // 归档里存的就是用户保存时的学科行，视同手改：自动跟随逻辑退避。
+                window.PaperStore.meta.subject_line_custom = true;
                 window.PaperStore.meta.show_notice = paper.show_notice !== false;
                 window.PaperStore.meta.show_secret = paper.show_secret !== false;
 
@@ -3294,6 +3942,12 @@
                         });
                     });
                 }
+
+                // 载入后的卷面已经进内存，顺手落盘 + 把基准对齐到这份归档：否则刷新会退回
+                // 载入前的旧草稿，提示条还会拿旧草稿去比新基准，报出假的「有改动未保存」。
+                saveMetaToStorage();
+                saveCartToStorage();
+                markPaperSavedAs(paper.created_at || null);
 
                 // Close modal
                 const modal = document.getElementById('savedPapersModal');
@@ -3563,7 +4217,7 @@
     function formatQuestionContentHtml(raw, qid = null, figAlign = 'right', embedInSolSpace = false, showControls = true) {
         if (!raw) return embedInSolSpace ? { stemHtml: '', imgHtml: null } : '';
         let html = String(raw).trim();
-        figAlign = figAlign || 'right';
+        figAlign = figAlign || 'center'; // 默认居中（与 getQuestionFigAlign 同口径）
 
         if (typeof window.cleanChoiceStemParentheses === 'function' && (html.includes('choices') || html.match(/^\s*[-*]?\s*[A-D][\.、\s]/m))) {
             if (html.includes('\\begin{choices}')) {
@@ -3686,6 +4340,7 @@
     document.addEventListener('DOMContentLoaded', function () {
         loadStateFromStorage();
         updateCartBadges();
+        renderPaperSaveStatus();
 
         // Restore active workspace if same server instance run (page refresh / tab re-open)
         const currentServerId = window.__serverInstanceId || '';
