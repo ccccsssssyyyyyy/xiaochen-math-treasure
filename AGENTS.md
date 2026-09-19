@@ -20,10 +20,10 @@
 ## 2. 核心技术栈
 本项目追求极简配置与极致体验，严格遵循以下技术选型，**不要引入复杂的现代前端构建工具（如 Webpack/Vite/Node.js 生态）**：
 - **后端**：Python + FastAPI。
-- **后端渐进式模块架构**：根目录 `main.py` 继续作为 `uvicorn main:app` 兼容入口；后端领域能力统一集中在 `mathbank/`。`database.py` 提供 SQLite ORM 与 Session，`db_migrations.py` 提供版本化、备份优先的数据库迁移，`backup.py` 提供带清单校验的完整备份与恢复，`asset_security.py` 统一校验上传内容与本地资产路径，`task_manager.py` 提供有界异步任务、协作取消与临时资源生命周期，`health.py` 提供启动就绪诊断，`paper_helper.py` 提供 LaTeX/PDF 编译排版，`sync_helper.py` 只负责 JSON 同步导出与 AI 题库导出，`paths.py` 统一锚定持久化与捆绑路径。`curriculums.py` 加载四套教材 JSON，`prompts.py` 提供纯提示构建器，`ai_providers.py`、`ai_http.py`、`ai_json.py` 分别统一模型供应商解析、AI HTTP 请求与结构化输出解析。运维、迁移、检索与 Release 工具统一位于 `scripts/`，从项目根目录使用 `python3 -m scripts.<模块名>` 运行。严禁重新在根目录新增业务模块或复制供应商判断规则。
+- **后端渐进式模块架构**：根目录 `main.py` 继续作为 `uvicorn main:app` 兼容入口；后端领域能力统一集中在 `mathbank/`。`database.py` 提供 SQLite ORM 与 Session，`db_migrations.py` 提供版本化、备份优先的数据库迁移，`backup.py` 提供带清单校验的完整备份与恢复，`asset_security.py` 统一校验上传内容与本地资产路径，`task_manager.py` 提供有界异步任务、协作取消与临时资源生命周期，`health.py` 提供启动就绪诊断，`paper_helper.py` 提供 LaTeX/PDF 编译排版，`sync_helper.py` 只负责 JSON 同步导出与 AI 题库导出，`paths.py` 统一锚定持久化与捆绑路径，`page_block_split.py` 提供扫描页离线切块（行投影 + 分栏判定），`mistake_handout.py` 提供错题本 LaTeX 模板与编译入口，`mistake_vocabulary.py` 负责错因词表加载与归一，`duplicate_check.py` 是入库查重的唯一权威实现（阈值与预筛只允许在这一处定义）。`curriculums.py` 加载四套数学教材 JSON 与物化只读大纲，`prompts.py` 提供纯提示构建器，`ai_providers.py`、`ai_http.py`、`ai_json.py` 分别统一模型供应商解析、AI HTTP 请求与结构化输出解析。运维、迁移、检索与 Release 工具统一位于 `scripts/`，从项目根目录使用 `python3 -m scripts.<模块名>` 运行。严禁重新在根目录新增业务模块或复制供应商判断规则。
 - **数据库**：SQLite + SQLAlchemy（轻量级，数据存储在本地 `.db` 文件中）。
 - **前端页面**：纯 HTML + 原生 JavaScript。
-- **前端脚本拆分**：前端 JS 采用无编译的“渐进式级联加载”架构，按 `api.js`、`editor.js`、`ocr.js`、`import.js`、`paper.js`、`onboarding.js` 的顺序级联加载；前四个模块负责 API/全局状态、编辑与渲染、OCR 图像交互、导入拆卷，`paper.js` 负责组卷工作台，`onboarding.js` 负责首次启动引导、依赖引导与升级向导（函数显式挂 `window`，供 HTML onclick 调用）。加载顺序严格依存，不允许产生任何编译及捆绑动作。
+- **前端脚本拆分**：前端 JS 采用无编译的“渐进式级联加载”架构，按 `math-render.js`、`api.js`、`editor.js`、`ocr.js`、`import.js`、`paper.js`、`mistake.js`、`onboarding.js`、`backup.js` 的顺序级联加载，**以 `static/index.html` 末尾的 `<script>` 顺序为唯一事实来源**。职责：`math-render.js` 是全站唯一 KaTeX 渲染入口（`delimiters` 配置只允许在此定义，禁止其它模块重复内联），`api.js` 负责 API/全局状态，`editor.js` 编辑与渲染，`ocr.js` OCR 图像交互，`import.js` 导入拆卷，`paper.js` 组卷工作台，`mistake.js` 错题工作台，`onboarding.js` 首次启动引导、依赖引导与升级向导，`backup.js` 设置页的备份与还原（函数显式挂 `window`，供 HTML onclick 调用）。加载顺序严格依存，不允许产生任何编译及捆绑动作。
 - **前端样式与字体**：Tailwind CSS + FontAwesome 图标库 + Inter/Outfit 字体包（均已下载至本地 `/static/lib` 支持 100% 离线使用与跨平台系统降级）。
 - **公式渲染**：KaTeX（已下载至本地支持 100% 离线数学公式渲染），必须支持题干与解析框实时解析、秒级渲染。
 - **中转站模型 7:3 弹性 UI 布局与 Reasoning Effort 自动解析**：在系统 API 设置中选择中转站平台（`zhongzhan_gpt` 或 `zhongzhan_claude`）时，模型输入区域自动转换为 7:3 弹性比例（70% 模型名称，30% 推理强度）。后端由 `mathbank.ai_providers.parse_model_and_effort` 自动提取纯净模型名称并注入请求参数。
@@ -71,14 +71,16 @@
   - 快捷切换人教 A 版、人教 B 版、苏教版、沪教版标准大纲预设（`mathbank/resources/curriculums/`）。
   - **活跃-镜像模式 (`question_curriculums`)**：存放题目在每套大纲中的分类镜像。主表字段反映当前活跃配置，切换大纲时后台自动运行增量迁移。
   - **小节隔离自愈**：校验并清洗非法跨版小节，防止分类下拉菜单发生混排污染。
-- **全局试题序号同步 (#seq_num)**：
-  - 题库卡片与 Toast 交互统一采用 SQLite 物理升序计算的纯净序号 `seq_num`（1 ~ N）展示。
+- **三科题库（数学 / 物理 / 化学）**：`questions.subject` 于 v1008 引入，空值 / 未知学科一律归数学（与 `normalize_subject` 同口径）。题库侧栏只有这三个页签，**刻意不设「全部」**（混科点选容易选错题）。物化教材目录是 `mathbank/resources/curriculums/PJK.json`（教科版物理）/ `CRJ.json`（人教版化学）只读资源，禁止被数学大纲覆盖写入。
+- **试题序号（#seq_num，按科目独立）**：
+  - 题库卡片与 Toast 交互统一采用 `seq_num` 展示，该序号**按科目各自从 #1 起**：`main.py` 的 `get_seq_mapping()` 在 SQL 里按 `(科目键, id)` 分组计数，科目键 = `lower(trim(coalesce(subject,''))) in SUBJECT_ORDER` 否则归 `math`。因此数学 #1 与物理 #1 会同时存在，靠科目标签区分。
+  - `seq_num` **不是数据库列、不落库**，是每次查询动态算出来的展示编号；唯一主键是 `id`，所有外键一律用 `id`。副作用：删除某科题目后，该科后续编号会前移（位置型编号的固有性质）。回归用例见 `tests/test_question_seq_per_subject.py`。
   - **编辑会话状态 (`EditorState`)**：`api.js` 的 `EditorState` 是当前题目 ID、序号、草稿 ID 与编辑模式的唯一状态来源，禁止引入平行全局变量。
 - **草稿箱与未保存决策流**：
   - 草稿统一存放在 LocalStorage 键 `mathbank_local_drafts`。离开未保存 Dirty 页面时提供“存入本地库/暂存草稿/离开/返回”决策流，入库后自动从草稿箱移除。
 - **题库列表分页契约**：`GET /api/questions` 不传 `page` 时保留历史数组响应；传入 `page` 后返回 `{items,total,page,page_size,total_pages}`，`page_size` 限制为 1–100，`sort` 仅支持 `asc` / `desc` 语义。侧栏必须使用分页响应，并以 `AbortController` 和请求序号保证最后一次请求胜出。
 - **数据库一致性与迁移**：SQLite 连接必须启用外键、`busy_timeout` 与经验证的 WAL；当前结构版本写入 `PRAGMA user_version`。任何结构迁移必须先生成独立、通过完整性检查且带 SHA-256 的快照，再在单事务中修复并迁移；未来版本数据库必须在任何建表、加列或建索引前拒绝启动。题目及关系写入应以一次数据库事务为成功边界，文件清理和 JSON 同步属于提交后的补偿操作，不得把已提交写入误报为失败。
-- **Fork 版本线偏移（v4 → v1004）**：本 fork 的 ``LATEST_SCHEMA_VERSION`` 偏移到 ``1000 + 上游版本号``（当前 ``1004``）以避免与上游 `JudgePeach/math-question-bank` 数据库互换时的版本号冲突。fork 库看到上游 ``v8`` 库会走到 ``raise RuntimeError("未实现从版本 8 到 1004 的迁移")``（明确报错，不会静默损坏数据）；fork 库看到 ``v1008+`` 库会走到 ``raise RuntimeError("数据库版本高于程序支持版本")``。下次新增迁移须在 ``elif current == 1004`` 处续接，版本号继续 ``+1``。
+- **Fork 版本线偏移（v4 → v1004，当前 1010）**：本 fork 的 ``LATEST_SCHEMA_VERSION`` 偏移到 ``1000 + 上游版本号``（上游 v4 起跳号到 ``1004``）以避免与上游 `JudgePeach/math-question-bank` 数据库互换时的版本号冲突；此后按 fork 自己的节奏推进，**当前为 ``1010``**：``1005`` 错题三表 → ``1006`` 分栏列 → ``1007`` 人工合并列 → ``1008`` 题目学科 / 来源列 → ``1009`` 块图 URL 版本号清洗 → ``1010`` 错题分类列。fork 库看到上游 ``v8`` 库会走到 ``raise RuntimeError("未实现从版本 8 到 1010 的迁移")``（明确报错，不会静默损坏数据）；fork 库看到高于 ``1010`` 的库会走到 ``raise RuntimeError("数据库版本高于程序支持版本")``。下次新增迁移须在 ``elif current == 1010`` 处续接，版本号继续 ``+1``，并同步抬高 ``LATEST_SCHEMA_VERSION``。
 
 ### 3.2 解答与解析模块
 - **多途径解析汇总**：解答区包含手动输入、AI 智能生成（关联 OCR 上下文与引导指令）、OCR 识图、教师点评 (`review`) 与自定义标签 (`tags`) 5 个 Tab，统一汇总至编辑框。
@@ -163,6 +165,19 @@
 ### 3.13 版本检测系统
 - 后端接口 `GET /api/version/check-update` 异步拉取 GitHub Releases，比对语义化版本号。
 - 前端启动 1 秒静默检测，有新版本时设置齿轮亮起红点；提供专属【版本更新】控制台与版本忽略功能。
+
+### 3.14 错题工作台（第三工作台）
+
+独立于题库 / 组卷的第三条链路：扫描卷 → 切块 → 点选错题 → 只识别错题 → 错题本 / 入库。需求与设计见 `docs/错题扫描与错题本-实施计划-2026-09-13.md`。
+
+- **前端入口**：`static/js/mistake.js`；工作台切换由顶部三段式 tab 控制（题库 / 组卷 / 错题）。
+- **离线切块**：`mathbank/page_block_split.py` 纯确定性切块（行投影 + 墨迹行带锚定），零 token。分栏判定取 PDF 文本层的行 x 分布，单栏 / 双栏自动识别；人工可强制改栏，改后来源标 `manual`。切分点**必须锚定墨迹行带，禁止退化为「取最近候选」**——退一步就会把上一题的选项框进新块。
+- **合并与重切**：页内合并 `POST /api/mistakes/batches/{id}/pages/{page}/merges`，跨页合并 `.../cross-merges`；合并后可按左右或上下重新切分。重切后作答状态按**矩形重叠**继承，禁止按索引继承（跨栏会串状态）。
+- **识别范围**：只有标记为「错」的题才进入识别，避免整卷烧 token。
+- **解析门禁**：AI 生成的解析必须人工核对过才允许进错题本 PDF——错误解析会直接误导学生。
+- **入库**：`POST /api/mistakes/.../import-to-bank`，判重必须复用 `mathbank/duplicate_check.py`。一期只把**数学**错题写进题库。
+- **错题本导出**：`mathbank/mistake_handout.py` 走独立 `ctexart` 版式，与组卷的 `exam-zh` **共用清理与编译能力、不共用模板**。
+- **两个已知陷阱**：①块图 URL 曾被写入 `?v=<mtime_ns>`，导致切好的批次永远识别不了（v1009 已清洗）；②后端原地覆盖同名块图时浏览器会复用旧位图，前端必须走 URL 版本化，否则用户看到的是上一版图。
 
 ## 4. 外部 API 接入规范
 - **密钥与鉴权**：读取 `.env` 密钥，修改类接口必须携带 `X-Local-Token` 头部。

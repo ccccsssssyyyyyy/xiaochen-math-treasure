@@ -7,7 +7,16 @@ import zipfile
 
 import pytest
 
-DOCX_FIXTURE = "/Users/ccsssy/Desktop/成都七中试卷/高一/上学期/2024-2025学年四川省成都七中高一（上）期中数学试卷.docx"
+#: 含 MathType OLE 公式的样本 docx。默认从家目录取，可用环境变量
+#: MATHBANK_MATHTYPE_FIXTURE 覆盖；文件不存在时相关用例自动跳过（CI 上即跳过）。
+DOCX_FIXTURE = os.environ.get(
+    "MATHBANK_MATHTYPE_FIXTURE",
+    os.path.join(
+        os.path.expanduser("~"),
+        "Desktop", "成都七中试卷", "高一", "上学期",
+        "2024-2025学年四川省成都七中高一（上）期中数学试卷.docx",
+    ),
+)
 
 
 @pytest.mark.skipif(not os.path.exists(DOCX_FIXTURE), reason="需要本地成都七中试卷 docx")

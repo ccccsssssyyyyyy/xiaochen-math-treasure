@@ -99,6 +99,10 @@ tests/artifacts/*
 cleanup_star_garble.py
 cleanup_report.txt
 
+# 13.1 忽略改造前留的隐藏快照目录（形如 .mergepick-backup-20260917/ 等，
+#      每轮 UI 改造前留一份原件，仅本地排查用，累计约 6MB，绝不入库）
+.*-backup-*/
+
 # 14. 忽略批量分类脚本产出的审阅清单（调试/对账用，不入库）
 classify_uncategorized_report.csv
 classify_uncategorized_ai_report.csv
