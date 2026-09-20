@@ -97,6 +97,37 @@ def _safe_json_list(value):
         return []
 
 
+def _redo_state_dict(question) -> dict:
+    """错题重做闭环的状态快照（题库/错题台/组卷三处共用同一份口径）。
+
+    收在一个 ``redo`` 子对象里下发：这些字段只对「曾是错题、进了重做池」的题
+    有意义，平铺到顶层会让题库列表的每一行都拖着一串 0/None，也会和 `usage_count`
+    这类真正的题库字段混在一起看不出来源。
+
+    ``mastery_override`` 单独下发（而不是只在落库时用）—— 前端要靠它把「老师手动
+    标的已掌握」与「系统跨日连对 2 次判出来的已掌握」区分开，并决定按钮显示
+    「标为已掌握」还是「取消掌握」。
+    """
+
+    return {
+        "correct_answer": question.correct_answer or "",
+        "wrong_count": int(question.wrong_count or 0),
+        "redo_count": int(question.redo_count or 0),
+        "redo_correct_streak": int(question.redo_correct_streak or 0),
+        "mastery_status": question.mastery_status or "pending",
+        "next_redo_due": question.next_redo_due.isoformat() if question.next_redo_due else None,
+        "last_redo_at": (
+            question.last_redo_at.isoformat() + "Z" if question.last_redo_at else None
+        ),
+        "mastery_override": question.mastery_override or "",
+        "mastery_override_at": (
+            question.mastery_override_at.isoformat() + "Z"
+            if question.mastery_override_at
+            else None
+        ),
+    }
+
+
 def normalize_question_content(content: str) -> str:
     """将题干归一化为查重指纹：去题号前缀、去所有空白、简化 LaTeX 等价差异。
 
@@ -150,6 +181,30 @@ class Question(Base):
     solve_method = Column(Text, default="")  # 解题方法多标签 (逗号分隔，AI 自动打标 + 手动修正)
     related_curriculums = Column(Text, default="[]")  # 关联章节(JSON数组: [{compulsory,chapter,knowledge}])，融合题多章节归属
     usage_count = Column(Integer, default=0, index=True)  # 组卷引用次数
+    # ---- 错题重做闭环（迁移 v1011）----
+    # 单选/多选的正确定盘字母（多选如 "AC"）。打乱选项后重映射答案键的依据；
+    # 为空表示未采集到（存量题），此时选项变换降级为「原样」。
+    correct_answer = Column(String(10), default="")
+    # 这道题累计做错次数：首次成为错题记 1，之后每次重做判错再 +1。
+    wrong_count = Column(Integer, default=0, index=True)
+    # 被排进重做卷的累计次数（决定导出时用哪一档选项变换）。
+    redo_count = Column(Integer, default=0)
+    # 连续做对次数（判错归零）。要求「跨日」——同一天内连做两遍不算。
+    redo_correct_streak = Column(Integer, default=0)
+    # pending（未掌握）/ redone（重做对过、尚未稳）/ mastered（跨日连对 2 次）
+    mastery_status = Column(String(20), default="pending", index=True)
+    # 建议下次重做日；已掌握为 NULL。所有非周末的日期都顺延到下一个周六。
+    next_redo_due = Column(Date, nullable=True, index=True)
+    # 最近一次重做录入时间，用于「跨日」判定
+    last_redo_at = Column(DateTime, nullable=True)
+    # 人工标注掌握度：'mastered' 或 ''（空 = 无人工标注）。
+    # 掌握度仍由 redo_attempts 重放推导，本列只是按 mastery_override_at 的时间戳
+    # 插进那条重放序列的一条事件 —— 所以之后更晚的录入能重新接管状态。
+    # 不写进 redo_attempts 是因为 redo_count = len(attempts)，插一行会把选项变换
+    # 档位（第 3 遍起剥选项）整体往后推一遍。
+    mastery_override = Column(String(20), default="")
+    # 标注时刻，决定它在重放序列里的位置
+    mastery_override_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow_naive)
 
     @property
@@ -191,6 +246,7 @@ class Question(Base):
             "solve_method": self.solve_method or "",
             "related_curriculums": _safe_json_list(self.related_curriculums),
             "usage_count": self.usage_count or 0,
+            "redo": _redo_state_dict(self),
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
 
@@ -216,6 +272,7 @@ class Question(Base):
             "solve_method": self.solve_method or "",
             "related_curriculums": _safe_json_list(self.related_curriculums),
             "usage_count": self.usage_count or 0,
+            "redo": _redo_state_dict(self),
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None
         }
 
@@ -542,6 +599,55 @@ class MistakeRecord(Base):
             "snapshot_source": self.snapshot_source or "",
             "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
             "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }
+
+
+class RedoAttempt(Base):
+    """一次「错题重做」中，单道题的作答结果记录。
+
+    每重做一次、每道题落一行 —— 这是掌握度计算的**事实来源**：
+    ``questions.wrong_count`` / ``redo_correct_streak`` / ``mastery_status`` /
+    ``next_redo_due`` 都由本表的历史推导（或在写入时同步回写），不靠人工维护。
+
+    ``option_mode`` 记录该次导出时对该题施加的选项变换（原顺序 / 打乱 /
+    不提供选项），便于复盘「这次做对是不是因为记住了选项位置」。
+    """
+
+    __tablename__ = "redo_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, nullable=True, index=True)
+    paper_id = Column(
+        Integer,
+        ForeignKey("papers.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    question_id = Column(
+        Integer,
+        ForeignKey("questions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    attempt_no = Column(Integer, default=1)  # 该题第几次重做（1 起）
+    result = Column(String(20), default="incorrect", index=True)  # correct / incorrect
+    option_mode = Column(String(20), default="plain")  # plain / shuffled / no_option
+    subject = Column(String(50), default="math")  # 冗余，便于分科聚合
+    attempted_at = Column(DateTime, default=_utcnow_naive)  # 录入时间（跨日判定依据）
+    created_at = Column(DateTime, default=_utcnow_naive)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "student_id": self.student_id,
+            "paper_id": self.paper_id,
+            "question_id": self.question_id,
+            "attempt_no": self.attempt_no or 1,
+            "result": self.result or "incorrect",
+            "option_mode": self.option_mode or "plain",
+            "subject": self.subject or "math",
+            "attempted_at": (self.attempted_at.isoformat() + "Z") if self.attempted_at else None,
+            "created_at": (self.created_at.isoformat() + "Z") if self.created_at else None,
         }
 
 

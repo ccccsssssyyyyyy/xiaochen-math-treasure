@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from mathbank import db_migrations
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INDEX_HTML = PROJECT_ROOT / "static" / "index.html"
 MISTAKE_JS = PROJECT_ROOT / "static" / "js" / "mistake.js"
@@ -97,9 +99,12 @@ def test_recognize_image_path_tolerates_legacy_dirty_rows(main_source):
 def test_v1009_migration_cleans_block_urls(migrations_source):
     """已有批次要能被洗干净，否则修完新代码它们依旧识别不了。"""
 
-    # 版本号随 v1010（审校页分类信息补列）继续上推 —— 这条断言只保证「v1009 仍在版本链上」，
-    # 硬编 1009 会在每次新增迁移时误红。
-    assert "LATEST_SCHEMA_VERSION = 1010" in migrations_source
+    # 版本号随迁移链继续上推 —— 这条断言只保证「v1009 仍在版本链上」，
+    # 硬编具体数字会在每次新增迁移时误红（1009 → 1010 红过一轮，1010 → 1012 又红一轮）。
+    assert (
+        f"LATEST_SCHEMA_VERSION = {db_migrations.LATEST_SCHEMA_VERSION}"
+        in migrations_source
+    )
     assert "def _strip_block_url_version_v1009(" in migrations_source
     assert "elif current == 1008:" in migrations_source
     assert "elif current == 1009:" in migrations_source, "v1009 → v1010 的步骤必须挂上，否则新库停在 1009"

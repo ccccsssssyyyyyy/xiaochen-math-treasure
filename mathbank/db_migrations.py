@@ -19,7 +19,7 @@ from sqlalchemy.engine import Engine
 from mathbank.paths import SCHEMA_SNAPSHOT_DIR
 
 
-LATEST_SCHEMA_VERSION = 1010
+LATEST_SCHEMA_VERSION = 1012
 REQUIRED_TABLES = {"questions", "question_curriculums", "papers", "paper_questions"}
 
 
@@ -606,6 +606,127 @@ def _add_mistake_classification_columns_v1010(engine: Engine) -> dict[str, int]:
     return {"added_mistake_classification_columns": added}
 
 
+def _add_redo_tables_and_question_columns_v1011(engine: Engine) -> dict[str, int]:
+    """v1011：错题重做闭环 —— 新增 ``redo_attempts`` 表 + ``questions`` 七列。
+
+    背景：错题工作台此前只做到「错题进题库 / 出这次错题本」，没有「重做 → 录入
+    二遍结果 → 跟踪掌握度」的闭环。本步骤给数据层补上落脚点：
+
+    - 新表 ``redo_attempts``：每次重做、每道题一行（掌握度计算的事实来源）；
+    - ``questions`` 新增七列：``correct_answer``（选项打乱后重映射答案键的依据）、
+      ``wrong_count`` / ``redo_count`` / ``redo_correct_streak`` /
+      ``mastery_status`` / ``next_redo_due`` / ``last_redo_at``。
+
+    建表走 ORM 的 ``Base.metadata.create_all``（``checkfirst=True``），与 v1005
+    一致，保证迁移建出的结构与 ``mathbank.database`` 的模型定义永不漂移；加列走
+    ``ALTER TABLE``，**只加列、不回填** —— 默认值（0 / '' / NULL）恰好等于
+    「从未重做过」的语义。幂等可重跑。
+    """
+
+    from mathbank.database import Base  # 延迟导入：database 模块反向依赖本模块
+
+    before = set(inspect(engine).get_table_names())
+    Base.metadata.create_all(bind=engine)
+    created = sorted(set(inspect(engine).get_table_names()) - before)
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    added = 0
+    additions = {
+        "correct_answer": "VARCHAR(10) DEFAULT ''",
+        "wrong_count": "INTEGER DEFAULT 0",
+        "redo_count": "INTEGER DEFAULT 0",
+        "redo_correct_streak": "INTEGER DEFAULT 0",
+        "mastery_status": "VARCHAR(20) DEFAULT 'pending'",
+        "next_redo_due": "DATE",
+        "last_redo_at": "DATETIME",
+    }
+    with engine.begin() as connection:
+        if "questions" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("questions")}
+            for name, ddl in additions.items():
+                if name in existing:
+                    continue
+                connection.exec_driver_sql(
+                    f"ALTER TABLE questions ADD COLUMN {name} {ddl}"
+                )
+                added += 1
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_questions_mastery_status "
+                "ON questions (mastery_status)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_questions_next_redo_due "
+                "ON questions (next_redo_due)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_questions_wrong_count "
+                "ON questions (wrong_count)"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_redo_attempts_question "
+            "ON redo_attempts (question_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_redo_attempts_paper "
+            "ON redo_attempts (paper_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_redo_attempts_student_result "
+            "ON redo_attempts (student_id, result)"
+        )
+        connection.exec_driver_sql("PRAGMA user_version=1011")
+
+    return {
+        "created_redo_tables": len(created),
+        "added_question_redo_columns": added,
+    }
+
+
+def _add_mastery_override_columns_v1012(engine: Engine) -> dict[str, int]:
+    """v1012：``questions`` 补「人工标注掌握度」两列。
+
+    背景：掌握度由 ``redo_attempts`` 重放推导（跨日连对 2 次 → 已掌握），但老师
+    有时需要自己说了算 —— 比如「这道题她口头讲对了」「这题其实不难，不用再排」。
+    于是加一个人工覆盖通道。
+
+    - ``mastery_override``：``'mastered'`` 或空串（空 = 无人工标注）；
+    - ``mastery_override_at``：标注时刻，**决定它在重放序列里的位置**。
+
+    为什么不用「往 ``redo_attempts`` 插一行」来实现：``redo_count`` 是
+    ``len(attempts)``，而 ``_redo_attempt_no = redo_count + 1`` 决定导出时的选项
+    变换档位（第 3 遍起剥选项）。插一行会把每道被标注的题往后推一遍，第 3 遍的
+    「无选项」档直接错位成第 4 遍 —— 而这是印在纸面上的，学生拿着卷子就发现不对。
+
+    语义是**事件归并**：人工标注当作历史里的一条按时间戳插入的事件，与
+    ``redo_attempts`` 一起排序重放。因此之后更晚的录入能重新接管状态（又做错了
+    就回到未掌握），而补录一张旧卷（录入日期早于标注时刻）不会误推翻标注。
+
+    只加列、不回填：空串 / NULL 恰好等于「从未人工标注过」。幂等可重跑。
+    """
+
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    added = 0
+    additions = {
+        "mastery_override": "VARCHAR(20) DEFAULT ''",
+        "mastery_override_at": "DATETIME",
+    }
+    with engine.begin() as connection:
+        if "questions" in table_names:
+            existing = {column["name"] for column in inspector.get_columns("questions")}
+            for name, ddl in additions.items():
+                if name in existing:
+                    continue
+                connection.exec_driver_sql(
+                    f"ALTER TABLE questions ADD COLUMN {name} {ddl}"
+                )
+                added += 1
+        connection.exec_driver_sql("PRAGMA user_version=1012")
+
+    return {"added_question_mastery_override_columns": added}
+
+
 def migrate_database(
     engine: Engine,
     *,
@@ -683,6 +804,19 @@ def migrate_database(
             # 只加列、不回填 —— 见 _add_mistake_classification_columns_v1010 函数文档。
             step_stats = _add_mistake_classification_columns_v1010(engine)
             current = 1010
+        elif current == 1010:
+            # v1011：错题重做闭环 —— 新增 redo_attempts 表 + questions 七列
+            # （correct_answer / wrong_count / redo_count / redo_correct_streak /
+            # mastery_status / next_redo_due / last_redo_at）。只建表加列、不回填
+            # —— 见 _add_redo_tables_and_question_columns_v1011 函数文档。
+            step_stats = _add_redo_tables_and_question_columns_v1011(engine)
+            current = 1011
+        elif current == 1011:
+            # v1012：questions 补「人工标注掌握度」两列（mastery_override /
+            # mastery_override_at）。掌握度仍由重放推导，人工标注只是按时间戳插进
+            # 历史的一条事件 —— 见 _add_mastery_override_columns_v1012 函数文档。
+            step_stats = _add_mastery_override_columns_v1012(engine)
+            current = 1012
         else:
             raise RuntimeError(
                 f"未实现从版本 {current} 到 {LATEST_SCHEMA_VERSION} 的迁移，"

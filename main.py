@@ -7,6 +7,7 @@ import uuid
 import json
 import time
 import re
+import random
 import signal
 import datetime
 import threading
@@ -39,6 +40,7 @@ from mathbank.database import (
     QuestionCurriculum,
     Paper,
     PaperQuestion,
+    RedoAttempt,
     Student,
     engine,
     get_db,
@@ -48,6 +50,11 @@ from mathbank.database import (
 from mathbank.duplicate_check import (
     duplicate_warning_payload,
     find_duplicate_question,
+)
+from mathbank import redo_schedule
+from mathbank.choice_transform import (
+    apply_choice_transform,
+    extract_correct_answer,
 )
 
 # 查重指纹的唯一权威实现位于 mathbank.database，此处仅保留兼容性别名
@@ -666,7 +673,7 @@ def read_index():
         # Inject dynamic cache-busting version parameter based on file mtime
         # 新增 JS 文件时必须同步登记，否则它的 ?v= 永远停在源码里的占位值，
         # 浏览器会一直用缓存，后续修复推不到用户手里（有测试钉住这一点）。
-        js_files = ["math-render.js", "api.js", "editor.js", "ocr.js", "import.js", "paper.js", "mistake.js", "onboarding.js", "backup.js"]
+        js_files = ["math-render.js", "api.js", "editor.js", "ocr.js", "import.js", "paper.js", "mistake.js", "redo.js", "onboarding.js", "backup.js"]
         for js in js_files:
             js_path = str(STATIC_JS_DIR / js)
             mtime = int(os.path.getmtime(js_path)) if os.path.exists(js_path) else 0
@@ -2451,6 +2458,8 @@ def list_questions(
     source: str = None,
     subject: str = None,
     origin: str = None,
+    mastery: str = None,
+    wrong_only: bool = False,
     page: Optional[int] = None,
     page_size: int = 20,
     sort: str = "desc",
@@ -2562,6 +2571,23 @@ def list_questions(
     # 渠道（bank / mistake）用于「只看错题」这类筛选。
     if origin:
         query = query.filter(Question.origin == str(origin).strip())
+    # 重做闭环筛选：mastery 取 pending / redone / mastered，另支持 not_mastered（含 NULL）；
+    # wrong_only 只看进过重做池的题（wrong_count > 0）。两者都可以和上面的条件叠加。
+    if wrong_only:
+        query = query.filter(Question.wrong_count > 0)
+    if mastery:
+        mastery_val = str(mastery).strip()
+        if mastery_val == "not_mastered":
+            query = query.filter(
+                or_(
+                    Question.mastery_status.is_(None),
+                    Question.mastery_status != redo_schedule.MASTERED,
+                )
+            )
+        elif mastery_val in redo_schedule.MASTERY_VALUES:
+            query = query.filter(Question.mastery_status == mastery_val)
+        else:
+            raise HTTPException(status_code=400, detail="掌握度筛选值不合法。")
         
     order_columns = (
         (Question.created_at.asc(), Question.id.asc())
@@ -3153,6 +3179,7 @@ def create_question(
             difficulty=difficulty,
             source=source,
             answer_markdown=answer_markdown,
+            correct_answer=_extract_mcq_answer(question_type, answer_markdown),
             review=review,
             tikz_code=tikz_code,
             figure_align=figure_align if figure_align in ["right", "center", "bottom_right"] else "right",
@@ -3290,6 +3317,7 @@ def update_question(
         db_question.difficulty = difficulty
         db_question.source = source
         db_question.answer_markdown = answer_markdown
+        db_question.correct_answer = _extract_mcq_answer(question_type, answer_markdown)
         db_question.review = review
         db_question.tikz_code = tikz_code
         db_question.knowledge_list = norm_knowledge_list
@@ -7442,6 +7470,51 @@ def delete_paper_template(template_id: int, db: Session = Depends(get_db)):
         db.rollback()
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
+def _paper_metadata(paper) -> dict:
+    """安全解析 ``papers.metadata_json``（坏数据一律当空对象）。"""
+
+    try:
+        parsed = json.loads(paper.metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_redo_paper(paper) -> bool:
+    """该卷是否是「错题重做卷」。
+
+    重做卷复用 ``papers`` 表与同一套排版管线（不另造一张表），靠 metadata 上的
+    ``is_redo`` 与组卷历史区分：重做卷不该出现在组卷台的「历史试卷」里，
+    也不该计入题目的 ``usage_count``（它不算组卷引用）。
+    """
+
+    return bool(_paper_metadata(paper).get("is_redo"))
+
+
+def _redo_order_locked(paper) -> bool:
+    """该卷是否锁定「原序」呈现（= 从组卷台认领进来的那张卷）。
+
+    组卷台那张卷是**先印出来、学生做完之后**才被认领进重做闭环的。它印在纸上的
+    就是原序，认领后若还按重做遍数去打乱选项 / 剥掉选项，老师对着手上那张纸卷录
+    对错时就会点错题。
+
+    注意它**只管呈现**：记账档位仍走 ``_redo_attempt_no`` 的真实历史（见
+    ``_redo_transform``），否则跨日连对计数会虚高。
+    """
+
+    return bool(_paper_metadata(paper).get("redo_locked_order"))
+
+
+def _redo_adopted_from_paper(paper) -> bool:
+    """该卷是不是「组卷台出的卷被认领进重做闭环」，而不是错题台生成的重做卷。
+
+    区分它们是为了**删除语义**：错题台生成的重做卷删掉就没了；认领卷删掉只能是
+    「取消认领」（卷子回到组卷历史），绝不能把老师排过、印过的那份卷连题一起删。
+    """
+
+    return _paper_metadata(paper).get("redo_adopted_from") == "paper"
+
+
 @app.post("/api/paper/save")
 def save_paper(payload: dict, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """保存排版好的试卷，自增被选中题目的 usage_count"""
@@ -7535,7 +7608,7 @@ def save_paper(payload: dict, background_tasks: BackgroundTasks, db: Session = D
 
 @app.get("/api/papers")
 def list_papers(db: Session = Depends(get_db)):
-    """获取所有历史试卷列表"""
+    """获取所有历史试卷列表（**含**重做卷，靠 ``is_redo`` 区分展示）"""
     try:
         from sqlalchemy import func
 
@@ -7550,6 +7623,11 @@ def list_papers(db: Session = Depends(get_db)):
         for p, q_count in rows:
             d = p.to_dict()
             d["question_count"] = int(q_count)
+            # 重做卷也列出来（打标签区分）而不是藏起来：认领进来的那张卷就是老师
+            # 自己排的、印给学生做过的那一份，让它从历史里凭空消失比多一行更费解。
+            d["is_redo"] = _is_redo_paper(p)
+            d["is_adopted_redo"] = _redo_adopted_from_paper(p)
+            d["graded_at"] = _paper_metadata(p).get("graded_at")
             result.append(d)
         return {"status": "success", "data": result}
     except Exception as e:
@@ -10230,6 +10308,7 @@ def _import_mistake_record_to_bank(
         difficulty=normalize_difficulty(record.difficulty or None),
         source=source,
         answer_markdown=record.answer_markdown or "",
+        correct_answer=_extract_mcq_answer(question_type, record.answer_markdown),
         knowledge_list=normalize_tag_list(record.knowledge_tags, field="knowledge_list"),
         solve_method=normalize_tag_list(record.solve_method, field="solve_method"),
         tags=str(record.tags or ""),
@@ -10254,6 +10333,11 @@ def _import_mistake_record_to_bank(
     )
     record.question_id = question.id
     record.snapshot_source = source
+    # 入库即进重做池：记 1 次错、排到最近的周六（用户决策：掌握情况记在错题台）。
+    # 只有「点选为错」才种 —— 未批的题也允许入库，那种不该被算成错题。
+    if (record.grad_status or "").strip() == "incorrect":
+        _seed_redo_pool(question, datetime.date.today())
+        _mirror_mastery_to_mistake_records(db, question)
     return {
         "status": "imported",
         "record_id": record.id,
@@ -11750,6 +11834,1401 @@ def download_mistake_handout(batch_id: int, filename: Optional[str] = None):
         filename=target.name,
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+# ---- 端点：错题重做闭环（生成重做卷 → 录入结果 → 掌握度回写 → 导出） ----
+#
+# 三条数据流串成闭环：
+#   1) 重做池 = ``questions.wrong_count > 0`` 的题。错题入库那一刻种下第一笔「错」。
+#   2) 重做卷 = ``papers.metadata_json.is_redo = true``，题目全部来自重做池；复用组卷
+#      的排版与编译管线，不另造一套导出实现。
+#   3) 重做事实 = ``redo_attempts`` 每题每次一行。掌握度**不按「点一次算一次」累加**，
+#      而是按历史重放推导 —— 所以同一题改判（昨天点错、今天改点对）不会算错账，
+#      接口重复调用也是幂等的。
+
+
+def _extract_mcq_answer(question_type: str, answer_markdown: str) -> str:
+    """选择题从答案文本里抽正确定盘字母；非选择题与抽不到都返回空串。
+
+    第 2 遍重做打乱选项后重映射答案键全靠它。为空只是让该题在第 2 遍降级为
+    「原序」，不影响判分，因此这里不做任何「猜」的动作。
+    """
+
+    if (question_type or "") not in ("single_choice", "multi_choice"):
+        return ""
+    return extract_correct_answer(answer_markdown)
+
+
+def _seed_redo_pool(question, today: datetime.date) -> None:
+    """把一道题放进重做池的初始状态：记 1 次错、未掌握、排到最近的周六。"""
+
+    schedule = redo_schedule.initial_schedule(today)
+    question.wrong_count = schedule["wrong_count"]
+    question.redo_correct_streak = schedule["redo_correct_streak"]
+    question.mastery_status = schedule["mastery_status"]
+    question.next_redo_due = schedule["next_redo_due"]
+
+
+def _mirror_mastery_to_mistake_records(db: Session, question) -> None:
+    """把题库侧的掌握度镜像回错题记录。
+
+    ``mistake_records.mastery_status`` 与 ``questions.mastery_status`` 是同一个概念
+    的两份存放：错题本页读前者、重做页读后者。不同步就会出现「错题本说未掌握、
+    重做页说已掌握」——同一道题两种说法，用户没法信任何一个。
+    """
+
+    db.query(MistakeRecord).filter(MistakeRecord.question_id == question.id).update(
+        {MistakeRecord.mastery_status: question.mastery_status},
+        synchronize_session=False,
+    )
+
+
+def _redo_attempt_history(db: Session, question_id: int) -> list:
+    """该题的全部重做记录，按时间升序 —— 就是重放的输入。"""
+
+    return (
+        db.query(RedoAttempt)
+        .filter(RedoAttempt.question_id == question_id)
+        .order_by(RedoAttempt.attempted_at.asc(), RedoAttempt.id.asc())
+        .all()
+    )
+
+
+def _replay_question_state(question, attempts) -> dict:
+    """按重做历史重放该题的掌握度状态（幂等，可重复调用）。
+
+    基线对齐 ``redo_schedule.initial_schedule``：错题入库时那一次「错」不落
+    ``redo_attempts``（它不是重做），因此 origin 为 mistake 的题基线
+    ``wrong_count`` 记 1。
+
+    **人工标注也在这条序列里**：老师标「已掌握」不是做题，而是一条按日期插进历史的
+    事件（``questions.mastery_override`` / ``mastery_override_at``）。这样「标注之后
+    又做错」会自然回到未掌握、重进重做池，而「补录一张旧卷（日期早于标注）」不会
+    误推翻标注 —— 两种情形都不需要额外特例。
+
+    排序按**日期**、同日时人工标注排在录入之后（即同日标注优先）。不能按分钟排：
+    录入的时间戳一律取当天 12:00（见 grade 接口的 ``stamp``），按分钟排会让
+    「上午标、下午录」与「下午标、上午录」给出相反结果。详见
+    ``redo_schedule.apply_mastery_override`` 的口径说明。
+    """
+
+    state = {
+        "wrong_count": 1 if (question.origin or "") == "mistake" else 0,
+        "redo_correct_streak": 0,
+        "mastery_status": redo_schedule.PENDING,
+        "next_redo_due": None,
+        "last_redo_date": None,
+        # 人工标注处理完之后，是否**再没有**录入接管过它 —— 即这条标注还在生效。
+        # 调用方据此清掉已被推翻的标注（详见 _apply_replayed_state）。
+        "override_effective": False,
+    }
+
+    events = [
+        (
+            attempt.attempted_at or attempt.created_at or datetime.datetime.now(),
+            "attempt",
+            attempt,
+        )
+        for attempt in attempts
+    ]
+    if redo_schedule.is_override_active(getattr(question, "mastery_override", "")):
+        marked_at = (
+            getattr(question, "mastery_override_at", None)
+            or getattr(question, "created_at", None)
+            or datetime.datetime.now()
+        )
+        events.append((marked_at, "override", None))
+    # 稳定排序：同一天里录入之间保持原有先后，人工标注落在同日录入之后。
+    events.sort(key=lambda item: (item[0].date(), 1 if item[1] == "override" else 0))
+
+    for when, kind, attempt in events:
+        if kind == "override":
+            state.update(
+                redo_schedule.apply_mastery_override(
+                    prev_wrong_count=state["wrong_count"],
+                    prev_streak=state["redo_correct_streak"],
+                )
+            )
+            state["override_effective"] = True
+            # 刻意**不更新** last_redo_date：人工标注不是做题，不能占掉「今天」这个
+            # 名额 —— 否则标注当天再录入一次判对，会被「同日不推进」白白吃掉一次连对。
+            continue
+        result = redo_schedule.apply_attempt(
+            result=attempt.result,
+            today=when.date(),
+            prev_wrong_count=state["wrong_count"],
+            prev_streak=state["redo_correct_streak"],
+            prev_last_redo_date=state["last_redo_date"],
+        )
+        state.update(result)
+        state["last_redo_date"] = when.date()
+        # 排在标注之后的任何一次录入都会整体覆写掌握度与排程 —— 标注从此不再生效。
+        # 排在标注之前的录入走不到这里（那时 flag 还是 False），所以直接置 False 即可。
+        state["override_effective"] = False
+
+    # 一次都没重做过的题算不出建议重做日（基线里是 None）。取消人工标注、删掉唯一
+    # 一份重做卷都会走到这里 —— 而此时池子里会留着一道「未掌握但没有建议重做日」的题：
+    # 列表显示不出「建议 X」，按到期出卷也拿不准算不算它。补齐成「最近的周六」，与
+    # _seed_redo_pool 的初始排程同一口径。
+    if (
+        state["next_redo_due"] is None
+        and state["mastery_status"] != redo_schedule.MASTERED
+        and int(state["wrong_count"] or 0) > 0
+    ):
+        state["next_redo_due"] = redo_schedule.next_weekend(datetime.date.today())
+    return state
+
+
+def _apply_replayed_state(question, state, attempts) -> None:
+    """把重放结果写回题目字段。"""
+
+    question.wrong_count = state["wrong_count"]
+    question.redo_correct_streak = state["redo_correct_streak"]
+    question.mastery_status = state["mastery_status"]
+    question.next_redo_due = state["next_redo_due"]
+    question.redo_count = len(attempts)
+    question.last_redo_at = attempts[-1].attempted_at if attempts else None
+
+    # 被更晚的录入推翻的人工标注就地清掉。这一步**不改变任何结果**：
+    # apply_mastery_override 只动掌握度与排程两个键，而每一次 apply_attempt 都会把
+    # 这两个键整体覆写，其余键（wrong_count / streak / last_redo_date）两边都不碰 ——
+    # 所以「标注之后还有录入」时，删掉那条标注算出来的状态与留着它完全一样。
+    # 清掉是为了让「有标注」严格等于「标注正在生效」：否则一道已经被判回未掌握的题
+    # 会在卡片上挂着「人工标注」徽章，老师看不出到底哪个说了算。
+    if redo_schedule.is_override_active(question.mastery_override) and not state.get(
+        "override_effective"
+    ):
+        question.mastery_override = ""
+        question.mastery_override_at = None
+
+
+def _redo_attempt_no(question) -> int:
+    """这份卷对该题而言是第几遍重做 —— 决定导出时用哪一档选项变换。"""
+
+    return int(question.redo_count or 0) + 1
+
+
+def _redo_rng(paper_id: int, question_id: int) -> random.Random:
+    """打乱选项必须可复现。
+
+    否则「打印带走 → 隔天回页面核对录入」看到的选项顺序会变、答案键跟着变，
+    老师没法对着纸面点对错；重印同一份卷也会对不上。
+    """
+
+    return random.Random(int(paper_id or 0) * 1_000_003 + int(question_id or 0))
+
+
+def _redo_transform(paper_id: int, question, order_locked: bool = False):
+    """算出该题在这份卷里的呈现（题干 / 答案 / 选项档位），**不写回库**。
+
+    ``order_locked`` 为真时呈现一律按原序（见 ``_redo_order_locked``）。它**只
+    影响呈现**：记账档位仍按 ``_redo_attempt_no`` 的真实历史走 —— 若连记账也一并
+    锁成第 1 遍，跨日连对计数会虚高、掌握判定提前，那是在造假。
+    """
+
+    attempt_no = 1 if order_locked else _redo_attempt_no(question)
+    return apply_choice_transform(
+        question.content or "",
+        question.answer_markdown or "",
+        question.question_type or "",
+        attempt_no,
+        correct_answer=question.correct_answer or "",
+        rng=_redo_rng(paper_id, question.id),
+    )
+
+
+def _redo_default_score(question) -> int:
+    """重做卷的默认分值（可被 payload 覆盖）：客观题 5 分、解答题 10 分。"""
+
+    if (question.question_type or "") in ("single_choice", "multi_choice", "fill_in_blank"):
+        return 5
+    return 10
+
+
+def _redo_option_mode(paper_id: int, question, order_locked: bool = False) -> str:
+    """该题在这份卷里**实际施加**的选项档位（与导出走同一套规则）。
+
+    导出把档位印在纸上、录入把它记进 ``redo_attempts.option_mode`` —— 两处必须
+    一致，否则「这次做对是不是因为记住了选项位置」就复盘不了。
+    """
+
+    return _redo_transform(paper_id, question, order_locked=order_locked)[2]
+
+
+def _redo_question_payload(
+    paper_id: int, question, attempt=None, order_locked: bool = False
+) -> dict:
+    """一道重做题在录入页里的完整形态（含变换后的题干与答案）。
+
+    ``display_*`` 是**导出时实际印在纸上**的版本（第 2 遍打乱过、第 3 遍没了选项），
+    录对错时必须照它判读，所以不能用库里的原题面糊弄过去。
+    """
+
+    content, answer, mode = _redo_transform(
+        paper_id, question, order_locked=order_locked
+    )
+    return {
+        **question.to_dict(),
+        "display_content": content,
+        "display_answer": answer,
+        "option_mode": mode,
+        "attempt_no": _redo_attempt_no(question),
+        "recorded": attempt.to_dict() if attempt is not None else None,
+    }
+
+
+def _redo_pool_query(db: Session, *, scope: str, subject: str, today: datetime.date):
+    """重做池查询：默认只取「未掌握 + 建议重做日已到」的题。"""
+
+    query = db.query(Question).filter(Question.wrong_count > 0)
+    if subject:
+        query = query.filter(Question.subject == normalize_subject(subject))
+    query = query.filter(
+        or_(
+            Question.mastery_status.is_(None),
+            Question.mastery_status != redo_schedule.MASTERED,
+        )
+    )
+    if str(scope or "due") != "all":
+        query = query.filter(
+            or_(Question.next_redo_due.is_(None), Question.next_redo_due <= today)
+        )
+    return query.order_by(
+        Question.wrong_count.desc(),
+        Question.next_redo_due.asc(),
+        Question.id.asc(),
+    )
+
+
+def _redo_missing_answer_questions(db: Session):
+    """存量选择题里 ``correct_answer`` 还是空的那批（同步接口的待补清单）。"""
+
+    return db.query(Question).filter(
+        Question.question_type.in_(("single_choice", "multi_choice")),
+        or_(Question.correct_answer.is_(None), Question.correct_answer == ""),
+    )
+
+
+def _redo_paper_question_rows(db: Session, paper_id: int):
+    """一份重做卷的题目行，按卷面顺序。"""
+
+    return (
+        db.query(PaperQuestion, Question)
+        .join(Question, Question.id == PaperQuestion.question_id)
+        .filter(PaperQuestion.paper_id == paper_id)
+        .order_by(PaperQuestion.order_index.asc())
+        .all()
+    )
+
+
+def _redo_paper_attempts(db: Session, paper_id: int) -> dict:
+    """这次录入在这份卷上的既有结果 ``{question_id: RedoAttempt}``。"""
+
+    rows = db.query(RedoAttempt).filter(RedoAttempt.paper_id == paper_id).all()
+    return {row.question_id: row for row in rows}
+
+
+def _redo_paper_summary(paper, rows, attempts) -> dict:
+    """任务列表里的单张重做卷：进度 + 建议重做日 + 状态。"""
+
+    total = len(rows)
+    graded = sum(1 for pq, _q in rows if pq.question_id in attempts)
+    if graded == 0:
+        status = "pending"
+    elif graded < total:
+        status = "partial"
+    else:
+        status = "done"
+    due_dates = [
+        question.next_redo_due
+        for _pq, question in rows
+        if question.next_redo_due is not None
+        and (question.mastery_status or "pending") != redo_schedule.MASTERED
+    ]
+    meta = _paper_metadata(paper)
+    return {
+        "id": paper.id,
+        "title": paper.title or "",
+        "subtitle": paper.subtitle or "",
+        "paper_type": paper.paper_type or "exam",
+        "created_at": (paper.created_at.isoformat() + "Z") if paper.created_at else None,
+        "question_count": total,
+        "graded_count": graded,
+        "status": status,
+        "redo_round": int(meta.get("redo_round") or 1),
+        # 认领卷在 UI 上要说清「这是组卷台那张卷」，不是错题台生成的。
+        "adopted": _redo_adopted_from_paper(paper),
+        "scope": meta.get("scope") or "due",
+        "subject": meta.get("subject") or "",
+        "due_date": min(due_dates).isoformat() if due_dates else None,
+        "graded_at": meta.get("graded_at"),
+        "wrong_total": sum(int(q.wrong_count or 0) for _pq, q in rows),
+        "mastered_count": sum(
+            1 for _pq, q in rows if (q.mastery_status or "") == redo_schedule.MASTERED
+        ),
+    }
+
+
+@app.get("/api/redo/overview")
+def redo_overview(subject: Optional[str] = None, db: Session = Depends(get_db)):
+    """重做池总览：顶部统计条 + 知识点维度看板 + 待补录的历史错题数。"""
+
+    today = datetime.date.today()
+    query = db.query(Question).filter(Question.wrong_count > 0)
+    if subject:
+        query = query.filter(Question.subject == normalize_subject(subject))
+    pool = query.all()
+
+    pending = [q for q in pool if (q.mastery_status or "pending") != redo_schedule.MASTERED]
+    mastered = [q for q in pool if (q.mastery_status or "") == redo_schedule.MASTERED]
+    due_now = [q for q in pending if q.next_redo_due is None or q.next_redo_due <= today]
+    stuck = [q for q in pending if int(q.wrong_count or 0) >= 2]
+
+    board_map: dict = {}
+    for question in pool:
+        key = (question.category_knowledge or question.category_chapter or "未分类").strip() or "未分类"
+        bucket = board_map.setdefault(
+            key, {"knowledge": key, "total": 0, "wrong_total": 0, "pending": 0}
+        )
+        bucket["total"] += 1
+        bucket["wrong_total"] += int(question.wrong_count or 0)
+        if (question.mastery_status or "pending") != redo_schedule.MASTERED:
+            bucket["pending"] += 1
+    board = sorted(
+        board_map.values(), key=lambda item: (-item["wrong_total"], item["knowledge"])
+    )[:20]
+
+    # 本功能上线前入库的错题：错题记录里判了错，但题目还没进重做池
+    # （questions.wrong_count 仍为 0）。前端据此提示「同步历史错题」。
+    backfill_pending = (
+        db.query(MistakeRecord)
+        .join(Question, Question.id == MistakeRecord.question_id)
+        .filter(MistakeRecord.grad_status == "incorrect", Question.wrong_count == 0)
+        .count()
+    )
+    answer_backfill_pending = _redo_missing_answer_questions(db).count()
+
+    return {
+        "status": "success",
+        "today": today.isoformat(),
+        "stats": {
+            "pool_total": len(pool),
+            "pending": len(pending),
+            "due_now": len(due_now),
+            "mastered": len(mastered),
+            "stuck": len(stuck),
+            "redo_total": sum(int(q.redo_count or 0) for q in pool),
+            "wrong_total": sum(int(q.wrong_count or 0) for q in pool),
+            # 已掌握里有多少是老师手动标的（与「跨日连对 2 次」自动判出来的分开数）。
+            # 老师需要这个数字来复核自己的标注 —— 标多了会把该练的题漏掉。
+            "mastered_manual": sum(
+                1 for q in mastered if redo_schedule.is_override_active(q.mastery_override)
+            ),
+            "backfill_pending": int(backfill_pending),
+            "answer_backfill_pending": int(answer_backfill_pending),
+        },
+        "knowledge": board,
+    }
+
+
+@app.get("/api/redo/suggestions")
+def redo_suggestions(
+    scope: str = "due",
+    limit: int = 20,
+    subject: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """重点复习候选：默认「未掌握 + 建议重做日 ≤ 今天」，按累计错次降序。"""
+
+    today = datetime.date.today()
+    safe_limit = max(1, min(int(limit or 20), 100))
+    rows = (
+        _redo_pool_query(db, scope=scope, subject=subject, today=today)
+        .limit(safe_limit)
+        .all()
+    )
+    return {
+        "status": "success",
+        "scope": "all" if str(scope or "due") == "all" else "due",
+        "limit": safe_limit,
+        "count": len(rows),
+        "items": [question.to_dict() for question in rows],
+    }
+
+
+@app.post("/api/redo/pool/sync")
+def sync_redo_pool(db: Session = Depends(get_db)):
+    """把历史错题补进重做池，并补抽存量选择题的答案字母（幂等）。
+
+    两件都是「本功能上线前入库的数据缺的那一块」：
+
+    - 重做池靠错题入库时种下，因此上线前已入库的错题不在池里。这里按错题记录的
+      判定补种：``grad_status = incorrect`` 且题库侧 ``wrong_count = 0`` 的题，
+      各记 1 次错、排到最近的周六。
+    - ``correct_answer`` 也是新列。为空时第 2 遍重做只能降级为「原序」，
+      防不住「记住选项位置」。这里从已有解析文本里补抽一次。
+    """
+
+    today = datetime.date.today()
+    rows = (
+        db.query(MistakeRecord, Question)
+        .join(Question, Question.id == MistakeRecord.question_id)
+        .filter(MistakeRecord.grad_status == "incorrect", Question.wrong_count == 0)
+        .all()
+    )
+    seeded = 0
+    for record, question in rows:
+        _seed_redo_pool(question, today)
+        mastery = (record.mastery_status or "").strip()
+        if mastery in redo_schedule.MASTERY_VALUES:
+            question.mastery_status = mastery
+            if mastery == redo_schedule.MASTERED:
+                question.next_redo_due = None
+        seeded += 1
+
+    answer_filled = 0
+    for question in _redo_missing_answer_questions(db).all():
+        answer = extract_correct_answer(question.answer_markdown or "")
+        if answer:
+            question.correct_answer = answer
+            answer_filled += 1
+
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"同步重做池失败: {exc}"},
+            status_code=500,
+        )
+    return {"status": "success", "seeded": seeded, "answer_filled": answer_filled}
+
+
+@app.post("/api/redo/papers")
+def create_redo_paper(payload: Optional[dict] = None, db: Session = Depends(get_db)):
+    """从重做池生成一张重做卷（不计入 ``usage_count`` —— 重做不算组卷引用）。"""
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        today = datetime.date.today()
+        scope = str(body.get("scope") or "due").strip()
+        subject = str(body.get("subject") or "").strip()
+        raw_ids = body.get("question_ids") or []
+        try:
+            limit = int(body.get("limit") or 12)
+        except (TypeError, ValueError):
+            limit = 12
+        limit = max(1, min(limit, 60))
+        paper_type = str(body.get("paper_type") or "exam").strip()
+        if paper_type not in {"exam", "quiz", "exam_19"}:
+            paper_type = "exam"
+
+        picked: list = []
+        if raw_ids:
+            wanted: list = []
+            for raw in raw_ids:
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if value not in wanted:
+                    wanted.append(value)
+            if not wanted:
+                raise ValueError("指定的题目为空。")
+            found = {
+                question.id: question
+                for question in db.query(Question).filter(Question.id.in_(wanted)).all()
+            }
+            missing = [qid for qid in wanted if qid not in found]
+            if missing:
+                raise ValueError(
+                    "以下题目已不在题库中：" + "、".join(f"#{qid}" for qid in missing[:10])
+                )
+            picked = [found[qid] for qid in wanted]
+        else:
+            picked = (
+                _redo_pool_query(db, scope=scope, subject=subject, today=today)
+                .limit(limit)
+                .all()
+            )
+
+        if not picked:
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": (
+                        "重做池里没有可出的题。若错题是较早入库的，"
+                        "先点「同步历史错题」把它们补进重做池。"
+                    ),
+                },
+                status_code=400,
+            )
+
+        round_no = max(_redo_attempt_no(question) for question in picked)
+        due_dates = [q.next_redo_due for q in picked if q.next_redo_due is not None]
+        title = str(body.get("title") or "").strip()[:200] or f"错题重做卷（第 {round_no} 轮）"
+        subtitle = str(body.get("subtitle") or "").strip()[:200] or (
+            f"第 {round_no} 轮重做 · {today.strftime('%Y-%m-%d')}"
+        )
+        try:
+            exam_duration = int(body.get("exam_duration") or 0)
+        except (TypeError, ValueError):
+            exam_duration = 0
+
+        scores = body.get("scores")
+        score_map: dict = {}
+        if isinstance(scores, dict):
+            for key, value in scores.items():
+                try:
+                    score_map[int(key)] = max(0, min(int(value), 100))
+                except (TypeError, ValueError):
+                    continue
+
+        meta = {
+            "is_redo": True,
+            "redo_round": round_no,
+            "scope": "all" if scope == "all" else "due",
+            "subject": subject,
+            "show_secret": False,
+            "show_notice": False,
+            "subject_line": str(body.get("subject_line") or "").strip(),
+            "exam_duration": exam_duration if 0 < exam_duration <= 600 else 120,
+            "due_date": min(due_dates).isoformat() if due_dates else None,
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "graded_at": None,
+        }
+
+        paper = Paper(
+            title=title,
+            subtitle=subtitle,
+            paper_type=paper_type,
+            total_score=0,
+            metadata_json=json.dumps(meta),
+        )
+        db.add(paper)
+        db.flush()
+
+        total_score = 0
+        for index, question in enumerate(picked, start=1):
+            score = score_map.get(question.id, _redo_default_score(question))
+            db.add(
+                PaperQuestion(
+                    paper_id=paper.id,
+                    question_id=question.id,
+                    order_index=index,
+                    score=score,
+                )
+            )
+            total_score += score
+        paper.total_score = total_score
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"生成重做卷失败: {exc}"},
+            status_code=500,
+        )
+
+    return {
+        "status": "success",
+        "paper_id": paper.id,
+        "question_count": len(picked),
+        "redo_round": round_no,
+        "total_score": total_score,
+        "due_date": meta["due_date"],
+        "title": title,
+    }
+
+
+@app.get("/api/redo/tasks")
+def list_redo_tasks(db: Session = Depends(get_db)):
+    """重做任务列表（各张重做卷 + 录入进度），按生成时间倒序。"""
+
+    try:
+        papers = (
+            db.query(Paper)
+            .filter(text("COALESCE(metadata_json, '') LIKE '%is_redo%'"))
+            .order_by(Paper.created_at.desc(), Paper.id.desc())
+            .all()
+        )
+        tasks = []
+        for paper in papers:
+            if not _is_redo_paper(paper):
+                continue
+            rows = _redo_paper_question_rows(db, paper.id)
+            attempts = _redo_paper_attempts(db, paper.id)
+            tasks.append(_redo_paper_summary(paper, rows, attempts))
+        return {"status": "success", "tasks": tasks}
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={"status": "error", "message": f"读取重做任务失败: {exc}"},
+            status_code=500,
+        )
+
+
+@app.get("/api/redo/papers/{paper_id}")
+def get_redo_paper(paper_id: int, db: Session = Depends(get_db)):
+    """一份重做卷的录入视图：题目（含变换后的呈现）+ 已录入结果。"""
+
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None or not _is_redo_paper(paper):
+        return JSONResponse(
+            content={"status": "error", "message": "重做卷不存在。"}, status_code=404
+        )
+    rows = _redo_paper_question_rows(db, paper_id)
+    attempts = _redo_paper_attempts(db, paper_id)
+    return {
+        "status": "success",
+        "paper": _redo_paper_summary(paper, rows, attempts),
+        "questions": [
+            {
+                **_redo_question_payload(
+                    paper_id,
+                    question,
+                    attempts.get(question.id),
+                    order_locked=_redo_order_locked(paper),
+                ),
+                "score": paper_question.score,
+                "order_index": paper_question.order_index,
+            }
+            for paper_question, question in rows
+        ],
+    }
+
+
+@app.post("/api/redo/papers/{paper_id}/grade")
+def grade_redo_paper(
+    paper_id: int, payload: Optional[dict] = None, db: Session = Depends(get_db)
+):
+    """录入重做结果：写 ``redo_attempts`` + 按历史重放回写掌握度。
+
+    ``results`` 支持分批提交（做一题录一题），重复提交同一题是**改判**，不是加做一遍。
+    """
+
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None or not _is_redo_paper(paper):
+        return JSONResponse(
+            content={"status": "error", "message": "重做卷不存在。"}, status_code=404
+        )
+    body = payload if isinstance(payload, dict) else {}
+    results = body.get("results")
+    if not isinstance(results, list) or not results:
+        return JSONResponse(
+            content={"status": "error", "message": "results 必须是非空数组。"}, status_code=400
+        )
+
+    today = datetime.date.today()
+    attempted_on = today
+    raw_date = str(body.get("attempted_on") or "").strip()
+    if raw_date:
+        try:
+            attempted_on = datetime.date.fromisoformat(raw_date)
+        except ValueError:
+            return JSONResponse(
+                content={"status": "error", "message": "attempted_on 需为 YYYY-MM-DD。"},
+                status_code=400,
+            )
+    # 补录（记的是过去某天）时把时间定在当天中午，避免时间戳落在午夜边界上
+    # 让「跨日」判定因为时区/取整而抖。
+    stamp = datetime.datetime.combine(attempted_on, datetime.time(12, 0, 0))
+
+    rows = _redo_paper_question_rows(db, paper_id)
+    in_paper = {question.id: question for _pq, question in rows}
+    touched: list = []
+    rejected: list = []
+
+    for item in results:
+        if not isinstance(item, dict):
+            rejected.append({"reason": "结果项格式不正确"})
+            continue
+        try:
+            question_id = int(item.get("question_id"))
+        except (TypeError, ValueError):
+            rejected.append({"reason": "缺少 question_id"})
+            continue
+        result = str(item.get("result") or "").strip().lower()
+        if result not in redo_schedule.RESULT_VALUES:
+            rejected.append(
+                {"question_id": question_id, "reason": "result 只能是对/错"}
+            )
+            continue
+        question = in_paper.get(question_id)
+        if question is None:
+            rejected.append(
+                {"question_id": question_id, "reason": "该题不在这份重做卷里"}
+            )
+            continue
+
+        attempt = (
+            db.query(RedoAttempt)
+            .filter(
+                RedoAttempt.paper_id == paper_id,
+                RedoAttempt.question_id == question_id,
+            )
+            .first()
+        )
+        if attempt is None:
+            attempt = RedoAttempt(
+                student_id=body.get("student_id"),
+                paper_id=paper_id,
+                question_id=question_id,
+                subject=question.subject or "math",
+            )
+            db.add(attempt)
+        attempt.attempt_no = _redo_attempt_no(question)
+        attempt.result = result
+        attempt.option_mode = _redo_option_mode(
+            paper_id, question, order_locked=_redo_order_locked(paper)
+        )
+        attempt.attempted_at = stamp
+        db.flush()
+
+        history = _redo_attempt_history(db, question_id)
+        _apply_replayed_state(question, _replay_question_state(question, history), history)
+        _mirror_mastery_to_mistake_records(db, question)
+        touched.append(question_id)
+
+    try:
+        fresh_rows = _redo_paper_question_rows(db, paper_id)
+        fresh_attempts = _redo_paper_attempts(db, paper_id)
+        meta = _paper_metadata(paper)
+        meta["graded_at"] = (
+            datetime.datetime.now().isoformat(timespec="seconds")
+            if len(fresh_attempts) >= len(fresh_rows) and fresh_rows
+            else None
+        )
+        paper.metadata_json = json.dumps(meta)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"保存重做结果失败: {exc}"},
+            status_code=500,
+        )
+
+    rows = _redo_paper_question_rows(db, paper_id)
+    attempts = _redo_paper_attempts(db, paper_id)
+    return {
+        "status": "success",
+        "graded": len(touched),
+        "rejected": rejected,
+        "paper": _redo_paper_summary(paper, rows, attempts),
+        "questions": [
+            {
+                **_redo_question_payload(
+                    paper_id,
+                    question,
+                    attempts.get(question.id),
+                    order_locked=_redo_order_locked(paper),
+                ),
+                "score": paper_question.score,
+                "order_index": paper_question.order_index,
+            }
+            for paper_question, question in rows
+        ],
+    }
+
+
+@app.post("/api/redo/papers/{paper_id}/export")
+def export_redo_paper(
+    paper_id: int, payload: Optional[dict] = None, db: Session = Depends(get_db)
+):
+    """导出重做卷（选项按遍数变换，库内原题不动）。
+
+    ``format`` 取 ``pdf``（默认，直接编译）或 ``tex``（LaTeX 源码 ZIP）。
+    """
+
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None or not _is_redo_paper(paper):
+        return JSONResponse(
+            content={"status": "error", "message": "重做卷不存在。"}, status_code=404
+        )
+    body = payload if isinstance(payload, dict) else {}
+    include_answers = bool(body.get("include_answers", False))
+    fmt = str(body.get("format") or "pdf").strip().lower()
+    meta = _paper_metadata(paper)
+    # 认领卷在纸上本来就带着密封线与注意事项，重印必须跟纸卷一致；错题台生成的
+    # 重做卷没这些（它是练习卷）。
+    order_locked = _redo_order_locked(paper)
+
+    rows = _redo_paper_question_rows(db, paper_id)
+    if not rows:
+        return JSONResponse(
+            content={"status": "error", "message": "这份重做卷里没有题目。"}, status_code=400
+        )
+
+    questions_data: list = []
+    modes: dict = {}
+    for paper_question, question in rows:
+        content, answer, mode = _redo_transform(
+            paper_id, question, order_locked=_redo_order_locked(paper)
+        )
+        modes[str(question.id)] = mode
+        item = question.to_dict()
+        item["content"] = content
+        item["answer_markdown"] = answer
+        questions_data.append({"question": item, "score": paper_question.score})
+
+    title = paper.title or "错题重做卷"
+    subtitle = paper.subtitle or ""
+    if include_answers:
+        title = title + " (参考答案与解析)"
+    tex_content = build_latex_document(
+        title,
+        subtitle,
+        paper.paper_type or "exam",
+        questions_data,
+        include_answers=include_answers,
+        show_secret=bool(meta.get("show_secret", True)) if order_locked else False,
+        show_notice=bool(meta.get("show_notice", True)) if order_locked else False,
+        subject_line=meta.get("subject_line") or "",
+        exam_duration=meta.get("exam_duration") or 120,
+    )
+    image_paths = collect_referenced_images(questions_data, UPLOAD_DIR, UPLOAD_DIR_REL)
+
+    if fmt == "tex":
+        from urllib.parse import quote
+
+        tex_answers = build_latex_document(
+            (paper.title or "错题重做卷") + " (参考答案与解析)",
+            subtitle,
+            paper.paper_type or "exam",
+            questions_data,
+            include_answers=True,
+            show_secret=False,
+            show_notice=False,
+            subject_line=meta.get("subject_line") or "",
+            exam_duration=meta.get("exam_duration") or 120,
+        )
+        zip_bytes = create_tex_zip_package(
+            paper.title or "错题重做卷", tex_content, tex_answers, image_paths
+        )
+        safe_title = re.sub(r'[/\\?%*:|"<>]', "_", (paper.title or "重做卷").strip()) or "重做卷"
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename=\"redo_export.zip\"; "
+                    "filename*=utf-8''" + quote(f"{safe_title}.zip")
+                )
+            },
+        )
+
+    pdf_bytes, log_or_error = compile_tex_to_pdf(tex_content, image_paths)
+    if not pdf_bytes:
+        if is_xelatex_missing(log_or_error or ""):
+            diagnostic = build_local_latex_diagnostic(log_or_error or "", tex_content)
+        else:
+            diagnostic = explain_latex_compile_error(log_or_error, tex_content)
+        diagnostic.setdefault("tex_source", tex_content)
+        diagnostic.setdefault("full_log", (log_or_error or "")[:6000])
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": diagnostic.get("summary", "重做卷 PDF 编译失败"),
+                "diagnostic": diagnostic,
+            },
+            status_code=400,
+        )
+
+    from urllib.parse import quote
+
+    safe_title = re.sub(r'[/\\?%*:|"<>]', "_", title.strip()) or "重做卷"
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="redo_{stamp}.pdf"',
+            "X-Redo-Option-Modes": json.dumps(modes, ensure_ascii=False),
+            "X-Redo-Filename": quote(f"{safe_title}.pdf"),
+        },
+    )
+
+
+@app.delete("/api/redo/papers/{paper_id}")
+def delete_redo_paper(
+    paper_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
+):
+    """删除一份重做卷及其录入记录（不动题库里的题，也不动 usage_count）。"""
+
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None or not _is_redo_paper(paper):
+        return JSONResponse(
+            content={"status": "error", "message": "重做卷不存在。"}, status_code=404
+        )
+    if _redo_adopted_from_paper(paper):
+        # 认领卷的「删除」只能是取消认领：卷子本身是老师在组卷台排的、印过的，
+        # 物理删掉等于顺手毁掉一份组卷历史。
+        return _release_adopted_redo(paper, db, background_tasks)
+    try:
+        affected = [
+            row.question_id
+            for row in db.query(RedoAttempt.question_id)
+            .filter(RedoAttempt.paper_id == paper_id)
+            .all()
+        ]
+        db.query(RedoAttempt).filter(RedoAttempt.paper_id == paper_id).delete()
+        db.query(PaperQuestion).filter(PaperQuestion.paper_id == paper_id).delete()
+        db.delete(paper)
+        db.flush()
+        # 删掉录入记录后，受影响的题要按剩余历史重算 —— 否则会留下凭空的错次。
+        for question_id in set(affected):
+            question = db.query(Question).filter(Question.id == question_id).first()
+            if question is None:
+                continue
+            history = _redo_attempt_history(db, question_id)
+            _apply_replayed_state(
+                question, _replay_question_state(question, history), history
+            )
+            _mirror_mastery_to_mistake_records(db, question)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"删除重做卷失败: {exc}"},
+            status_code=500,
+        )
+    schedule_database_export(background_tasks, operation="delete_redo_paper")
+    return {"status": "success", "message": "重做卷已删除。"}
+
+
+def _create_paper_from_payload(db, body: dict):
+    """按卷面数据落库一张普通卷，返回 ``(paper, created)``。
+
+    **刻意不走 ``/api/paper/save`` 的 usage_count 自增** —— 它随即就要被认领成
+    重做卷（重做卷不计组卷引用）。这条通道的存在，是因为主编辑器导出时卷面还在
+    试题篮里、库里根本没这条记录。
+    """
+
+    title = str(body.get("title") or "").strip()[:200] or "错题重做练习"
+    subtitle = str(body.get("subtitle") or "").strip()[:200]
+    paper_type = str(body.get("paper_type") or "exam").strip()
+    if paper_type not in {"exam", "quiz", "exam_19"}:
+        paper_type = "exam"
+
+    items = body.get("questions")
+    if not isinstance(items, list) or not items:
+        raise ValueError("卷面里没有题目，无法记作重做练习。")
+    if len(items) > 200:
+        raise ValueError("单份试卷不能超过 200 道题。")
+
+    normalized: list = []
+    seen: set = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("试卷题目数据格式不正确。")
+        try:
+            question_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            raise ValueError("试卷题目数据格式不正确。")
+        if question_id <= 0:
+            raise ValueError("题目 ID 不在有效范围内。")
+        if question_id in seen:
+            continue
+        seen.add(question_id)
+        try:
+            score = int(item.get("score", 5))
+        except (TypeError, ValueError):
+            score = 5
+        normalized.append((question_id, max(0, min(score, 100))))
+
+    questions = db.query(Question).filter(Question.id.in_(seen)).all()
+    missing = sorted(seen - {question.id for question in questions})
+    if missing:
+        raise ValueError(
+            "试卷中包含已删除或不存在的题目：" + "、".join(f"#{i}" for i in missing[:10])
+        )
+
+    try:
+        exam_duration = int(body.get("exam_duration") or 0)
+    except (TypeError, ValueError):
+        exam_duration = 0
+    meta = {
+        "show_secret": body.get("show_secret", True),
+        "show_notice": body.get("show_notice", True),
+        "subject_line": str(body.get("subject_line") or "").strip()[:200],
+        "exam_duration": exam_duration if 0 < exam_duration <= 600 else 120,
+    }
+
+    paper = Paper(
+        title=title,
+        subtitle=subtitle,
+        paper_type=paper_type,
+        total_score=0,
+        metadata_json=json.dumps(meta),
+    )
+    db.add(paper)
+    db.flush()
+
+    total_score = 0
+    for index, (question_id, score) in enumerate(normalized, start=1):
+        db.add(
+            PaperQuestion(
+                paper_id=paper.id,
+                question_id=question_id,
+                order_index=index,
+                score=score,
+            )
+        )
+        total_score += score
+    paper.total_score = total_score
+    db.flush()
+    return paper, True
+
+
+def _adopt_paper_as_redo(db, paper) -> dict:
+    """把一张普通卷认领为错题重做练习（幂等）。"""
+
+    meta = _paper_metadata(paper)
+    if meta.get("is_redo"):
+        return {
+            "already": True,
+            "paper": paper,
+            "meta": meta,
+            "pooled": [],
+            "round_no": int(meta.get("redo_round") or 1),
+        }
+
+    rows = _redo_paper_question_rows(db, paper.id)
+    pooled = [question for _pq, question in rows if int(question.wrong_count or 0) > 0]
+    if not pooled:
+        raise ValueError("这份卷里没有进过重做池的错题，不需要记作重做练习。")
+
+    round_no = max(_redo_attempt_no(question) for question in pooled)
+    meta.update(
+        {
+            "is_redo": True,
+            "redo_round": round_no,
+            # 纸卷已做完 → 呈现锁原序（见 _redo_order_locked）
+            "redo_locked_order": True,
+            "redo_adopted_from": "paper",
+            "redo_adopted_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "scope": "paper",
+            "graded_at": None,
+        }
+    )
+    # 密封线 / 注意事项沿用原卷排版：认领卷是印出来过的，重做卷默认不显示这两样。
+    meta.setdefault("show_secret", True)
+    meta.setdefault("show_notice", True)
+    meta.pop("redo_declined", None)
+    paper.metadata_json = json.dumps(meta)
+    db.flush()
+    return {
+        "already": False,
+        "paper": paper,
+        "meta": meta,
+        "pooled": pooled,
+        "round_no": round_no,
+    }
+
+
+def _release_adopted_redo(paper, db, background_tasks=None):
+    """取消认领：卷子回到普通卷（**保留**在组卷历史里），该卷的录入记录一并撤销。"""
+
+    paper_id = paper.id
+    affected = [
+        row.question_id
+        for row in db.query(RedoAttempt.question_id)
+        .filter(RedoAttempt.paper_id == paper_id)
+        .all()
+    ]
+    try:
+        db.query(RedoAttempt).filter(RedoAttempt.paper_id == paper_id).delete()
+        meta = _paper_metadata(paper)
+        for key in (
+            "is_redo",
+            "redo_round",
+            "redo_locked_order",
+            "redo_adopted_from",
+            "redo_adopted_at",
+            "graded_at",
+        ):
+            meta.pop(key, None)
+        # 取消之后别再每次导出都追问一遍。
+        meta["redo_declined"] = True
+        paper.metadata_json = json.dumps(meta)
+        db.flush()
+        # 撤销录入后必须按剩余历史重算，否则会留下凭空的错次与虚高的连对。
+        for question_id in set(affected):
+            question = db.query(Question).filter(Question.id == question_id).first()
+            if question is None:
+                continue
+            history = _redo_attempt_history(db, question_id)
+            _apply_replayed_state(
+                question, _replay_question_state(question, history), history
+            )
+            _mirror_mastery_to_mistake_records(db, question)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"取消认领失败: {exc}"}, status_code=500
+        )
+    if background_tasks is not None:
+        schedule_database_export(background_tasks, operation="release_redo_adoption")
+    return {
+        "status": "success",
+        "paper_id": paper_id,
+        "released_attempts": len(affected),
+        "message": "已取消认领，这份卷回到组卷历史。",
+    }
+
+
+@app.post("/api/redo/adopt")
+def adopt_as_redo(
+    payload: Optional[dict] = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """把组卷台那条通道出的卷「认领」为错题重做练习 —— 打通两条通道的桥。
+
+    错题闭环的第 1 遍练习几乎必然发生在组卷台（入库即送组卷 → 排版 → 印出来）。
+    那张卷本来不带 ``is_redo``，于是它的做题结果**没有任何入口**写回
+    ``redo_attempts``：只能去重做台重新生成一张，题序与手上纸卷对不上，轮次还会
+    被少算一遍（``redo_round`` 取的是 ``max(attempt_no)``，而这遍没记账）。
+
+    body 两种形态：
+
+    - ``{"paper_id": N}``：认领一张**已保存**的卷（历史卷卡片上的入口）。
+    - ``{"title": ..., "questions": [{"id": .., "score": ..}]}``：卷面还没落库
+      （主编辑器导出时就是这样），先建卷再认领。
+
+    ``usage_count`` 不回退是刻意的：这张卷本来就是老师真的排出来、印过、发下去
+    做过的一份组卷，算一次引用没问题，它只是多长出了「重做」这重身份。
+    """
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        paper_id = int(body.get("paper_id") or 0)
+    except (TypeError, ValueError):
+        paper_id = 0
+
+    created = False
+    try:
+        if paper_id > 0:
+            paper = db.query(Paper).filter(Paper.id == paper_id).first()
+            if paper is None:
+                return JSONResponse(
+                    content={"status": "error", "message": "试卷不存在。"}, status_code=404
+                )
+        else:
+            paper, created = _create_paper_from_payload(db, body)
+        adopted = _adopt_paper_as_redo(db, paper)
+        db.commit()
+        db.refresh(paper)
+    except ValueError as exc:
+        db.rollback()
+        return JSONResponse(content={"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"记作重做练习失败: {exc}"},
+            status_code=500,
+        )
+
+    if background_tasks is not None:
+        schedule_database_export(background_tasks, operation="adopt_as_redo")
+    rows = _redo_paper_question_rows(db, paper.id)
+    pooled_count = sum(
+        1 for _pq, question in rows if int(question.wrong_count or 0) > 0
+    )
+    return {
+        "status": "success",
+        "paper_id": paper.id,
+        "title": paper.title or "",
+        "created": created,
+        "already": bool(adopted.get("already")),
+        "redo_round": int(adopted.get("round_no") or 1),
+        "question_count": len(rows),
+        # 卷里混了非错题时只对池内题记账，前端照着这个数把其余题标灰。
+        "pooled_count": pooled_count,
+        "message": "已记作重做练习。做完后到错题工作台的「重做复习」里逐题录入对错。",
+    }
+
+
+@app.post("/api/redo/release")
+def release_redo_adoption(
+    payload: Optional[dict] = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """取消认领（只对认领卷有意义；错题台生成的重做卷请用删除）。"""
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        paper_id = int(body.get("paper_id") or 0)
+    except (TypeError, ValueError):
+        paper_id = 0
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None or not _is_redo_paper(paper):
+        return JSONResponse(
+            content={"status": "error", "message": "重做卷不存在。"}, status_code=404
+        )
+    if not _redo_adopted_from_paper(paper):
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "这份卷是错题台生成的重做卷，请直接用「删除」。",
+            },
+            status_code=400,
+        )
+    return _release_adopted_redo(paper, db, background_tasks)
+
+
+@app.post("/api/redo/eligibility")
+def redo_adopt_eligibility(payload: Optional[dict] = None, db: Session = Depends(get_db)):
+    """这份卷值不值得记作重做练习？**只回报数字，不落库。**
+
+    导出 PDF 是二进制响应（``application/pdf``），塞不进这段元信息，所以前端在
+    导出成功之后另外问一句，再决定要不要弹确认卡。
+    """
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        paper_id = int(body.get("paper_id") or 0)
+    except (TypeError, ValueError):
+        paper_id = 0
+
+    meta: dict = {}
+    if paper_id > 0:
+        paper = db.query(Paper).filter(Paper.id == paper_id).first()
+        if paper is None:
+            return JSONResponse(
+                content={"status": "error", "message": "试卷不存在。"}, status_code=404
+            )
+        meta = _paper_metadata(paper)
+        questions = [question for _pq, question in _redo_paper_question_rows(db, paper.id)]
+    else:
+        wanted: list = []
+        for raw in body.get("question_ids") or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in wanted:
+                wanted.append(value)
+        questions = (
+            db.query(Question).filter(Question.id.in_(wanted)).all() if wanted else []
+        )
+
+    pooled = [question for question in questions if int(question.wrong_count or 0) > 0]
+    already_redo = bool(meta.get("is_redo"))
+    declined = bool(meta.get("redo_declined"))
+    return {
+        "status": "success",
+        "total": len(questions),
+        "pooled_count": len(pooled),
+        "pooled_ids": [question.id for question in pooled],
+        "already_redo": already_redo,
+        "declined": declined,
+        "eligible": len(pooled) > 0 and not already_redo and not declined,
+    }
+
+
+@app.post("/api/redo/decline")
+def decline_redo_adoption(payload: Optional[dict] = None, db: Session = Depends(get_db)):
+    """记下「这份卷就是普通卷」—— 同一张卷之后重印不再追问。
+
+    只写 metadata，不碰任何掌握度：它纯粹是个「别再问了」的标记。
+    """
+
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        paper_id = int(body.get("paper_id") or 0)
+    except (TypeError, ValueError):
+        paper_id = 0
+    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    if paper is None:
+        return JSONResponse(
+            content={"status": "error", "message": "试卷不存在。"}, status_code=404
+        )
+    try:
+        meta = _paper_metadata(paper)
+        meta["redo_declined"] = True
+        paper.metadata_json = json.dumps(meta)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"记录失败: {exc}"}, status_code=500
+        )
+    return {"status": "success", "paper_id": paper_id}
+
+
+@app.post("/api/redo/questions/{question_id}/mastery")
+def set_redo_mastery(
+    question_id: int,
+    payload: Optional[dict] = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+):
+    """人工标注某题「已掌握」／取消标注。
+
+    ``{"mastered": true}`` 写入标注，``{"mastered": false}`` 清除标注。
+
+    掌握度**不是**直接写字段就算完：标注只是插进重放序列的一条事件，写完之后必须
+    重放一遍（它可能被更晚的录入推翻），再镜像回错题记录 —— 否则题库侧说已掌握、
+    错题本侧说未掌握，同一道题两种说法。
+
+    只允许对**进过重做池的题**（``wrong_count > 0``）标注：对一道从没错过的题说
+    「已掌握」没有意义，还会把掌握度统计搅浑。
+    """
+
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if question is None:
+        return JSONResponse(
+            content={"status": "error", "message": "题目不存在。"}, status_code=404
+        )
+    if int(question.wrong_count or 0) <= 0:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "这道题没有进过重做池，不需要标注掌握度。",
+            },
+            status_code=400,
+        )
+
+    body = payload if isinstance(payload, dict) else {}
+    if "mastered" not in body:
+        return JSONResponse(
+            content={"status": "error", "message": "缺少 mastered 字段。"}, status_code=400
+        )
+    mastered = bool(body.get("mastered"))
+
+    try:
+        if mastered:
+            question.mastery_override = redo_schedule.MASTERED
+            question.mastery_override_at = datetime.datetime.now()
+        else:
+            question.mastery_override = ""
+            question.mastery_override_at = None
+        db.flush()
+        history = _redo_attempt_history(db, question_id)
+        _apply_replayed_state(question, _replay_question_state(question, history), history)
+        _mirror_mastery_to_mistake_records(db, question)
+        db.commit()
+        db.refresh(question)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return JSONResponse(
+            content={"status": "error", "message": f"标注掌握度失败: {exc}"},
+            status_code=500,
+        )
+
+    if background_tasks is not None:
+        schedule_database_export(background_tasks, operation="set_redo_mastery")
+    return {
+        "status": "success",
+        "question_id": question_id,
+        "mastered": bool(question.mastery_status == redo_schedule.MASTERED),
+        "override_active": redo_schedule.is_override_active(question.mastery_override),
+        "redo": question.to_dict()["redo"],
+    }
 
 
 # ----------------- Disable browser cache for static assets -----------------

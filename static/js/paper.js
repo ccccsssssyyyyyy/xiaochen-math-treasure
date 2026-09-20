@@ -3509,6 +3509,9 @@
                     tab.location.href = url;
                 }
                 if (window.showToast) window.showToast(`${targetName} PDF 编译成功！已在新窗口打开`, 'success');
+                // 导出就是「学生要做这份卷」的时刻，顺手问一句要不要进重做闭环。
+                // 答题卡不弹（它不是拿来做的练习卷）。
+                if (target !== 'sheet') promptRedoAdoptAfterExport(cartQuestions);
             } else {
                 let errLog = `${targetName} PDF 编译失败`;
                 let errData = {};
@@ -4017,6 +4020,7 @@
                                     <span class="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 rounded-full border ${typeInfo.color}">
                                         ${typeInfo.label}
                                     </span>
+                                    ${p.is_redo ? '<span class="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 rounded-full border bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-800 dark:text-emerald-300">' + (p.is_adopted_redo ? '重做卷 · 认领' : '重做卷') + '</span>' : ''}
                                     <h4 class="font-bold text-slate-800 dark:text-slate-100 text-sm truncate group-hover:text-brand-600 transition-colors">${escapeHtml(p.title)}</h4>
                                 </div>
                                 <div class="flex items-center space-x-4 text-xs text-slate-400">
@@ -4027,6 +4031,7 @@
                                 ${p.subtitle ? `<p class="text-xs text-slate-400 mt-1 truncate italic">备注: ${escapeHtml(p.subtitle)}</p>` : ''}
                             </div>
                             <div class="flex items-center space-x-2 shrink-0">
+                                ${p.is_redo ? '<button onclick="openRedoPaperFromLibrary(' + p.id + ')" class="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 active:scale-95 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold transition-all flex items-center space-x-1" title="到错题工作台逐题录入对错"><i class="fa-solid fa-rotate-left text-[11px]"></i><span>录入结果</span></button>' : ''}
                                 <button onclick="loadSavedPaper(${p.id})" class="px-3 py-1.5 rounded-xl bg-brand-500 hover:bg-brand-600 active:scale-95 text-white text-xs font-semibold shadow-sm transition-all flex items-center space-x-1" title="载入试卷至工作台">
                                     <i class="fa-solid fa-arrow-right-to-bracket text-[11px]"></i>
                                     <span>载入试卷</span>
@@ -4051,6 +4056,47 @@
             }
         }
     };
+
+    /** 题目 id 集合的稳定指纹：判断「当前卷面还是不是载入时那一份」。 */
+    function paperSignature(ids) {
+        return (ids || [])
+            .map(function (v) { return parseInt(v, 10) || 0; })
+            .sort(function (a, b) { return a - b; })
+            .join(',');
+    }
+
+    /**
+     * 导出成功后问一句「要不要记作错题重做练习」。
+     *
+     * 有 paperId 就认领**原来那张卷**（从历史载入后重印的场景），没有就带上卷面数据
+     * 让后端现场落库再认领（主编辑器新组的卷面，库里本来就没这条记录）。
+     *
+     * 卷面指纹必须对得上才敢用 loadedPaperId：老师载入卷 A 之后又改了题目，那已经是
+     * 另一份卷面了 —— 宁可新建一张，也不能把结果记到卷 A 头上。
+     */
+    function promptRedoAdoptAfterExport(cartQuestions) {
+        if (typeof window.maybePromptRedoAdopt !== 'function') return;
+        const items = cartQuestions || [];
+        const ids = items.map(function (q) { return q.id; });
+        const fingerprint = paperSignature(ids);
+        const knownPaperId = (window.PaperStore.loadedPaperFingerprint === fingerprint)
+            ? (parseInt(window.PaperStore.loadedPaperId, 10) || 0)
+            : 0;
+        window.maybePromptRedoAdopt({
+            paperId: knownPaperId,
+            questionIds: ids,
+            draft: {
+                title: window.PaperStore.meta.title,
+                subtitle: window.PaperStore.meta.subtitle,
+                subject_line: window.PaperStore.meta.subject_line || '',
+                exam_duration: examDurationMinutes(window.PaperStore.meta),
+                paper_type: paperTypeForPayload(),
+                show_notice: window.PaperStore.meta.show_notice !== false,
+                show_secret: window.PaperStore.meta.show_secret !== false,
+                questions: items
+            }
+        });
+    }
 
     window.loadSavedPaper = async function (paperId) {
         try {
@@ -4086,6 +4132,12 @@
                         });
                     });
                 }
+                // 记住这份卷面是从哪条历史记录载入的 —— 导出后就近认领时要认领原来
+                // 那张卷，而不是新建一张重复的。指纹在导出时再比对一次才敢用。
+                window.PaperStore.loadedPaperId = paper.id;
+                window.PaperStore.loadedPaperFingerprint = paperSignature(
+                    (paper.questions || []).map(item => item.id)
+                );
 
                 // 载入后的卷面已经进内存，顺手落盘 + 把基准对齐到这份归档：否则刷新会退回
                 // 载入前的旧草稿，提示条还会拿旧草稿去比新基准，报出假的「有改动未保存」。
@@ -4161,6 +4213,13 @@
                     const url = URL.createObjectURL(blob);
                     if (tab && !tab.closed) {
                         tab.location.href = url;
+                    }
+                    // 有 paper_id 就走认领已有卷那条分支（declined 能落库，之后不再问）。
+                    if (typeof window.maybePromptRedoAdopt === 'function') {
+                        window.maybePromptRedoAdopt({
+                            paperId: paperId,
+                            questionIds: cartQuestions.map(q => q.id)
+                        });
                     }
                 } else {
                     let errorData = {};

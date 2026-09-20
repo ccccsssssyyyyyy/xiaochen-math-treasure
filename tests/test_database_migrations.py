@@ -202,6 +202,124 @@ def test_migration_refuses_partially_missing_schema(tmp_path):
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
 
 
+def test_v1011_adds_redo_closure_schema(tmp_path, monkeypatch):
+    """v1011：补 redo_attempts 表 + questions 七列（错题重做闭环），不改数据。"""
+
+    database_path = tmp_path / "redo-closure.db"
+    _create_legacy_database(database_path)
+    monkeypatch.setattr(
+        db_migrations, "SCHEMA_SNAPSHOT_DIR", tmp_path / "schema_snapshots"
+    )
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    db_migrations.migrate_database(engine)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            db_migrations.LATEST_SCHEMA_VERSION
+        )
+        table_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "redo_attempts" in table_names
+
+        question_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(questions)").fetchall()
+        }
+        assert {
+            "correct_answer",
+            "wrong_count",
+            "redo_count",
+            "redo_correct_streak",
+            "mastery_status",
+            "next_redo_due",
+            "last_redo_at",
+        } <= question_columns
+
+        redo_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(redo_attempts)"
+            ).fetchall()
+        }
+        assert {
+            "student_id",
+            "paper_id",
+            "question_id",
+            "attempt_no",
+            "result",
+            "option_mode",
+            "subject",
+            "attempted_at",
+        } <= redo_columns
+
+        # 只加列/建表，既有数据不动
+        assert connection.execute("SELECT content FROM questions").fetchall() == [
+            ("question",)
+        ]
+
+    # 幂等：重复迁移不报错
+    again = db_migrations.migrate_database(engine)
+    assert again["from_version"] == db_migrations.LATEST_SCHEMA_VERSION
+    assert again["to_version"] == db_migrations.LATEST_SCHEMA_VERSION
+
+
+def test_v1012_adds_manual_mastery_override_columns(tmp_path, monkeypatch):
+    """v1012：questions 补 mastery_override / mastery_override_at（人工标注掌握度）。"""
+
+    database_path = tmp_path / "mastery-override.db"
+    _create_legacy_database(database_path)
+    monkeypatch.setattr(
+        db_migrations, "SCHEMA_SNAPSHOT_DIR", tmp_path / "schema_snapshots"
+    )
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    db_migrations.migrate_database(engine)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            db_migrations.LATEST_SCHEMA_VERSION
+        )
+        question_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(questions)").fetchall()
+        }
+        assert {"mastery_override", "mastery_override_at"} <= question_columns
+
+        # 只加列、不回填：空串 / NULL 恰好等于「从未人工标注过」
+        assert connection.execute(
+            "SELECT mastery_override, mastery_override_at FROM questions"
+        ).fetchall() == [("", None)]
+        assert connection.execute("SELECT content FROM questions").fetchall() == [
+            ("question",)
+        ]
+
+    again = db_migrations.migrate_database(engine)
+    assert again["from_version"] == again["to_version"] == (
+        db_migrations.LATEST_SCHEMA_VERSION
+    )
+
+
+def test_v1012_step_is_registered_in_the_chain():
+    """这一步必须挂在版本链上，否则新库停在 1011、人工标注无处落脚。
+
+    刻意**不写死** ``LATEST_SCHEMA_VERSION = 1012`` —— 那条断言每升一次版本都要
+    回头改历史测试（本项目 v1010 的旧测试就是这么红的）。
+    """
+
+    source = (
+        Path(__file__).resolve().parents[1] / "mathbank" / "db_migrations.py"
+    ).read_text(encoding="utf-8")
+    assert "def _add_mastery_override_columns_v1012(" in source
+    assert "_add_mastery_override_columns_v1012(engine)" in source
+    assert "elif current == 1011:" in source, "v1011 → v1012 的步骤必须挂上"
+    assert db_migrations.LATEST_SCHEMA_VERSION >= 1012
+
+
 def test_persistence_modules_remain_importable_on_python_310():
     project_root = Path(__file__).resolve().parents[1]
     module_paths = [

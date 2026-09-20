@@ -1124,6 +1124,10 @@
                         </div>
                     </div>
                     <div class="flex items-center space-x-2">
+                        <div class="glass-tab flex items-center p-0.5" role="tablist" aria-label="错题工作台视图">
+                            <button type="button" role="tab" id="mistakeSubtabScan" aria-selected="true" onclick="switchMistakeSubtab('scan')" class="glass-tab-item active px-2.5 py-1 text-[11px] font-semibold">扫描录入</button>
+                            <button type="button" role="tab" id="mistakeSubtabRedo" aria-selected="false" onclick="switchMistakeSubtab('redo')" class="glass-tab-item px-2.5 py-1 text-[11px] font-semibold flex items-center space-x-1"><span>重做复习</span><span id="mistakeRedoDot" class="hidden w-1.5 h-1.5 rounded-full bg-brand-600"></span></button>
+                        </div>
                         <div id="mistakeStudentChip" class="text-[11px] px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">学生：—</div>
                         <button type="button" id="mistakeToggleNewBatchBtn" onclick="toggleMistakeNewBatch()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5">
                             <i class="fa-solid fa-plus text-[10px]"></i><span>新建批次</span>
@@ -1172,6 +1176,111 @@
                 </div>
 
                 <div id="mistakeBatchList" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-2.5"></div>
+            </div>
+
+            <!-- ======== 二级页：重做复习（左：重做卷任务 / 右：逐题录入对错） ======== -->
+            <div id="mistakeRedoView" class="flex-1 min-h-0 flex flex-col overflow-hidden hidden bg-slate-50 dark:bg-slate-950">
+                <div class="shrink-0 px-4 py-2.5 border-b border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 flex items-center justify-between gap-3">
+                    <div class="flex items-center space-x-3 min-w-0">
+                        <button type="button" onclick="closeRedoReview()" aria-label="返回批次列表" class="glass-btn w-8 h-8 flex items-center justify-center rounded-xl shrink-0"><i class="fa-solid fa-arrow-left text-xs"></i></button>
+                        <div class="min-w-0">
+                            <div class="font-semibold text-sm truncate">重做复习</div>
+                            <div id="redoSubSummary" class="text-[11px] text-slate-500 truncate">正在加载…</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <button type="button" id="redoSyncBtn" onclick="syncRedoPool()" class="glass-btn px-3 py-1.5 text-xs font-semibold hidden" title="把本次功能上线前已入库的错题补进重做池，并补抽选择题答案字母">
+                            <i class="fa-solid fa-rotate text-[10px]"></i><span id="redoSyncBtnText">同步历史错题</span>
+                        </button>
+                        <button type="button" id="redoBoardBtn" onclick="toggleRedoBoard()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5" title="按知识点看哪些板块反复错">
+                            <i class="fa-solid fa-chart-simple text-[10px]"></i><span>知识点看板</span>
+                        </button>
+                        <button type="button" id="redoQuickBtn" onclick="createQuickRedoPaper()" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5" title="一键把「未掌握 + 建议重做日已到」的题凑成一份卷（按累计错次降序）">
+                            <i class="fa-solid fa-bolt text-[10px]"></i><span>重点复习卷</span>
+                        </button>
+                        <button type="button" id="redoNewBtn" onclick="toggleRedoNewPanel()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5">
+                            <i class="fa-solid fa-plus text-[10px]"></i><span>生成重做卷</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="redoStatBar" class="shrink-0 px-4 py-2.5 grid grid-cols-2 lg:grid-cols-5 gap-2 border-b border-slate-200/60 dark:border-slate-800 bg-white/50 dark:bg-slate-900/40"></div>
+
+                <div id="redoNewPanel" class="hidden shrink-0 border-b border-slate-200/60 dark:border-slate-800 bg-white/80 dark:bg-slate-900/60 px-4 py-3">
+                    <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-3">
+                        <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-0.5">取题范围</span>
+                                <select id="redoScopeSelect" class="glass-select w-full text-xs px-2 py-1.5 rounded-lg">
+                                    <option value="due">建议重做日已到（推荐）</option>
+                                    <option value="all">全部未掌握</option>
+                                </select>
+                            </label>
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-0.5">学科</span>
+                                <select id="redoSubjectSelect" class="glass-select w-full text-xs px-2 py-1.5 rounded-lg"></select>
+                            </label>
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-0.5">题量上限</span>
+                                <input id="redoLimitInput" type="text" inputmode="numeric" value="12" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg">
+                            </label>
+                            <label class="block">
+                                <span class="block text-[11px] text-slate-500 mb-0.5">卷面标题（可空）</span>
+                                <input id="redoTitleInput" class="glass-input w-full text-xs px-2 py-1.5 rounded-lg" placeholder="留空自动命名">
+                            </label>
+                        </div>
+                        <div class="space-y-2">
+                            <div id="redoNewHint" class="text-[11px] text-slate-500 leading-relaxed">按累计错次从高到低取题；建议重做日一律落在周六（学生只有周末能打印带走）。</div>
+                            <button type="button" onclick="submitRedoNewPaper()" class="glass-btn glass-btn-primary w-full py-2 text-xs font-semibold">生成并打开</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="redoBoardPanel" class="hidden shrink-0 border-b border-slate-200/60 dark:border-slate-800 bg-white/80 dark:bg-slate-900/60 px-4 py-3 max-h-[42%] overflow-y-auto custom-scrollbar"></div>
+
+                <div class="flex-1 min-h-0 flex overflow-hidden">
+                    <div class="w-[300px] xl:w-[340px] shrink-0 border-r border-slate-200/60 dark:border-slate-800 flex flex-col overflow-hidden bg-white/40 dark:bg-slate-900/30">
+                        <div class="shrink-0 px-3 py-2 text-[11px] font-semibold text-slate-500 flex items-center justify-between border-b border-slate-200/40 dark:border-slate-800/60">
+                            <span>重做卷</span><span id="redoTaskCount">0 份</span>
+                        </div>
+                        <div id="redoTaskList" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2.5 space-y-2"></div>
+                    </div>
+
+                    <div class="flex-1 min-w-0 flex flex-col overflow-hidden">
+                        <div id="redoGradeEmpty" class="flex-1 flex flex-col items-center justify-center text-slate-400 text-xs space-y-2">
+                            <i class="fa-solid fa-rotate-left text-2xl"></i>
+                            <div>左侧选一份重做卷，开始逐题录入结果</div>
+                        </div>
+                        <div id="redoGradePane" class="hidden flex-1 min-h-0 flex flex-col overflow-hidden">
+                            <div class="shrink-0 px-4 py-2 border-b border-slate-200/60 dark:border-slate-800 bg-white/60 dark:bg-slate-900/50 flex items-center justify-between gap-3">
+                                <div class="min-w-0">
+                                    <div id="redoGradeTitle" class="font-semibold text-sm truncate">—</div>
+                                    <div id="redoGradeMeta" class="text-[11px] text-slate-500 truncate">—</div>
+                                </div>
+                                <div class="flex items-center space-x-2 shrink-0">
+                                    <label class="flex items-center space-x-1.5 text-[11px] text-slate-500 cursor-pointer select-none" title="隐藏答案后再判对错，避免看着答案点">
+                                        <input type="checkbox" id="redoHideAnswerToggle" class="accent-brand-600" onchange="setRedoHideAnswer(this.checked)" checked>
+                                        <span>隐藏答案</span>
+                                    </label>
+                                    <button type="button" onclick="exportRedoPaper(false)" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-file-pdf text-[10px]"></i><span>导出卷面</span></button>
+                                    <button type="button" onclick="exportRedoPaper(true)" class="glass-btn px-3 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-file-circle-check text-[10px]"></i><span>答案版</span></button>
+                                </div>
+                            </div>
+                            <div id="redoGradeProgress" class="shrink-0 px-4 py-2 border-b border-slate-200/40 dark:border-slate-800/60 bg-white/40 dark:bg-slate-900/30"></div>
+                            <div id="redoGradeCard" class="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4"></div>
+                            <div class="shrink-0 px-4 py-3 border-t border-slate-200/60 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 flex items-center justify-between gap-3">
+                                <div class="flex items-center space-x-2">
+                                    <button type="button" onclick="redoStep(-1)" class="glass-btn px-3 py-1.5 text-xs font-semibold">← 上一题</button>
+                                    <button type="button" onclick="redoStep(1)" class="glass-btn px-3 py-1.5 text-xs font-semibold">下一题 →</button>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <button type="button" onclick="gradeRedoCurrent('incorrect')" class="glass-btn glass-btn-danger px-4 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-xmark text-[10px]"></i><span>做错</span></button>
+                                    <button type="button" onclick="gradeRedoCurrent('correct')" class="glass-btn glass-btn-success px-4 py-1.5 text-xs font-semibold flex items-center space-x-1.5"><i class="fa-solid fa-check text-[10px]"></i><span>做对</span></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- ======== 二级页：错题本审校（三栏：收录题目 / LaTeX 编辑 / 渲染预览） ======== -->
@@ -2797,6 +2906,22 @@
         </div>
     </div>
 
+    <!-- 认领为重做练习：组卷台那张卷印出来做完后，问一句要不要进重做闭环。
+         层级夹在常规弹窗(50)与图片灯箱(100)之间。 -->
+    <div id="redoAdoptPrompt" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="redoAdoptTitle" class="fixed inset-0 glass-modal-overlay z-[70] items-center justify-center hidden">
+        <div class="glass-panel rounded-2xl w-full max-w-md p-5 space-y-3 text-left">
+            <div class="flex items-center space-x-2">
+                <i class="fa-solid fa-rotate-left text-brand-500"></i>
+                <h3 id="redoAdoptTitle" class="text-sm font-semibold text-slate-700 dark:text-slate-200">这份卷要记作错题重做练习吗</h3>
+            </div>
+            <p id="redoAdoptText" class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed"></p>
+            <div class="flex items-center justify-end space-x-2 pt-1">
+                <button type="button" id="redoAdoptDismissBtn" onclick="dismissRedoAdopt()" class="glass-btn px-3 py-1.5 text-xs font-semibold">这是普通卷</button>
+                <button type="button" id="redoAdoptConfirmBtn" onclick="confirmRedoAdopt()" class="glass-btn glass-btn-primary px-3 py-1.5 text-xs font-semibold">记作重做练习</button>
+            </div>
+        </div>
+    </div>
+
     <!-- MAIN APP JAVASCRIPT -->
     <script src="/static/js/math-render.js?v=1.0.0"></script>
     <script src="/static/js/api.js?v=1.0.2"></script>
@@ -2804,7 +2929,8 @@
     <script src="/static/js/ocr.js?v=1.0.1"></script>
     <script src="/static/js/import.js?v=1.0.5"></script>
     <script src="/static/js/paper.js?v=1.0.1"></script>
-    <script src="/static/js/mistake.js?v=1.0.1"></script>
+<script src="/static/js/mistake.js?v=1.0.1"></script>
+<script src="/static/js/redo.js?v=1.0.0"></script>
     <script src="/static/js/onboarding.js?v=1.0.0"></script>
 <script src="/static/js/backup.js?v=1.0.0"></script>
     

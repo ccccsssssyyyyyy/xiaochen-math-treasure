@@ -75,14 +75,19 @@ def legacy_engine(tmp_path, monkeypatch):
 
 
 def test_v1010_adds_classification_columns(legacy_engine) -> None:
-    """升级到 v1010 后六列齐备，且版本号推到 1010。"""
+    """升级后六列齐备，且版本号一路推到最新。
+
+    刻意**不写死**终态版本号：迁移是链式的，从 1009 起跳的库会一直走到
+    ``LATEST_SCHEMA_VERSION``。硬编 1010 会在每次新增迁移时误红
+    —— 项目已因这条断言红过一轮（1009 → 1010 时）。
+    """
 
     before = {c["name"] for c in inspect(legacy_engine).get_columns("mistake_records")}
     assert not (set(CLASSIFICATION_COLUMNS) & before), "夹具没造出「缺列」的旧库"
 
     result = db_migrations.migrate_database(legacy_engine)
     assert result["from_version"] == 1009
-    assert result["to_version"] == 1010
+    assert result["to_version"] == db_migrations.LATEST_SCHEMA_VERSION
     assert result["added_mistake_classification_columns"] == 6
 
     after = {c["name"] for c in inspect(legacy_engine).get_columns("mistake_records")}
@@ -129,7 +134,8 @@ def test_v1010_is_idempotent(legacy_engine) -> None:
 
     db_migrations.migrate_database(legacy_engine)
     second = db_migrations.migrate_database(legacy_engine)
-    assert second["from_version"] == second["to_version"] == 1010
+    latest = db_migrations.LATEST_SCHEMA_VERSION
+    assert second["from_version"] == second["to_version"] == latest
     assert "added_mistake_classification_columns" not in second
 
 
@@ -137,7 +143,9 @@ def test_v1010_step_is_registered_in_the_chain() -> None:
     """迁移函数必须挂进 migrate_database 的版本链，否则新库永远停在 1009。"""
 
     source = (PROJECT_ROOT / "mathbank" / "db_migrations.py").read_text(encoding="utf-8")
-    assert "LATEST_SCHEMA_VERSION = 1010" in source
+    # 版本号只校验「与常量一致 + 不低于本步」，不钉死具体数字
+    assert f"LATEST_SCHEMA_VERSION = {db_migrations.LATEST_SCHEMA_VERSION}" in source
+    assert db_migrations.LATEST_SCHEMA_VERSION >= 1010, "v1010 之后不该出现版本回退"
     assert "def _add_mistake_classification_columns_v1010(" in source
     assert "elif current == 1009:" in source
     assert "_add_mistake_classification_columns_v1010(engine)" in source
