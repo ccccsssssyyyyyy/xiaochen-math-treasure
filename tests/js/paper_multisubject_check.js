@@ -37,21 +37,37 @@ function section(title) { console.log('\n' + title); }
 
 // ---------------------------------------------------------------- 假 DOM
 
-function makeElement(id) {
+/** 按顶层 data-vcard 把卡片的 HTML 切成一段一段（每张卡一段）。 */
+function splitVCards(html) {
+  const re = /<div[^>]*\bdata-vcard\b[^>]*>/g;
+  const starts = [];
+  let m;
+  while ((m = re.exec(html)) !== null) starts.push(m.index);
+  const parts = [];
+  for (let i = 0; i < starts.length; i++) {
+    parts.push(html.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : html.length));
+  }
+  return parts;
+}
+
+function makeElement(id, getById) {
   const attrs = {};
   const classes = new Set();
-  return {
+  const el = {
     id: id,
-    innerHTML: '',
+    _innerHTML: '',
     textContent: '',
     innerText: '',
     value: '',
     scrollTop: 0,
     scrollHeight: 4000,
     clientHeight: 800,
+    offsetHeight: 0,
     style: {},
     dataset: {},
     handlers: {},
+    children: [],
+    parentNode: null,
     classList: {
       add: function () { for (const c of arguments) classes.add(c); },
       remove: function () { for (const c of arguments) classes.delete(c); },
@@ -62,11 +78,34 @@ function makeElement(id) {
     getAttribute: function (n) { return Object.prototype.hasOwnProperty.call(attrs, n) ? attrs[n] : null; },
     removeAttribute: function (n) { delete attrs[n]; },
     hasAttribute: function (n) { return Object.prototype.hasOwnProperty.call(attrs, n); },
-    addEventListener: function (t, f) { (this.handlers[t] = this.handlers[t] || []).push(f); },
+    addEventListener: function (t, f) { (el.handlers[t] = el.handlers[t] || []).push(f); },
     removeEventListener: function () {},
-    appendChild: function () {},
-    removeChild: function () {},
-    remove: function () {},
+    // 窗口同步靠这些树操作只增删差异卡片，假 DOM 必须真的维护 children，
+    // 否则「复用了哪几张、重建了哪几张」在夹具里完全看不见。
+    appendChild: function (node) {
+      if (!node) return node;
+      const existing = el.children.indexOf(node);
+      if (existing >= 0) el.children.splice(existing, 1);
+      el.children.push(node);
+      node.parentNode = el;
+      if (!node.offsetHeight) node.offsetHeight = 264;
+      return node;
+    },
+    insertBefore: function (node, ref) {
+      if (!node) return node;
+      const existing = el.children.indexOf(node);
+      if (existing >= 0) el.children.splice(existing, 1);
+      const at = ref ? el.children.indexOf(ref) : -1;
+      if (at >= 0) el.children.splice(at, 0, node); else el.children.push(node);
+      node.parentNode = el;
+      return node;
+    },
+    removeChild: function (node) {
+      const i = el.children.indexOf(node);
+      if (i >= 0) { el.children.splice(i, 1); node.parentNode = null; }
+      return node;
+    },
+    remove: function () { if (el.parentNode) el.parentNode.removeChild(el); },
     focus: function () {},
     blur: function () {},
     click: function () {},
@@ -74,6 +113,47 @@ function makeElement(id) {
     querySelectorAll: function () { return []; },
     getBoundingClientRect: function () { return { left: 0, top: 0, width: 1000, height: 2000, right: 1000, bottom: 2000 }; }
   };
+  Object.defineProperty(el, 'firstElementChild', {
+    get: function () { return el.children[0] || null; }
+  });
+  Object.defineProperty(el, 'nextElementSibling', {
+    get: function () {
+      const p = el.parentNode;
+      if (!p) return null;
+      const i = p.children.indexOf(el);
+      return i >= 0 ? (p.children[i + 1] || null) : null;
+    }
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    get: function () {
+      // 卡片是 appendChild 进去的，读 innerHTML 得按子元素序列化回来，
+      // 否则「渲染出了什么」在夹具里看不见。
+      if (el.children.length) return el.children.map(function (c) { return c._innerHTML; }).join('');
+      return el._innerHTML;
+    },
+    set: function (html) {
+      el._innerHTML = String(html);
+      el.children = [];
+      const parts = splitVCards(el._innerHTML);
+      for (let i = 0; i < parts.length; i++) {
+        const child = makeElement('fake-card-' + i, getById);
+        child._innerHTML = parts[i];
+        child.parentNode = el;
+        el.children.push(child);
+      }
+      // 真实浏览器里 container.innerHTML 重建会连旧的 spacer/viewport 一起丢掉，
+      // 新 viewport 是空的。假 DOM 必须照做，否则窗口同步会以为上一批卡片还在。
+      if (typeof getById === 'function' && /id="paperVirtualViewport"/.test(el._innerHTML)) {
+        const vp = getById('paperVirtualViewport');
+        if (vp) { vp.children = []; vp._innerHTML = ''; }
+      }
+      if (typeof getById === 'function' && /id="paperVirtualSpacer"/.test(el._innerHTML)) {
+        const sp = getById('paperVirtualSpacer');
+        if (sp) sp.style = {};
+      }
+    }
+  });
+  return el;
 }
 
 function makeLocalStorage(store) {
@@ -91,7 +171,10 @@ function makeLocalStorage(store) {
 function boot(opts) {
   opts = opts || {};
   const elements = {};
-  function elementFor(id) { if (!elements[id]) elements[id] = makeElement(id); return elements[id]; }
+  function elementFor(id) {
+    if (!elements[id]) elements[id] = makeElement(id, elementFor);
+    return elements[id];
+  }
   const documentHandlers = {};
   const requests = [];
   let fetchImpl = function () {
@@ -114,7 +197,7 @@ function boot(opts) {
       getElementById: elementFor,
       querySelector: function () { return null; },
       querySelectorAll: function () { return []; },
-      createElement: function () { return makeElement('created'); },
+      createElement: function () { return makeElement('created', elementFor); },
       addEventListener: function (t, f) { (documentHandlers[t] = documentHandlers[t] || []).push(f); },
       removeEventListener: function () {},
       body: makeElement('body'),

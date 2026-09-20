@@ -1886,14 +1886,21 @@
     const PAPER_ITEM_ESTIMATE = 264; // 未实测卡片的高度估计(px)，只影响滚动条手感
     const PAPER_ITEM_GAP = 16;       // 卡片间距(px)，落在每张卡的 margin-bottom 上
     const PAPER_OVERSCAN = 4;        // 视口上下额外渲染条数
-    const PAPER_MEASURE_PASSES = 4;  // 实测回填后最多重排次数（防测量抖动死循环）
 
     const paperVirtual = {
         displayList: [],
         bound: false,
         rafPending: false,
         heights: new Map(),          // q.id -> 实测卡高（不含间距），跨过滤/切页复用
-        resizeObs: null
+        resizeObs: null,
+        rendered: new Map(),         // q.id -> 视口里那张卡的元素（复用就不必重建）
+        lastStart: -1,               // 上一轮渲染的窗口；未变则滚动帧里不做任何 DOM 工作
+        lastEnd: -1,
+        lastTranslate: null,
+        selfScrollTop: null,         // 程序改 scrollTop 时的期望值，用来识别「自己派发的 scroll」
+        // 滚动稳定性观测点：updates = 被调用次数，domSyncs = 真的动了 DOM 的次数。
+        // 健康状态下连续滚动时 updates 逐帧增长而 domSyncs 几乎不动。
+        stats: { updates: 0, domSyncs: 0 }
     };
 
     /** 一张卡占的槽高 = 卡高(实测优先，未实测用估计) + 间距 */
@@ -1925,6 +1932,7 @@
     }
 
     // 只读数学 + 实测缓存，供 vm 契约测试断言（不改任何行为）
+    // 只读数学 + 实测缓存 + 窗口同步观测点，供 vm 契约测试断言（不改任何行为）
     window.PaperVirtualMath = {
         offsets: paperVirtualOffsets,
         indexAt: paperVirtualIndexAt,
@@ -1932,6 +1940,12 @@
         measuredHeight: function (qid) { return paperVirtual.heights.get(qid); },
         setMeasuredHeight: function (qid, h) { paperVirtual.heights.set(qid, h); },
         resetMeasured: function () { paperVirtual.heights.clear(); },
+        update: function () { updatePaperVirtualList(); },
+        renderedIds: function () { return Array.from(paperVirtual.rendered.keys()); },
+        lastWindow: function () { return { start: paperVirtual.lastStart, end: paperVirtual.lastEnd }; },
+        pendingSelfScroll: function () { return paperVirtual.selfScrollTop; },
+        stats: function () { return { updates: paperVirtual.stats.updates, domSyncs: paperVirtual.stats.domSyncs }; },
+        resetStats: function () { paperVirtual.stats.updates = 0; paperVirtual.stats.domSyncs = 0; },
         ESTIMATE: PAPER_ITEM_ESTIMATE,
         GAP: PAPER_ITEM_GAP
     };
@@ -2065,8 +2079,120 @@
         `;
     }
 
-    function updatePaperVirtualList(depth) {
-        depth = depth || 0;
+    // ---- 视口窗口同步（2026-09-20 重写） ----
+    // 旧实现滚动帧里无条件 `viewport.innerHTML = html`：哪怕一张卡都没进出视口，也要把
+    // 视口内全部卡片重新生成一遍 —— KaTeX 重跑、adaptSingleChoicesGrid 每卡再强制 reflow
+    // 几次、题图 <img loading="lazy"> 回落到未加载状态。紧接着的实测回填又会改写
+    // scrollTop，而改 scrollTop 会再派发 scroll 事件 → 又重建 → 高度又变。这条跨帧闭环
+    // （PAPER_MEASURE_PASSES 只管得住同一次调用内的递归）就是「滚动时画面疯狂上下跳」的根因。
+    // 现在：窗口没变 → 一帧 DOM 操作都不做；窗口变了 → 只增删差异卡片、复用已渲染的卡；
+    // 程序改 scrollTop 一律登记 selfScrollTop，不再触发第二轮。
+
+    /** 把卡片 HTML 变成元素，好让窗口变化时能按 q.id 复用（复用即保住 KaTeX 与已加载的题图）。 */
+    function createPaperStreamCardEl(q, index) {
+        const holder = document.createElement('div');
+        holder.innerHTML = renderPaperStreamCard(q, index);
+        const card = holder.firstElementChild;
+        if (!card) return null;
+        card.dataset.vqid = String(q.id);
+        card.dataset.vindex = String(index);
+        return card;
+    }
+
+    function resetPaperVirtualWindow() {
+        // container.innerHTML 重设后旧卡片已经脱离文档，缓存必须作废 ——
+        // 否则下次同步会把游离的旧元素重新 append 回来。
+        paperVirtual.rendered.clear();
+        paperVirtual.lastStart = -1;
+        paperVirtual.lastEnd = -1;
+        paperVirtual.lastTranslate = null;
+        paperVirtual.selfScrollTop = null;
+    }
+
+    function applyPaperVirtualTranslate(viewport, y) {
+        if (paperVirtual.lastTranslate === y) return;
+        viewport.style.transform = 'translateY(' + y + 'px)';
+        paperVirtual.lastTranslate = y;
+    }
+
+    /** 按 q.id 差异同步卡片：只 append 新进视口的、只 remove 滚出视口的。返回新建的卡片。 */
+    function syncPaperVirtualWindow(list, start, end) {
+        const viewport = document.getElementById('paperVirtualViewport');
+        if (!viewport) return [];
+        const wanted = new Set();
+        for (let i = start; i <= end; i++) wanted.add(list[i].id);
+
+        paperVirtual.rendered.forEach(function (el, id) {
+            if (!wanted.has(id)) {
+                el.remove();
+                paperVirtual.rendered.delete(id);
+            }
+        });
+
+        const created = [];
+        const before = Array.prototype.slice.call(viewport.children);
+        for (let i = start; i <= end; i++) {
+            const q = list[i];
+            let el = paperVirtual.rendered.get(q.id);
+            if (el && el.dataset.vindex !== String(i)) {
+                // 下标写进了「上移/下移」的 onclick，位置变了就只能重建这一张。
+                el.remove();
+                paperVirtual.rendered.delete(q.id);
+                el = null;
+            }
+            if (!el) {
+                el = createPaperStreamCardEl(q, i);
+                if (!el) continue;
+                paperVirtual.rendered.set(q.id, el);
+                created.push({ el: el, index: i });
+            }
+            // 已在正确位置上的一张不动，只有新建/移位的才重新摆 —— appendChild 会把
+            // 元素移到末尾，按 i 递增追加即得到正确的窗口顺序。
+            if (before[i - start] !== el) viewport.appendChild(el);
+        }
+        return created;
+    }
+
+    /** 量窗口内卡片高度并回填缓存，返回是否有变化。 */
+    function measurePaperVirtualWindow(list, start) {
+        const viewport = document.getElementById('paperVirtualViewport');
+        if (!viewport) return false;
+        let changed = false;
+        const cards = viewport.children;
+        for (let k = 0; k < cards.length; k++) {
+            const q = list[start + k];
+            if (!q) break;
+            const measured = cards[k].offsetHeight;
+            if (measured > 0 && paperVirtual.heights.get(q.id) !== measured) {
+                paperVirtual.heights.set(q.id, measured);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * 实测高度与估计值不一致时前缀和整体平移，正在看的那道题会跳一下，所以补回锚点差值。
+     * 但这次 scrollTop 写入必须登记成「自己造成的」：它派发的 scroll 事件不能再触发一轮
+     * 重建，否则就是那个让画面持续上下跳的跨帧闭环。
+     */
+    function anchorPaperVirtualScroll(container, list, prevOffsets) {
+        const newOffsets = paperVirtualOffsets(list);
+        const spacer = document.getElementById('paperVirtualSpacer');
+        if (spacer) spacer.style.height = newOffsets[list.length] + 'px';
+        const anchor = paperVirtualIndexAt(prevOffsets, container.scrollTop);
+        const delta = newOffsets[anchor] - prevOffsets[anchor];
+        if (!delta) return false;
+        const target = container.scrollTop + delta;
+        if (target === container.scrollTop) return false;
+        paperVirtual.selfScrollTop = target;
+        container.scrollTop = target;
+        return true;
+    }
+
+    function updatePaperVirtualList(opts) {
+        opts = opts || {};
+        paperVirtual.stats.updates++;
         const container = document.getElementById('paperQuestionStream');
         const spacer = document.getElementById('paperVirtualSpacer');
         const viewport = document.getElementById('paperVirtualViewport');
@@ -2077,71 +2203,80 @@
 
         // 前缀和定位：start/end 从「卡片顶部的 y」反查，而不是拿固定步长除。
         // 未实测的卡按估计高度参与计算，实测后自动收敛。
-        const offsets = paperVirtualOffsets(list);
-        spacer.style.height = offsets[total] + 'px';
+        const prevOffsets = paperVirtualOffsets(list);
+        spacer.style.height = prevOffsets[total] + 'px';
 
         const scrollTop = container.scrollTop;
         const viewportH = container.clientHeight;
-        let start = paperVirtualIndexAt(offsets, Math.max(0, scrollTop)) - PAPER_OVERSCAN;
-        let end = paperVirtualIndexAt(offsets, scrollTop + viewportH) + PAPER_OVERSCAN;
+        let start = paperVirtualIndexAt(prevOffsets, Math.max(0, scrollTop)) - PAPER_OVERSCAN;
+        let end = paperVirtualIndexAt(prevOffsets, scrollTop + viewportH) + PAPER_OVERSCAN;
         start = Math.max(0, start);
         end = Math.min(total - 1, end);
         if (start > end) { start = 0; end = Math.min(total - 1, PAPER_OVERSCAN * 2); }
 
-        viewport.style.transform = `translateY(${offsets[start]}px)`;
-        let html = '';
-        for (let i = start; i <= end; i++) {
-            html += renderPaperStreamCard(list[i], i);
-        }
-        viewport.innerHTML = html;
+        const windowChanged = !!opts.force
+            || start !== paperVirtual.lastStart
+            || end !== paperVirtual.lastEnd;
 
-        // 仅对视口内卡片渲染 KaTeX，避免一次性全量渲染卡顿
-        for (let i = start; i <= end; i++) {
-            const q = list[i];
-            const el = document.getElementById(`paper-q-render-${q.id}`);
+        // 滚动帧里窗口没变 → 一个 DOM 操作都不做，只同步定位。这是本轮修复的核心。
+        if (!windowChanged) {
+            applyPaperVirtualTranslate(viewport, prevOffsets[start]);
+            return;
+        }
+
+        paperVirtual.stats.domSyncs++;
+        const created = syncPaperVirtualWindow(list, start, end);
+        paperVirtual.lastStart = start;
+        paperVirtual.lastEnd = end;
+        applyPaperVirtualTranslate(viewport, prevOffsets[start]);
+
+        // KaTeX 只对**这一轮新建**的卡片渲染：复用卡上已有的渲染结果原样保留，不重复付出。
+        for (let i = 0; i < created.length; i++) {
+            const q = list[created[i].index];
+            const el = document.getElementById('paper-q-render-' + q.id);
             if (el) {
                 window.MathRender.render(el, 'display');
                 if (typeof window.adaptChoicesGridLayout === 'function') window.adaptChoicesGridLayout(el);
             }
         }
 
-        // 实测回填：KaTeX / 选项栅格都定型之后再量（它们都会改变卡高）。
-        // 量出与缓存不同的高度就重算布局——递归有上限，图片懒加载等后续
-        // 变化由 viewport 的 ResizeObserver 兜住（见 ensurePaperVirtualResizeWatch）。
-        if (depth < PAPER_MEASURE_PASSES && viewport.children && viewport.children.length) {
-            let changed = false;
-            const cards = viewport.children;
-            for (let k = 0; k < cards.length && start + k < total; k++) {
-                const q = list[start + k];
-                const measured = cards[k].offsetHeight;
-                if (measured > 0 && paperVirtual.heights.get(q.id) !== measured) {
-                    paperVirtual.heights.set(q.id, measured);
-                    changed = true;
-                }
-            }
-            if (changed) {
-                // 视觉锚点：上方卡片实测变高/变矮时，视口顶部那卡的新旧偏移差补回
-                // scrollTop，否则正在看的题会整体上下跳一截。
-                const newOffsets = paperVirtualOffsets(list);
-                const anchor = paperVirtualIndexAt(offsets, container.scrollTop);
-                const delta = newOffsets[anchor] - offsets[anchor];
-                if (delta) container.scrollTop = container.scrollTop + delta;
-                updatePaperVirtualList(depth + 1);
-            }
+        // 实测回填：KaTeX 与选项栅格都定型之后再量（它们都会改变卡高）。只在窗口变化时做
+        // （低频），量到差异就修正一次 scrollTop；图片懒加载这类「渲染后才长高」的变化由
+        // viewport 的 ResizeObserver 兜住（见 remeasurePaperVirtualWindow）。
+        if (measurePaperVirtualWindow(list, start)) {
+            anchorPaperVirtualScroll(container, list, prevOffsets);
+            applyPaperVirtualTranslate(viewport, paperVirtualOffsets(list)[start]);
         }
     }
 
-    // 图片懒加载、字体就位都会在渲染完成后改变卡高。viewport 是绝对定位、高度随内容，
-    // 观察它就能兜住这些「渲染后才长高」的情况；rAF 去抖避免滚动帧里反复重排。
+    /**
+     * 图片懒加载、字体就位都会在渲染完成后改变卡高。viewport 绝对定位、高度随内容，
+     * 观察它就能兜住这些「渲染后才长高」的情况。
+     * 这里只重测、绝不重建 —— 一重建题图就回落到未加载、高度又变回去，观察者会永远震荡。
+     */
+    function remeasurePaperVirtualWindow() {
+        const container = document.getElementById('paperQuestionStream');
+        const spacer = document.getElementById('paperVirtualSpacer');
+        const viewport = document.getElementById('paperVirtualViewport');
+        if (!container || !spacer || !viewport) return;
+        const list = paperVirtual.displayList;
+        if (!list.length || paperVirtual.lastStart < 0) return;
+
+        const prevOffsets = paperVirtualOffsets(list);
+        if (!measurePaperVirtualWindow(list, paperVirtual.lastStart)) return;
+        anchorPaperVirtualScroll(container, list, prevOffsets);
+        applyPaperVirtualTranslate(viewport, paperVirtualOffsets(list)[paperVirtual.lastStart]);
+    }
+
     function ensurePaperVirtualResizeWatch() {
         const viewport = document.getElementById('paperVirtualViewport');
         if (!viewport || paperVirtual.resizeObs || typeof ResizeObserver === 'undefined') return;
-        paperVirtual.resizeObs = new ResizeObserver(() => {
+        paperVirtual.resizeObs = new ResizeObserver(function () {
             if (paperVirtual.rafPending) return;
             paperVirtual.rafPending = true;
-            requestAnimationFrame(() => {
+            requestAnimationFrame(function () {
                 paperVirtual.rafPending = false;
-                updatePaperVirtualList();
+                remeasurePaperVirtualWindow();
             });
         });
         paperVirtual.resizeObs.observe(viewport);
@@ -2150,10 +2285,17 @@
     function ensurePaperScrollBinding() {
         const container = document.getElementById('paperQuestionStream');
         if (!container || paperVirtual.bound) return;
-        container.addEventListener('scroll', () => {
+        container.addEventListener('scroll', function () {
+            // 程序修正 scrollTop 时会派发 scroll 事件。若照单全收，就是
+            // 「修正 → scroll → 重建 → 高度又变 → 再修正」的跨帧死循环。
+            if (paperVirtual.selfScrollTop !== null) {
+                const ours = Math.abs(container.scrollTop - paperVirtual.selfScrollTop) < 1;
+                paperVirtual.selfScrollTop = null;
+                if (ours) return;
+            }
             if (paperVirtual.rafPending) return;
             paperVirtual.rafPending = true;
-            requestAnimationFrame(() => {
+            requestAnimationFrame(function () {
                 paperVirtual.rafPending = false;
                 updatePaperVirtualList();
             });
@@ -2168,6 +2310,7 @@
 
         const list = getPaperDisplayList();
         paperVirtual.displayList = list;
+        resetPaperVirtualWindow();
         const total = list.length;
         const resetScroll = !!(opts && opts.resetScroll);
         const prevScroll = resetScroll ? 0 : container.scrollTop;
@@ -2186,6 +2329,7 @@
                 </div>
             `;
             if (resetScroll) container.scrollTop = 0;
+            resetPaperVirtualWindow();
             return;
         }
 

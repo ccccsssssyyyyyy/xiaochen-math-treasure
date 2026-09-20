@@ -1,10 +1,21 @@
 import os
 import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 from unittest.mock import MagicMock, patch
 
 from main import LOCAL_TOKEN
 from mathbank.database import Paper, PaperQuestion, Question
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VIRTUAL_CHECK_JS = Path(__file__).resolve().parent / "js" / "paper_virtual_adaptive_check.js"
+PAPER_JS = PROJECT_ROOT / "static" / "js" / "paper.js"
+#: 断言条数下限 —— 夹具被误删/掏空时这里先红，不必等某项断言失效。
+VIRTUAL_CHECK_MIN_ITEMS = 30
 
 def test_paper_api_flow(client):
     headers = {"X-Local-Token": LOCAL_TOKEN}
@@ -284,3 +295,38 @@ def test_solution_space_latex_generation():
     # 3. exam_19 paper mode with 0.0cm solution space -> should not inject \vspace
     tex_19_zero = build_latex_document("高考模拟", "试卷", "exam_19", questions_data_zero, include_answers=False)
     assert r"\vspace*" not in tex_19_zero
+
+
+def test_paper_virtual_stream_stability_runtime():
+    """组卷选题流的虚拟滚动稳定性：真跑 paper.js，断言滚动帧不整块重建视口。
+
+    2026-09-20 修「滚动时画面疯狂上下跳」的回归网。根因是滚动帧里
+    ``viewport.innerHTML = html`` 无条件整块重建，紧接着实测回填又改写 scrollTop，
+    而改 scrollTop 会再派发 scroll 事件 —— 两者互相触发形成跨帧闭环。
+
+    静态断言拦不住这类回退：读源码看不出它会跳。夹具会真跑一遍并断言
+    「窗口未变时卡片元素引用逐个不变」「一次窗口变化只做一次 DOM 同步」
+    「程序派发的 scroll 不被当成用户滚动」。
+
+    夹具此前是裸脚本、pytest 从不执行它 —— 这里一并补上包装。
+    """
+    assert VIRTUAL_CHECK_JS.is_file(), f"夹具缺失: {VIRTUAL_CHECK_JS}"
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 不可用，跳过前端实跑校验")
+    result = subprocess.run(
+        [node, str(VIRTUAL_CHECK_JS), str(PAPER_JS)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, (
+        "虚拟滚动稳定性实跑未通过:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    # 断言数骤降 = 夹具被掏空，先在这里报警
+    match = re.search(r"通过 (\d+) 项", result.stdout)
+    assert match, f"夹具没报出通过项数:\n{result.stdout}"
+    assert int(match.group(1)) >= VIRTUAL_CHECK_MIN_ITEMS, (
+        f"断言数骤降到 {match.group(1)}，夹具可能被掏空"
+    )

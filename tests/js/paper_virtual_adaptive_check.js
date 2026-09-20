@@ -35,6 +35,19 @@ function section(title) { console.log('\n' + title); }
 /** 测试注入：viewport 每次 innerHTML 重设后，按这份队列给每张卡发 offsetHeight */
 let cardHeightQueue = [];
 
+/** 按顶层 data-vcard 把卡片的 HTML 切成一段一段（每张卡一段）。 */
+function splitVCards(html) {
+  const re = /<div[^>]*\bdata-vcard\b[^>]*>/g;
+  const starts = [];
+  let m;
+  while ((m = re.exec(html)) !== null) starts.push(m.index);
+  const parts = [];
+  for (let i = 0; i < starts.length; i++) {
+    parts.push(html.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : html.length));
+  }
+  return parts;
+}
+
 function makeElement(id) {
   const classes = new Set();
   const el = {
@@ -45,10 +58,12 @@ function makeElement(id) {
     scrollTop: 0,
     scrollHeight: 4000,
     clientHeight: 800,
+    offsetHeight: 0,
     style: {},
     dataset: {},
     handlers: {},
     children: [],
+    parentNode: null,
     classList: {
       add: function () { for (const c of arguments) classes.add(c); },
       remove: function () { for (const c of arguments) classes.delete(c); },
@@ -60,26 +75,81 @@ function makeElement(id) {
     removeAttribute: function (n) { delete el.dataset['attr_' + n]; },
     addEventListener: function (t, f) { (el.handlers[t] = el.handlers[t] || []).push(f); },
     removeEventListener: function () {},
-    appendChild: function () {},
-    remove: function () {},
+    // 真实 DOM 的树操作。窗口同步靠这些复用卡片，假 DOM 必须真的维护 children，
+    // 否则「复用了哪几张、重建了哪几张」在夹具里完全看不见。
+    appendChild: function (node) {
+      if (!node) return node;
+      const existing = el.children.indexOf(node);
+      if (existing >= 0) el.children.splice(existing, 1);
+      el.children.push(node);
+      node.parentNode = el;
+      // 高度模型：卡在容器里的次序 → cardHeightQueue 对应项（未注入则沿用估计高 264）
+      const pos = el.children.indexOf(node);
+      node.offsetHeight = cardHeightQueue.length
+        ? cardHeightQueue[Math.min(pos, cardHeightQueue.length - 1)]
+        : 264;
+      return node;
+    },
+    insertBefore: function (node, ref) {
+      if (!node) return node;
+      const existing = el.children.indexOf(node);
+      if (existing >= 0) el.children.splice(existing, 1);
+      const at = ref ? el.children.indexOf(ref) : -1;
+      if (at >= 0) el.children.splice(at, 0, node); else el.children.push(node);
+      node.parentNode = el;
+      return node;
+    },
+    removeChild: function (node) {
+      const i = el.children.indexOf(node);
+      if (i >= 0) { el.children.splice(i, 1); node.parentNode = null; }
+      return node;
+    },
+    remove: function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    },
     focus: function () {},
     click: function () {},
     querySelector: function () { return null; },
     querySelectorAll: function () { return []; },
     getBoundingClientRect: function () { return { left: 0, top: 0, width: 1000, height: 2000, right: 1000, bottom: 2000 }; }
   };
+  Object.defineProperty(el, 'firstElementChild', {
+    get: function () { return el.children[0] || null; }
+  });
+  Object.defineProperty(el, 'nextElementSibling', {
+    get: function () {
+      const p = el.parentNode;
+      if (!p) return null;
+      const i = p.children.indexOf(el);
+      return i >= 0 ? (p.children[i + 1] || null) : null;
+    }
+  });
   Object.defineProperty(el, 'innerHTML', {
-    get: function () { return el._innerHTML; },
+    get: function () {
+      // 卡片是 appendChild 进去的，读 innerHTML 就得按子元素序列化回来 ——
+      // 否则「渲染出了什么」在夹具里看不见。
+      if (el.children.length) return el.children.map(function (c) { return c._innerHTML; }).join('');
+      return el._innerHTML;
+    },
     set: function (html) {
       el._innerHTML = String(html);
-      // 只有虚拟流视口按卡片标记生成可量测的子元素；其余元素给空 children
-      const count = (el._innerHTML.match(/data-vcard/g) || []).length;
       el.children = [];
-      for (let i = 0; i < count; i++) {
-        el.children.push({
-          offsetHeight: cardHeightQueue.length ? cardHeightQueue[Math.min(i, cardHeightQueue.length - 1)] : 264,
-          id: 'fake-card-' + i
-        });
+      const parts = splitVCards(el._innerHTML);
+      for (let i = 0; i < parts.length; i++) {
+        const child = makeElement('fake-card-' + i);
+        child._innerHTML = parts[i];
+        child.parentNode = el;
+        el.children.push(child);
+      }
+      // 真实浏览器里 container.innerHTML 重建会连旧的 spacer/viewport 一起丢掉，
+      // 新的 viewport 是空的。假 DOM 必须照做，否则窗口同步会以为上一批卡片还在。
+      if (/id="paperVirtualViewport"/.test(el._innerHTML)) {
+        const vp = elementFor('paperVirtualViewport');
+        vp.children = [];
+        vp._innerHTML = '';
+      }
+      if (/id="paperVirtualSpacer"/.test(el._innerHTML)) {
+        elementFor('paperVirtualSpacer').style = {};
       }
     }
   });
@@ -235,6 +305,91 @@ section('[4] 契约测试依赖的暴露面');
 check('offsets / indexAt / slotHeightOf 是函数',
   [M.offsets, M.indexAt, M.slotHeightOf].every(function (f) { return typeof f === 'function'; }));
 check('ESTIMATE=264 且 GAP=16', M.ESTIMATE === 264 && M.GAP === 16);
+
+// ---------------------------------------------------------------- [5] 滚动稳定性（2026-09-20）
+
+section('[5] 滚动稳定性：窗口未变不重建、窗口变化复用卡片、无跨帧闭环');
+
+// 60 题、视口 800px 的列表。先按「只取决于视口高度」算一遍窗口应有多大。
+sandbox.PaperStore.bankQuestions = [];
+for (let i = 1; i <= 60; i++) {
+  sandbox.PaperStore.bankQuestions.push(fakeQuestion(100 + i, '第 ' + i + ' 题题干。'));
+}
+sandbox.PaperStore.cart = [];
+sandbox.PaperStore.filters.tab = 'all';
+M.resetMeasured();
+cardHeightQueue = [];
+container.scrollTop = 0;
+sandbox.switchPaperStreamTab('all');
+
+const vp5 = elementFor('paperVirtualViewport');
+const win0 = M.lastWindow();
+check('首屏窗口已建立', win0.start === 0 && win0.end > 0, JSON.stringify(win0));
+
+// ① 窗口未变的那几帧：卡片元素引用必须逐个不变（证明不是「重建后内容恰好相同」）。
+//    「窗口不变」的滚动上界由 offsets 现算，不写死常量 —— 估计高改了也不会误判。
+const offs5 = M.offsets(sandbox.PaperStore.bankQuestions);
+const idxAtBottom = M.indexAt(offs5, container.clientHeight);
+const safeSpan = Math.max(1, Math.min(offs5[1] - 1, offs5[idxAtBottom + 1] - container.clientHeight - 1));
+const before = vp5.children.slice();
+M.resetStats();
+for (let s = 0; s <= safeSpan; s += Math.max(1, Math.floor(safeSpan / 4))) {
+  container.scrollTop = s;
+  (container.handlers.scroll || []).forEach(function (fn) { fn(); });
+}
+const sameRefs = before.length === vp5.children.length
+  && before.every(function (c, i) { return c === vp5.children[i]; });
+check('窗口未变的那几帧：卡片元素引用逐个不变（没有整块重建）', sameRefs,
+  'before=' + before.length + ' after=' + vp5.children.length);
+check('窗口未变时一个 DOM 同步都没做', M.stats().domSyncs === 0 && M.stats().updates > 0,
+  JSON.stringify(M.stats()));
+
+// ② 滚过好几张卡（窗口必然变化）：应复用已在窗口里的卡，只增删差异。
+const beforeWide = vp5.children.slice();
+M.resetStats();
+container.scrollTop = 4 * (offs5[1] || 280);
+(container.handlers.scroll || []).forEach(function (fn) { fn(); });
+const afterWide = vp5.children.slice();
+const reused = beforeWide.filter(function (c) { return afterWide.indexOf(c) >= 0; }).length;
+check('窗口变化时复用已在视口内的卡片（不是整块重建）', reused > 0,
+  'reused=' + reused + ' before=' + beforeWide.length + ' after=' + afterWide.length);
+check('一次窗口变化只做一次 DOM 同步', M.stats().domSyncs === 1, JSON.stringify(M.stats()));
+
+// ③ 连续滚动：DOM 同步次数必须远小于帧数。旧实现是每帧一次（帧数 == 同步数）。
+M.resetStats();
+let frames = 0;
+for (let s = 4 * (offs5[1] || 280); s <= 4 * (offs5[1] || 280) + 1500; s += 50) {
+  container.scrollTop = s;
+  (container.handlers.scroll || []).forEach(function (fn) { fn(); });
+  frames++;
+}
+const st = M.stats();
+// 旧实现每帧都同步（domSyncs === frames）；现在只有窗口真跨过卡边界才同步。
+// 阈值取 frames/2 也是为了保留判别力：回退到每帧重建就会超。
+check('连续滚动 ' + frames + ' 帧，DOM 同步次数远小于帧数',
+  st.updates === frames && st.domSyncs <= frames / 2,
+  JSON.stringify(st));
+
+// ④ 跨帧闭环：程序修正 scrollTop 之后，浏览器派发的那次 scroll 必须被认出来。
+M.resetMeasured();
+cardHeightQueue = [400];            // 实测 400 ≠ 估计 264，必然触发一次锚点修正
+container.scrollTop = 1500;
+(container.handlers.scroll || []).forEach(function (fn) { fn(); });
+const selfTop = M.pendingSelfScroll();
+check('实测高度修正 scrollTop 时登记了 selfScroll 标记', typeof selfTop === 'number' && selfTop !== 1500,
+  'pendingSelfScroll=' + selfTop);
+
+container.scrollTop = selfTop;
+M.resetStats();
+(container.handlers.scroll || []).forEach(function (fn) { fn(); });
+check('自己派发的 scroll 被识别，不再触发新一轮更新',
+  M.stats().updates === 0 && M.stats().domSyncs === 0, JSON.stringify(M.stats()));
+
+// 回归护栏：滚动路径里不允许再出现整块重建。
+// 只查代码行 —— 改动说明里会引用旧写法当反例，那不是漏网。
+const codeLines = src.split('\n').filter(function (l) { return !/^\s*(\/\/|\*)/.test(l); });
+check('源码里不再有 viewport.innerHTML = （回归护栏）',
+  !codeLines.some(function (l) { return /viewport\.innerHTML\s*=/.test(l); }));
 
 // ---------------------------------------------------------------- 汇总
 
