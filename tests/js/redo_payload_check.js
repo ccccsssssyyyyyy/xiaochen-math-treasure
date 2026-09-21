@@ -16,6 +16,9 @@
  *   3. 人工标注掌握度：按钮必须**钉在卡片这一道题上**（不能用「当前选中项」——
  *      请求往返期间用户切了题就会标错对象），且标注后的状态只能采信服务端返回的
  *      重放结果，不能在本地猜（标注可能被更晚的录入推翻，本地算不出来）。
+ *   4. 题面里的图：错题补的图是写成 markdown 内联在正文里的
+ *      （`![插图](/static/uploads/...)`），卡片必须把它渲染成 <img>，不能把 markdown
+ *      原样印出来；正文与 image_paths 指向同一个文件时只出一张。
  */
 
 const fs = require('fs');
@@ -54,14 +57,14 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 // ---------------------------------------------------------------- 假 DOM
 
 const elementIds = [
-    'mistakeListView', 'mistakeRedoView', 'mistakeSubtabScan', 'mistakeSubtabRedo',
+    'mistakeListView', 'mistakeRedoView', 'mistakeDetailView', 'mistakeReviewView',
+    'mistakeSubtabScan', 'mistakeSubtabRedo',
     'mistakeRedoDot', 'redoSubSummary', 'redoStatBar', 'redoSyncBtn', 'redoSyncBtnText',
     'redoBoardBtn', 'redoBoardPanel', 'redoQuickBtn', 'redoNewBtn', 'redoNewPanel',
     'redoScopeSelect', 'redoSubjectSelect', 'redoLimitInput', 'redoTitleInput',
     'redoNewHint', 'redoTaskList', 'redoTaskCount', 'redoGradeEmpty', 'redoGradePane',
     'redoGradeTitle', 'redoGradeMeta', 'redoHideAnswerToggle', 'redoGradeProgress',
-    'redoGradeCard',
-    'redoAdoptPrompt', 'redoAdoptText', 'redoAdoptConfirmBtn', 'redoAdoptDismissBtn'
+    'redoGradeCard'
 ];
 
 const elements = {};
@@ -109,11 +112,11 @@ function makeElement(id) {
 elementIds.forEach((id) => { elements[id] = makeElement(id); });
 // 重做面板默认是隐藏的（index.html 里带 hidden），夹具必须与静态 HTML 同源
 elements.mistakeRedoView.classList.add('hidden');
+elements.mistakeDetailView.classList.add('hidden');
+elements.mistakeReviewView.classList.add('hidden');
 elements.redoNewPanel.classList.add('hidden');
 elements.redoBoardPanel.classList.add('hidden');
 elements.redoGradePane.classList.add('hidden');
-// 确认卡在 index.html 里也是带 hidden 的静态结构（显示时补 flex）—— 夹具必须同源。
-elements.redoAdoptPrompt.classList.add('hidden');
 elements.redoHideAnswerToggle.checked = true;
 elements.redoLimitInput.value = '12';
 
@@ -295,37 +298,8 @@ async function fakeFetch(input, init) {
     if (masteryMatch) {
         return jsonResponse(masteryPayload(Number(masteryMatch[1]), !!JSON.parse(options.body || '{}').mastered));
     }
-    // 认领四件套。paper_id=13 用来演「不值得认领」那一档（没有错题 / 已说过普通卷）。
-    if (url === '/api/redo/eligibility') {
-        const body = JSON.parse(options.body || '{}');
-        if (Number(body.paper_id) === 13) {
-            return jsonResponse({
-                status: 'success', total: 3, pooled_count: 0, pooled_ids: [],
-                already_redo: false, declined: true, eligible: false
-            });
-        }
-        return jsonResponse({
-            status: 'success', total: 3, pooled_count: 2, pooled_ids: [101, 102],
-            already_redo: false, declined: false, eligible: true
-        });
-    }
-    if (url === '/api/redo/adopt') {
-        const body = JSON.parse(options.body || '{}');
-        return jsonResponse({
-            status: 'success',
-            paper_id: Number(body.paper_id) || 12,
-            title: body.title || '高一上第3周错题练习',
-            created: !body.paper_id,
-            already: false,
-            redo_round: 2,
-            question_count: 3,
-            pooled_count: 2,
-            message: '已记作重做练习。做完后到错题工作台的「重做复习」里逐题录入对错。'
-        });
-    }
-    if (url === '/api/redo/decline') {
-        return jsonResponse({ status: 'success', paper_id: Number(JSON.parse(options.body || '{}').paper_id) || 0 });
-    }
+    // 注：认领（/api/redo/{eligibility,adopt,decline}）不在这里 —— redo.js 已经不再
+    // 碰它，入口搬到了组卷面板第四格（paper.js 的 adoptPaperAsRedo，由 paper 家族夹具覆盖）。
     return jsonResponse({ status: 'error', message: '夹具未覆盖的接口: ' + url }, 404);
 }
 
@@ -350,12 +324,26 @@ const sandbox = {
     },
     document: documentStub,
     systemMetadata: { subjects: [{ value: 'math', label: '数学' }, { value: 'physics', label: '物理' }] },
-    MathRender: { render: (container) => { mathRenders.push(container && container.id); return true; } },
+    // 注：`MathRender` 不放替身 —— 题面正文的渲染口径就住在 math-render.js 里，
+    // 放一个只带 render 的假对象等于把被测逻辑整个绕过。下面改用真模块 + 探针。
+    // 只放本模块真正用到的那几个出口，但**行为要对得上**：safeImageUrl 若退化成
+    // 「有值就放行」，「非法 URL 原样留着不生成 img」那条分支就永远测不出来。
     MathBankSafe: {
         escapeText: (value) => String(value == null ? '' : value)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#039;'),
-        safeImageUrl: (value) => (value ? value : '')
+        escapeAttribute: (value) => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#039;').replace(/\r?\n/g, ' '),
+        // 真实实现要求：同域 + /static/uploads/ 前缀 + 位图后缀。沙箱里没有真的
+        // location，用字符串判定等价替代。
+        safeImageUrl: (value) => {
+            const raw = String(value == null ? '' : value).trim();
+            if (!raw || raw.indexOf('\\') !== -1) return '';
+            if (!/^\/static\/(uploads|test_uploads)\//.test(raw)) return '';
+            if (!/\.(png|jpe?g|gif|webp)$/i.test(raw)) return '';
+            return raw;
+        }
     },
     showToast: (message, type) => { toasts.push({ message: message, type: type }); },
     selectWorkspace: function (id) { sandbox.__workspaceCalls = (sandbox.__workspaceCalls || []).concat([id]); },
@@ -373,6 +361,16 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+
+// index.html 里 math-render.js 排在所有业务脚本之前，沙箱必须同一顺序。
+require('./sandbox_base').loadBaseModules(sandbox);
+// 真模块的 render 在没有 renderMathInElement 的沙箱里会静默返回 false，
+// 「卡片渲染后触发 KaTeX」这条断言就观察不到了 —— 补个探针，只记录不改语义。
+const realMathRender = sandbox.MathRender.render;
+sandbox.MathRender.render = (container, mode) => {
+    mathRenders.push(container && container.id);
+    return realMathRender(container, mode);
+};
 
 const source = fs.readFileSync(target, 'utf8');
 vm.runInContext(source, sandbox, { filename: path.basename(target) });
@@ -427,10 +425,18 @@ async function main() {
 
     // ==================== 2. 子视图切换 ====================
     requests.length = 0;
+    // 复现真实路径：用户停在「批次详情（切题页）」时被认领跳转拉过来。
+    // 只藏 listView 的旧写法下 detailView 与 redoView 会同屏，两个 flex-1
+    // 平分高度 → 重做复习页骨架吃掉 145px、题干区被压成 0（2026-09-20 用户截图）。
+    el('mistakeDetailView').classList.remove('hidden');
+    el('mistakeReviewView').classList.remove('hidden');
     sandbox.switchMistakeSubtab('redo');
     await tick(); await tick();
     check('切到重做面板后批次列表隐藏', el('mistakeListView').classList.contains('hidden'));
     check('切到重做面板后重做视图显示', !el('mistakeRedoView').classList.contains('hidden'));
+    check('切到重做面板后批次详情/审校页一并收起（视图不叠加）',
+        el('mistakeDetailView').classList.contains('hidden')
+        && el('mistakeReviewView').classList.contains('hidden'));
     check('子标签高亮切到重做复习', el('mistakeSubtabRedo').classList.contains('active')
         && !el('mistakeSubtabScan').classList.contains('active'));
     check('子标签同步 aria-selected',
@@ -653,6 +659,37 @@ async function main() {
     check('回到错题台时刷新「待重做」角标',
         requests.some((r) => r.url === '/api/redo/overview' && r.method === 'GET'));
 
+    // 落点：重做录入页照旧收起，但其余三个视图**谁开着就落谁**。无条件打开列表的写法
+    // 会在「停在批次详情页时切回来」这一步让列表与详情各拿一半高度（2026-09-20 实测：
+    // 两个 flex-1 同屏，重做录入页的固定骨架吃掉 145px，题干区被压成 0）。
+    el('mistakeListView').classList.add('hidden');
+    el('mistakeDetailView').classList.remove('hidden');
+    sandbox.selectWorkspace('bank', '题库工作台');
+    sandbox.selectWorkspace('mistake', '错题工作台');
+    await tick();
+    check('停在批次详情页时切回：保留详情、不再把列表也打开',
+        !el('mistakeDetailView').classList.contains('hidden')
+        && el('mistakeListView').classList.contains('hidden')
+        && el('mistakeRedoView').classList.contains('hidden'));
+
+    el('mistakeDetailView').classList.add('hidden');
+    el('mistakeReviewView').classList.remove('hidden');
+    sandbox.selectWorkspace('bank', '题库工作台');
+    sandbox.selectWorkspace('mistake', '错题工作台');
+    await tick();
+    check('停在错题本审校页时切回：保留审校页（未保存的草稿不能丢）',
+        !el('mistakeReviewView').classList.contains('hidden')
+        && el('mistakeListView').classList.contains('hidden'));
+
+    el('mistakeReviewView').classList.add('hidden');
+    sandbox.selectWorkspace('bank', '题库工作台');
+    sandbox.selectWorkspace('mistake', '错题工作台');
+    await tick();
+    check('一个都没开时落回批次列表',
+        !el('mistakeListView').classList.contains('hidden')
+        && el('mistakeDetailView').classList.contains('hidden')
+        && el('mistakeReviewView').classList.contains('hidden'));
+
     // ==================== 12. 人工标注「已掌握」 ====================
     // 标注不是直接写字段，而是插进重放序列的一条**事件**：服务端返回重放后的状态，
     // 前端只能采信它。按钮上挂的是卡片这一道题的 id，而不是「当前选中项」。
@@ -705,94 +742,19 @@ async function main() {
     check('取消后建议重做日回来（状态回落到重放结果）',
         restoredCard.includes('重做对过') && restoredCard.includes('建议 2026-09-26'));
 
-    // ==================== 13. 认领组卷台那张卷 ====================
+    // ==================== 13. 认领组卷台那张卷（重做台这一侧） ====================
     //
     // 断点：错题闭环的第 1 遍练习几乎必然发生在组卷台（入库即送组卷 → 排版 → 印出来），
-    // 可那张卷不带 is_redo，它的做题结果没有任何入口写回 redo_attempts。确认卡是补上的
-    // 那座桥，问在导出之后。要钉两件事：认领导向**这张卷**而不是「当前选中」；点
-    // 「这是普通卷」要真去落库，否则每重印一次就要再答一遍。
+    // 可那张卷不带 is_redo，它的做题结果没有任何入口写回 redo_attempts。
+    //
+    // 认领入口在**组卷面板第四格**（paper.js 的 adoptPaperAsRedo → POST /api/redo/adopt），
+    // 不在这份夹具的加载范围里，由 paper 家族夹具与 Python 契约测试覆盖。这里只钉属于
+    // 重做台的两件事：任务卡上的「组卷台认领」标记，以及认领卷里的非错题照样能录。
 
     check('任务卡上认领卷有「组卷台认领」标记',
         el('redoTaskList').innerHTML.includes('组卷台认领'));
 
-    // ① 已保存的卷：带 paper_id 认领
-    requests.length = 0;
-    const prompted = await sandbox.maybePromptRedoAdopt({ paperId: 12 });
-    const eligReq = requests.filter((r) => r.url === '/api/redo/eligibility').pop();
-    check('导出后先问一句资格（POST /api/redo/eligibility）',
-        prompted === true && !!eligReq && eligReq.method === 'POST');
-    check('已保存的卷按 paper_id 问', JSON.parse(eligReq.options.body).paper_id === 12);
-    check('弹卡：去掉 hidden 并补上 flex（index.html 里初始没有 flex）',
-        !el('redoAdoptPrompt').classList.contains('hidden')
-        && el('redoAdoptPrompt').classList.contains('flex'));
-    check('文案说清「含几道错题」与「不会重新打乱」',
-        el('redoAdoptText').innerHTML.includes('2')
-        && el('redoAdoptText').innerHTML.includes('不会重新打乱'));
-
-    requests.length = 0;
-    sandbox.confirmRedoAdopt();
-    await tick(); await tick();
-    const adoptReq = requests.filter((r) => r.url === '/api/redo/adopt').pop();
-    check('点「记作重做练习」走 POST /api/redo/adopt',
-        !!adoptReq && adoptReq.method === 'POST');
-    check('认领导向这张卷（paper_id=12），不是「当前选中项」',
-        JSON.parse(adoptReq.options.body).paper_id === 12);
-    check('确认后卡片收起', el('redoAdoptPrompt').classList.contains('hidden'));
-    check('认领后顺手把这卷打开，可以马上录对错',
-        requests.some((r) => r.url === '/api/redo/papers/12'));
-
-    // ② 未落库的卷面（主编辑器导出）：按 question_ids 查、把卷面带过去现场建卷
-    requests.length = 0;
-    await sandbox.maybePromptRedoAdopt({
-        questionIds: [101, 102],
-        draft: { title: '刚组好的卷', paper_type: 'exam', questions: [{ id: 101, score: 5 }] }
-    });
-    const draftElig = requests.filter((r) => r.url === '/api/redo/eligibility').pop();
-    const draftEligBody = JSON.parse(draftElig.options.body);
-    check('没有 paper_id 时按 question_ids 问资格',
-        !draftEligBody.paper_id && Array.isArray(draftEligBody.question_ids)
-        && draftEligBody.question_ids.length === 2);
-    requests.length = 0;
-    sandbox.confirmRedoAdopt();
-    await tick(); await tick();
-    const draftAdopt = requests.filter((r) => r.url === '/api/redo/adopt').pop();
-    const draftAdoptBody = JSON.parse(draftAdopt.options.body);
-    check('未落库的卷面把卷面带过去让后端现场建卷',
-        !draftAdoptBody.paper_id && draftAdoptBody.title === '刚组好的卷'
-        && Array.isArray(draftAdoptBody.questions));
-
-    // ③ 未落库的卷面说「普通卷」只记在本次会话（没有 paper_id 可落库）
-    await sandbox.maybePromptRedoAdopt({ questionIds: [101, 103], draft: { title: '另一份卷' } });
-    requests.length = 0;
-    sandbox.dismissRedoAdopt();
-    await tick();
-    check('没有 paper_id 时说「普通卷」只记在会话内（不发接口）',
-        requests.filter((r) => r.url === '/api/redo/decline').length === 0);
-
-    // ④ 同一份卷面不再问 —— 否则重印一次问一次
-    requests.length = 0;
-    const askedAgain = await sandbox.maybePromptRedoAdopt({
-        questionIds: [101, 103], draft: { title: '另一份卷' }
-    });
-    check('同一份卷面说过「普通卷」之后完全不再发问',
-        askedAgain === false && requests.length === 0);
-
-    // ⑤ 已保存的卷说「普通卷」要落库（跨会话有效）
-    await sandbox.maybePromptRedoAdopt({ paperId: 12 });
-    requests.length = 0;
-    sandbox.dismissRedoAdopt();
-    await tick(); await tick();
-    const declineReq = requests.filter((r) => r.url === '/api/redo/decline').pop();
-    check('已保存的卷说「普通卷」要落库（重印不再追问）',
-        !!declineReq && JSON.parse(declineReq.options.body).paper_id === 12);
-
-    // ⑥ 不值得认领（没有错题 / 已认领 / 已说过普通卷）就不弹
-    requests.length = 0;
-    const notEligible = await sandbox.maybePromptRedoAdopt({ paperId: 13 });
-    check('不满足条件就不弹卡',
-        notEligible === false && el('redoAdoptPrompt').classList.contains('hidden'));
-
-    // ⑦ 认领卷里的非错题：标出来，但照样能录（做错就进池）
+    // 认领卷里的非错题：标出来，但照样能录（做错就进池）
     const notPooledQuestion = {
         id: 104,
         question_type: 'detailed_answer',
@@ -816,6 +778,125 @@ async function main() {
     sandbox.redoStep(1);
     check('池内题不显示这个徽章',
         !el('redoGradeCard').innerHTML.includes('非错题 · 做错后进池'));
+
+    // ==================== 14. 题面里的图：正文内联图那一路 ====================
+    //
+    // 2026-09-20 用户截图：题干里的图渲染成一串 `![插图](/static/uploads/...)` 文字。
+    // 错题入库时补的图**就是**这么存的（写在正文里，见 mistake.js 的补图逻辑），
+    // 而 redo.js 的题面渲染只认 choices/\fillin/\paren —— 于是同一道题在错题详情、
+    // 组卷台、题库编辑器、导出的 PDF 上都有图，只有重做录入页没有。
+    //
+    // 库里 102 道题命中这种语法（题干或解析），其中 14 道 image_paths 是空的、
+    // 图**只**能靠正文这条路渲染出来。所以这里必须真跑渲染，不能只断言函数名。
+    const FIGURE_A = '/static/uploads/mistakes/1/figures/crop_p015_7eb99e70c0.png';
+    const FIGURE_B = '/static/uploads/mistakes/1/figures/crop_p015_5c9742c26d.png';
+    const countOf = (haystack, needle) => haystack.split(needle).length - 1;
+    const figureCard = () => el('redoGradeCard').innerHTML;
+
+    // ① 图只在正文里（那 14 道物理错题的形态）
+    const inlineOnlyQuestion = {
+        id: 201,
+        question_type: 'single_choice',
+        score: 5,
+        attempt_no: 1,
+        option_mode: 'plain',
+        content: '库里的原题面（有图）',
+        display_content: '如图所示，用频闪照相的方法记录某同学的运动情况的是\n\n![插图](' + FIGURE_A + ')',
+        display_answer: '解析：由图可见答案选 C。',
+        image_paths: [],
+        redo: { wrong_count: 1, mastery_status: 'pending', next_redo_due: null, correct_answer: 'C' },
+        recorded: null
+    };
+    sandbox.RedoStore.questions = [inlineOnlyQuestion];
+    sandbox.RedoStore.index = 0;
+    sandbox.setRedoHideAnswer(true);
+    const inlineCard = figureCard();
+    check('正文内联图渲染成 <img>（不再印 markdown 原文）',
+        inlineCard.includes('<img src="' + FIGURE_A + '"'), inlineCard.slice(0, 320));
+    check('正文里不再残留 ![插图](...) 字面量', !inlineCard.includes('![插图]'));
+    check('内联图与配图数组同一尺寸（max-h-56 + 圆角描边）',
+        inlineCard.includes('class="max-h-56 rounded-lg border border-slate-200 dark:border-slate-700"'));
+    check('markdown 的 alt 落在 img alt 属性里', inlineCard.includes('alt="插图"'));
+    check('图文顺序不乱：题干在前、图在后', (() => {
+        const stem = inlineCard.indexOf('频闪照相');
+        const img = inlineCard.indexOf('<img src="' + FIGURE_A + '"');
+        return stem >= 0 && img > stem;
+    })());
+
+    // ② 正文与 image_paths 指同一个文件（库里 68 道题是这种）→ 只能出一张
+    const duplicatedQuestion = Object.assign({}, inlineOnlyQuestion, { image_paths: [FIGURE_A] });
+    sandbox.RedoStore.questions = [duplicatedQuestion];
+    sandbox.setRedoHideAnswer(true);
+    check('正文与 image_paths 指同一文件时只渲染一张图',
+        countOf(figureCard(), 'src="' + FIGURE_A + '"') === 1,
+        '出现 ' + countOf(figureCard(), 'src="' + FIGURE_A + '"') + ' 次');
+
+    // ③ image_paths 里另一张**不同**的图照常出（去重不能顺手把它也吞掉）
+    const mixedQuestion = Object.assign({}, inlineOnlyQuestion, { image_paths: [FIGURE_A, FIGURE_B] });
+    sandbox.RedoStore.questions = [mixedQuestion];
+    sandbox.setRedoHideAnswer(true);
+    const mixedCard = figureCard();
+    check('去重只掐重复的那张，另一张配图照常渲染',
+        countOf(mixedCard, 'src="' + FIGURE_A + '"') === 1
+        && countOf(mixedCard, 'src="' + FIGURE_B + '"') === 1);
+
+    // ④ 过不了安全过滤的 URL 原样留着 —— 显示一串 markdown 顶多难看，
+    //    静默抹掉会让老师以为这题本来就没配图。
+    const unsafeQuestion = Object.assign({}, inlineOnlyQuestion, {
+        display_content: '看这张图\n\n![插图](/static/uploads/mistakes/1/figures/vector.svg)'
+            + '\n\n![插图](https://evil.example.com/shot.png)'
+    });
+    sandbox.RedoStore.questions = [unsafeQuestion];
+    sandbox.setRedoHideAnswer(true);
+    const unsafeCard = figureCard();
+    check('非位图后缀（.svg）不生成 img，原样保留 markdown',
+        !unsafeCard.includes('<img src="/static/uploads/mistakes/1/figures/vector.svg"')
+        && unsafeCard.includes('![插图](/static/uploads/mistakes/1/figures/vector.svg)'));
+    check('跨域 URL 不生成 img，原样保留 markdown',
+        !unsafeCard.includes('<img src="https://evil.example.com/shot.png"')
+        && unsafeCard.includes('![插图](https://evil.example.com/shot.png)'));
+
+    // ⑤ 解析区同口径：答案里的图也要认（库里 20 道题命中）
+    const answerFigureQuestion = Object.assign({}, inlineOnlyQuestion, {
+        display_answer: '解析：见下图\n\n![插图](' + FIGURE_B + ')'
+    });
+    sandbox.RedoStore.questions = [answerFigureQuestion];
+    sandbox.setRedoHideAnswer(true);
+    check('隐藏答案时解析里的图不出现在卡片上', !figureCard().includes('src="' + FIGURE_B + '"'));
+    sandbox.setRedoHideAnswer(false);
+    const answerCard = figureCard();
+    check('取消隐藏后解析里的图渲染成 <img>',
+        answerCard.includes('<img src="' + FIGURE_B + '"') && !answerCard.includes('![插图]'));
+
+    // ⑥ 正文图与 \begin{choices} 选项共存：图在选项块之前，两者都不能丢
+    const figureWithChoices = Object.assign({}, inlineOnlyQuestion, {
+        display_content: '如图，正确的是\n\n![插图](' + FIGURE_A + ')'
+            + '\n\\begin{choices}\n\\item 甲\n\\item 乙\n\\end{choices}'
+    });
+    sandbox.RedoStore.questions = [figureWithChoices];
+    sandbox.setRedoHideAnswer(true);
+    const figureChoiceCard = figureCard();
+    check('正文图与选项块共存：图和 A./B. 选项都在，且图在选项之前', (() => {
+        const img = figureChoiceCard.indexOf('<img src="' + FIGURE_A + '"');
+        const optA = figureChoiceCard.indexOf('A.</b> 甲');
+        return img >= 0 && optA > img && !figureChoiceCard.includes('\\item');
+    })(), figureChoiceCard.slice(0, 320));
+
+    // ⑦ 没有图时不能凭空多出一个空的配图容器
+    sandbox.RedoStore.questions = [Object.assign({}, QUESTION_3)];
+    sandbox.setRedoHideAnswer(true);
+    check('无图题目不渲染空的配图容器', !figureCard().includes('flex flex-wrap gap-2 pt-1.5'));
+
+    // ⑧ 图也可以长在选项里（`\item ![](a.png)`）—— 公共层把题干与选项分开处理，
+    //    选项那一侧也得把占位符换回 <img>，否则会漏下一串控制字符。
+    sandbox.RedoStore.questions = [Object.assign({}, inlineOnlyQuestion, {
+        display_content: '如图，正确的是\\begin{choices}\n\\item 甲\n\\item ![选项图](' + FIGURE_B + ')\n\\end{choices}'
+    })];
+    sandbox.setRedoHideAnswer(true);
+    const optionFigureCard = figureCard();
+    check('选项里带的图也渲染成 <img>',
+        optionFigureCard.includes('<img src="' + FIGURE_B + '"'), optionFigureCard.slice(0, 320));
+    check('选项里不留占位符残骸', !/\u0000MRIMG\d+\u0000/.test(optionFigureCard), optionFigureCard.slice(0, 320));
 
     const passed = total - failures;
     console.log('全部通过：' + passed + ' 项' + (failures ? '（失败 ' + failures + ' 项）' : ''));

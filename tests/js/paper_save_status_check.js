@@ -5,8 +5,11 @@
  *   「草稿自动存本机」和「保存试卷写归档」是两件事，但界面上以前完全看不出来。
  *   用户组完卷关掉页面前，没有任何地方能确认到底有没有进试卷库；更糟的是
  *   /api/paper/save 每次都是 INSERT 一条新归档，误判「没存」就会重复存出好几份。
- *   所以这里用假 DOM 把 paper.js 整个加载进 vm 沙箱，真实驱动状态机，断言提示文案、
+ * 所以这里用假 DOM 把 paper.js 整个加载进 vm 沙箱，真实驱动状态机，断言提示文案、
  *   基准是否被正确对齐/保留、以及刷新后会不会把已归档的卷面重新报成「未保存」。
+ *
+ * 第 [9] 节另覆盖导出行第四格「记作重做练习」：状态挂 store（面板整块重建 innerHTML，
+ * 放 DOM 上会丢）、带卷面指纹（认领后又改题要显示回未认领）、认领成功后基准归位。
  *
  * 用法: node tests/js/paper_save_status_check.js [paper.js 路径]
  * 退出码: 0 全通过 / 1 有失败
@@ -132,6 +135,9 @@ function boot(store) {
   };
 
   vm.createContext(sandbox);
+// index.html 里 math-render.js 排在所有业务脚本之前，沙箱必须同一顺序：
+// 题面正文的渲染口径就住在这个文件里，放替身等于把被测逻辑整个绕过。
+require('./sandbox_base').loadBaseModules(sandbox);
   vm.runInContext(src, sandbox, { filename: 'paper.js' });
 
   return {
@@ -389,6 +395,89 @@ function fakeQuestion(id, type, content) {
   env3.sandbox.PaperStore.meta.paper_type = 'quiz';
   env3.sandbox.saveMetaToStorage();
   check('换试卷模板后转脏', DIRTY_RE.test(statusText(env3)), '实际: ' + JSON.stringify(statusText(env3)));
+
+  // ============================================================ [9] 认领入口：导出行第四格
+  section('[9] 导出行第四格：认领入口与已认领状态');
+  const envAdopt = boot({});
+  envAdopt.sandbox.PaperStore.questionsMap = {
+    101: fakeQuestion(101, 'single_choice', '已知集合 A = {1,2}，则 A 的子集个数为（ ）'),
+    102: fakeQuestion(102, 'detailed_answer', '求函数 f(x)=x^2-2x 在 [0,3] 上的最值。')
+  };
+  envAdopt.sandbox.PaperStore.cart = [{ id: 101, score: 5 }, { id: 102, score: 12 }];
+  envAdopt.sandbox.PaperStore.meta.title = '成都高一数学周测';
+  envAdopt.sandbox.renderPaperCanvas();
+  let adoptHtml = envAdopt.canvasNode.innerHTML;
+
+  check('未认领时第四格是「记作重做练习」，onclick 指向 adoptPaperAsRedo',
+    adoptHtml.indexOf('id="paperRedoAdoptBtn"') >= 0
+    && adoptHtml.indexOf('onclick="adoptPaperAsRedo()"') >= 0
+    && adoptHtml.indexOf('记作重做练习') >= 0);
+  check('导出行里不再有「导出后弹窗认领」的残留触发点',
+    adoptHtml.indexOf('maybePromptRedoAdopt') < 0);
+  check('导出行仍是四格（PDF / Word / LaTeX / 认领）',
+    adoptHtml.indexOf("exportPaperPdf('paper')") >= 0
+    && adoptHtml.indexOf('exportPaperWord()') >= 0
+    && adoptHtml.indexOf('exportPaperBundle()') >= 0
+    && adoptHtml.indexOf('id="paperRedoAdoptBtn"') >= 0);
+
+  // 面板每次改动都整块重建 innerHTML —— 状态必须挂 store，并且带卷面指纹
+  envAdopt.sandbox.PaperStore.redoAdopt = {
+    paperId: 12, round: 2, pooledCount: 2, questionCount: 3,
+    signature: '101,102', adopted: true
+  };
+  envAdopt.sandbox.renderPaperCanvas();
+  adoptHtml = envAdopt.canvasNode.innerHTML;
+  check('已认领且指纹一致时，第四格变绿为「已认领 · 第 2 轮」',
+    adoptHtml.indexOf('已认领 · 第 2 轮') >= 0
+    && adoptHtml.indexOf('openRedoPaperFromLibrary(12)') >= 0
+    && adoptHtml.indexOf('emerald') >= 0);
+  check('已认领后不再挂认领动作（改挂「去录入对错」）',
+    adoptHtml.indexOf('onclick="adoptPaperAsRedo()"') < 0);
+
+  // 认领之后又改题 → 指纹对不上。界面写着已认领、实际录进去的却是另一份题序，比不显示更糟。
+  envAdopt.sandbox.PaperStore.questionsMap[103] = fakeQuestion(103, 'fill_in_blank', '若 x+1=3，则 x= ?');
+  envAdopt.sandbox.PaperStore.cart.push({ id: 103, score: 5 });
+  envAdopt.sandbox.renderPaperCanvas();
+  adoptHtml = envAdopt.canvasNode.innerHTML;
+  check('认领后又改了卷面 → 指纹不符，显示回未认领',
+    adoptHtml.indexOf('onclick="adoptPaperAsRedo()"') >= 0
+    && adoptHtml.indexOf('已认领') < 0);
+
+  // 卷面里没有有效内容时不能点（totalCount 为 0）
+  envAdopt.sandbox.PaperStore.questionsMap[104] = fakeQuestion(104, 'single_choice', '');
+  envAdopt.sandbox.PaperStore.cart = [{ id: 104, score: 5 }];
+  let emptyOk = true, emptyErr = '';
+  try { envAdopt.sandbox.renderPaperCanvas(); } catch (e) { emptyOk = false; emptyErr = e && e.message; }
+  check('卷面无有效内容时第四格置灰不可点',
+    emptyOk && envAdopt.canvasNode.innerHTML.indexOf('id="paperRedoAdoptBtn" disabled') >= 0,
+    emptyErr);
+
+  // 真点一次：POST /api/redo/adopt，未落库的卷面带卷面过去现场建卷；成功后就地变绿、不跳页
+  envAdopt.sandbox.PaperStore.cart = [{ id: 101, score: 5 }, { id: 102, score: 12 }];
+  envAdopt.sandbox.renderPaperCanvas();
+  envAdopt.requests.length = 0;
+  envAdopt.setFetch(ok({
+    status: 'success', paper_id: 12, title: '成都高一数学周测', created: false,
+    already: false, redo_round: 2, question_count: 3, pooled_count: 2,
+    message: '已记作重做练习。'
+  }));
+  await envAdopt.sandbox.adoptPaperAsRedo();
+  const adoptReq = envAdopt.requests.filter(function (r) { return r.url === '/api/redo/adopt'; })[0];
+  check('点第四格走 POST /api/redo/adopt', !!adoptReq && adoptReq.options.method === 'POST');
+  const adoptBody = adoptReq ? JSON.parse(adoptReq.options.body) : {};
+  check('未落库的卷面把卷面带过去让后端现场建卷',
+    !adoptBody.paper_id && adoptBody.title === '成都高一数学周测'
+    && Array.isArray(adoptBody.questions) && adoptBody.questions.length === 2,
+    JSON.stringify(adoptBody).slice(0, 160));
+  check('认领成功后状态写回 store（面板重绘不丢）',
+    !!envAdopt.sandbox.PaperStore.redoAdopt
+    && envAdopt.sandbox.PaperStore.redoAdopt.paperId === 12
+    && envAdopt.sandbox.PaperStore.redoAdopt.signature === '101,102');
+  check('认领成功后把「卷面 = 库里这张卷」的基准归位（防再点一次重复建卷）',
+    envAdopt.sandbox.PaperStore.loadedPaperId === 12
+    && envAdopt.sandbox.PaperStore.loadedPaperFingerprint === '101,102');
+  check('认领成功后第四格就地变绿（不跳页）',
+    envAdopt.canvasNode.innerHTML.indexOf('已认领 · 第 2 轮') >= 0);
 
   check('两次不同卷面的指纹互不相同', sigAfterSave.length > 0);
 

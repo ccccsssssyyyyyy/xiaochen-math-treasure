@@ -24,6 +24,8 @@ REDO_JS = PROJECT_ROOT / "static" / "js" / "redo.js"
 MAIN_PY = PROJECT_ROOT / "main.py"
 #: 假 DOM 运行期夹具（vm 里真跑整个 redo.js，断言渲染口径与请求体）
 REDO_CHECK_JS = Path(__file__).resolve().parent / "js" / "redo_payload_check.js"
+#: 题面正文渲染的**唯一**实现（2026-09-21 方案 B 后由它收口）
+MATH_RENDER_JS = PROJECT_ROOT / "static" / "js" / "math-render.js"
 
 
 @pytest.fixture(scope="module")
@@ -37,8 +39,18 @@ def js():
 
 
 @pytest.fixture(scope="module")
+def math_render_js():
+    return MATH_RENDER_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
 def main_source():
     return MAIN_PY.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def check_js():
+    return REDO_CHECK_JS.read_text(encoding="utf-8")
 
 
 def _referenced_ids(source):
@@ -187,10 +199,10 @@ def test_redo_payload_check_is_wired_into_pytest():
 
 
 #: 断言条数下限 —— 夹具被误删/掏空时这里会先红，不必等某项断言失效才发现。
-#: 当前 117 项（含人工标注掌握度、认领组卷台那张卷两节）。留 ~10% 余量：正常增删
+#: 当前 107 项（含人工标注掌握度、切回错题台落点两节）。留 ~10% 余量：正常增删
 #: 个别断言不会误报，
 #: 整块章节被删掉则一定会红。
-REDO_CHECK_MIN_ITEMS = 105
+REDO_CHECK_MIN_ITEMS = 122
 
 
 def test_redo_payload_check_passes_in_fake_dom():
@@ -223,44 +235,65 @@ def test_redo_payload_check_passes_in_fake_dom():
 # 没有入口写回 redo_attempts。确认卡就是补上的那座桥，下面这些钉住它别悄悄断掉。
 
 
-def test_redo_adopt_prompt_dom_ids_exist(html):
-    """确认卡是静态结构（不是运行时拼的），id 必须都在 index.html 里。"""
+def test_redo_adopt_popup_is_fully_removed(html, js):
+    """确认卡整条链路已下线，三个文件里都不许留半截。
 
-    defined = _defined_ids(html)
+    入口改到组卷面板第四格：点「记作重做练习」才认领，点 PDF 预览不问也不认领。
+    留一半的症状分别是「内联 onclick 点了毫无反应」（DOM 没了 handler 还在）与
+    「导出后突然又弹出旧卡」（触发点没拆干净）。
+    """
+
     for name in (
         "redoAdoptPrompt",
         "redoAdoptText",
         "redoAdoptConfirmBtn",
         "redoAdoptDismissBtn",
     ):
-        assert name in defined, f"{name} 不在 index.html 里"
+        assert name not in html, f"{name} 应从 index.html 移除"
 
-
-def test_redo_adopt_prompt_starts_hidden(html):
-    box = re.search(r'id="redoAdoptPrompt"[^>]*class="([^"]*)"', html)
-    assert box, "找不到确认卡容器"
-    assert "hidden" in box.group(1), "确认卡默认必须隐藏，否则一进页面就盖住整屏"
-
-
-def test_redo_adopt_prompt_handlers_are_exported(js):
-    exported = set(re.findall(r"window\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=", js))
     for name in (
+        "maybePromptRedoAdopt",
         "confirmRedoAdopt",
         "dismissRedoAdopt",
-        "maybePromptRedoAdopt",
-        "openRedoPaperFromLibrary",
+        "adoptContext",
+        "declinedDraftSignatures",
     ):
-        assert name in exported, f"{name} 没有挂到 window 上，内联 onclick 会 undefined"
+        assert name not in js, f"redo.js 里还留着 {name}"
+
+    paper_src = (PROJECT_ROOT / "static" / "js" / "paper.js").read_text(encoding="utf-8")
+    assert "maybePromptRedoAdopt" not in paper_src
+    assert "promptRedoAdoptAfterExport" not in paper_src
+    assert "target !== 'sheet'" not in paper_src, "导出成功那条路不该再触发认领"
 
 
-def test_paper_export_asks_before_adopting():
-    """导出成功后要问一句，且答题卡不弹（答题卡不是拿来做的练习卷）。"""
+def test_paper_panel_has_redo_adopt_cell():
+    """认领入口是组卷面板导出行的第四格：点了走 POST /api/redo/adopt。"""
 
-    source = (PROJECT_ROOT / "static" / "js" / "paper.js").read_text(encoding="utf-8")
-    assert "promptRedoAdoptAfterExport" in source, "主编辑器导出后没有问认领"
-    assert "target !== 'sheet'" in source, "答题卡不该弹这个确认卡"
-    # 历史卷的快速导出也要问（它带 paper_id，declined 能落库，之后不再追问）。
-    assert "maybePromptRedoAdopt" in source
+    src = (PROJECT_ROOT / "static" / "js" / "paper.js").read_text(encoding="utf-8")
+
+    assert "adoptPaperAsRedo" in src
+    assert "'/api/redo/adopt'" in src
+    assert "paperRedoAdoptBtn" in src
+    assert "${redoAdoptCell}" in src, "第四格没挂进导出按钮行"
+    # 四格等分后 LaTeX 那格只剩约 110px，缩写了；全称留在 title 里
+    assert "<span>LaTeX</span>" in src
+
+
+def test_redo_adopt_state_lives_in_store():
+    """认领态必须挂在 PaperStore 上，并带卷面指纹。
+
+    面板每次改动都整块重建 innerHTML（改分、换题、调留白都触发），状态放 DOM 上会被
+    抹掉 —— 表现成「刚认领完，动一下题目就变回未认领」。指纹防的是另一头：认领之后又
+    改了题却仍显示已认领，那录进去的会与手上纸卷对不上。
+    """
+
+    src = (PROJECT_ROOT / "static" / "js" / "paper.js").read_text(encoding="utf-8")
+    assert "redoAdopt: null" in src, "PaperStore 里没有认领态字段"
+    assert "window.PaperStore.redoAdopt =" in src, "认领成功后没有写回状态"
+    assert "adopt.signature === sig" in src, "缺卷面指纹比对"
+    assert "loadedPaperFingerprint = signature" in src, (
+        "认领后没把「卷面 = 库里这张卷」的基准归位，再点一次会又建一张重复卷"
+    )
 
 
 def test_paper_export_tracks_loaded_paper_identity():
@@ -300,3 +333,154 @@ def test_adopt_writes_only_metadata(main_source):
     assert "RedoAttempt(" not in body, "认领不能往 redo_attempts 里插行"
     assert not re.search(r"\.redo_count\s*=", body), "认领不能直接改 redo_count"
     assert "redo_locked_order" in body, "认领卷必须锁原序呈现"
+
+
+def test_switch_mistake_subtab_collapses_other_top_views(js):
+    """切子标签必须把错题工作台收敛成「只有目标视图可见」。
+
+    错题台有四个并列顶层视图（批次列表 / 重做复习 / 错题本审校 / 批次详情）。
+    只藏 listView 的写法下，从批次详情（切题页）被认领跳转拉过来时 detailView
+    还在，两个 ``flex-1`` 视图同屏平分高度 → 重做复习页的固定骨架吃掉 145px，
+    题干区被压成 0。2026-09-20 实测：题目看不见，只剩「做错 / 做对」按钮。
+    """
+
+    assert "focusMistakeView" in js, "缺少统一的视图收口函数"
+    for view_id in (
+        "mistakeListView",
+        "mistakeRedoView",
+        "mistakeReviewView",
+        "mistakeDetailView",
+    ):
+        assert view_id in js, f"收口清单漏了 {view_id}"
+
+    # 两个分支都要收口。scan 分支若只「显示列表」而不收口，正是叠加的来源。
+    assert "focusMistakeView('mistakeRedoView')" in js
+    assert "focusMistakeView('mistakeListView')" in js
+    # 旧写法（只藏列表）必须已经消失
+    assert "if (listView) listView.classList.add('hidden');" not in js
+
+
+def test_workspace_switch_keeps_the_open_view(js):
+    """切回错题台：重做录入页收起，其余**谁开着就落谁**，不能一律打开列表。
+
+    ``openMistakeBatch`` 开详情前先关了列表，说明四个顶层视图本就互斥。无条件打开列表
+    的写法会让「停在切题详情页 → 去题库 → 切回来」变成列表与详情同屏平分高度
+    （2026-09-20 用户截图：切题页漏在下半屏）。
+    """
+
+    assert "function landOnMistakeWorkspace(" in js
+    assert "landOnMistakeWorkspace();" in js, "selectWorkspace 包装层没走落点收口"
+
+    start = js.index("function landOnMistakeWorkspace(")
+    end = js.index("function closeRedoReview(")
+    body = js[start:end]
+    for view_id in ("mistakeReviewView", "mistakeDetailView", "mistakeListView"):
+        assert view_id in body, f"落点规则漏了 {view_id}"
+    assert "focusMistakeView(keepId)" in body, "落点必须收口，否则会叠加"
+
+
+def test_close_redo_review_does_not_touch_detail_view(js):
+    """「← 返回批次列表」刻意**不**碰 detailView / reviewView。
+
+    从题库切回错题台时保留用户上次停留的批次详情页是既有行为 —— 去别的台查个
+    东西再回来，切题上下文还在。这条路只收重做面板，认领跳转由
+    ``switchMistakeSubtab`` 负责收口。别顺手在这里加收口。
+    """
+
+    start = js.index("function closeRedoReview(")
+    end = js.index("async function refreshRedoBadge(")
+    body = js[start:end]
+
+    assert "focusMistakeView" not in body, "closeRedoReview 不该越权收口其它视图"
+    assert "redoView" in body and "listView" in body, "重做面板本身的显隐不能被删掉"
+
+
+def test_grade_card_keeps_min_height(html):
+    """窗口矮或分屏时题干区不能被压成 0。
+
+    录入面板的头部 / 进度 / 底部按钮都是 ``shrink-0``（约 145px 不可压缩），
+    只有题干区是 ``flex-1``。没有最小高度兜底时，容器一矮它就消失，
+    表现为「题卡一片空白」—— 与视图叠加是两个独立的成因，别只修一个。
+    """
+
+    card = re.search(r'id="redoGradeCard"[^>]*class="([^"]*)"', html)
+    assert card, "找不到题干区容器"
+    assert "min-h-[240px]" in card.group(1), "题干区需要最小高度兜底"
+
+    pane = re.search(r'id="redoGradePane"[^>]*class="([^"]*)"', html)
+    assert pane, "找不到录入面板容器"
+    assert "overflow-y-auto" in pane.group(1), (
+        "压到极限时整块要能滚 —— 否则 min-h 撑出去的高度会把底部「做错 / 做对」裁掉"
+    )
+
+
+def test_grade_card_renders_markdown_body_images(js, check_js, math_render_js):
+    """题干 / 解析里的 markdown 内联图必须渲染成 <img>。
+
+    错题入库时补的图是写成 ``![插图](/static/uploads/...)`` **内联在正文里**的
+    （见 mistake.js 的补图逻辑），未必进 ``image_paths``。错题详情、组卷台画布、
+    题库编辑器、导出的 PDF 四路都认这种语法，唯独重做录入页漏了 —— 2026-09-20
+    用户截图：纸上有的图，屏幕上是一串 ``![插图](...)`` 文字。
+
+    修完那次之后做的是**方案 B**：不再在 redo.js 里补一份，而是把「题面正文 → HTML」
+    收口到 ``math-render.js``，redo.js 只决定版式。所以这里钉的是「还在调公共层」，
+    不是「正则还写在本地」。
+
+    真正跑渲染的断言在 ``tests/js/redo_payload_check.js`` 第 14 节（13 项）。
+    """
+
+    # redo.js 必须走公共层，不能自己另写一份渲染
+    assert "window.MathRender.renderQuestionBody(content, opts)" in js, (
+        "题干/解析渲染没走公共层 —— 自己再写一份就会重新漏语法"
+    )
+    assert "latexPreviewHtml(item.display_content, inlineFigureUrls)" in js, (
+        "题干渲染没把已渲染的图收出来"
+    )
+    assert "figureStripHtml(item, inlineFigureUrls)" in js, "配图数组没接上去重"
+    assert "skip.indexOf(u) === -1" in js, "去重只做了一半"
+
+    # 公共层必须真的认这种语法，并且过安全过滤
+    assert r"/!\[([^\]]*)\]\(\s*([^)\s]+)\s*\)/g" in math_render_js, "公共层少了内联图正则"
+    assert "safeImageUrl(fig.rawUrl)" in math_render_js, "公共层的图没走 safeImageUrl"
+    assert "opts.dropUnsafe === true ? '' : escapeText(fig.match)" in math_render_js, (
+        "过不了安全过滤的图应当原样留着 markdown —— 静默抹掉会让老师以为这题本来没图"
+    )
+    # 去重要靠「这次真正渲染出来的 URL」，不能靠原始 markdown 字符串
+    assert "urls.indexOf(safeUrl) === -1" in math_render_js, "公共层没做去重"
+
+    for label in ("正文内联图渲染成 <img>", "指同一文件时只渲染一张图", "解析里的图渲染成 <img>"):
+        assert label in check_js, f"夹具第 14 节少了断言：{label}"
+
+
+def test_inline_figure_syntax_has_single_definition(math_render_js):
+    """「什么算一张内联图」只能有一份定义。
+
+    2026-09-21 之前 editor / paper / mistake / redo 各写一份正则与安全判断，
+    redo 那份漏了整条分支 —— 于是同一道题「导出的 PDF 上有图、重做页印出一串
+    markdown」。抄四遍就注定会漏，所以这里反过来盯住：**业务模块里不许再出现
+    内联图正则**，谁要用都得调 math-render.js。
+    """
+
+    for name in ("editor.js", "paper.js", "mistake.js", "redo.js", "import.js", "ocr.js"):
+        source = (PROJECT_ROOT / "static" / "js" / name).read_text(encoding="utf-8")
+        # 只盯「抽取图片」那类正则；ocr.js 里保护 `![` 不被当感叹号清掉的那一行不算
+        leftover = [
+            line for line in source.splitlines()
+            if "!\\[" in line and "]" in line and "(" in line
+            and "MARKDOWN_IMG_START" not in line
+        ]
+        assert leftover == [], (
+            f"{name} 里还留着内联图正则，应当改用 MathRender 的 "
+            f"replaceInlineFigures / inlineFigureUrls / stripInlineFigures：{leftover}"
+        )
+
+    # 四处出口都真的接上了公共层
+    exports = {
+        "mistake.js": "renderQuestionBody",
+        "redo.js": "renderQuestionBody",
+        "paper.js": "stripInlineFigures",
+        "editor.js": "replaceInlineFigures",
+    }
+    for name, fn in exports.items():
+        source = (PROJECT_ROOT / "static" / "js" / name).read_text(encoding="utf-8")
+        assert f"window.MathRender.{fn}" in source, f"{name} 没接上 MathRender.{fn}"

@@ -76,6 +76,11 @@
         savedAt: null,
         saveInFlight: false,
         lastSaveError: '',
+        // 组卷面板第四格「记作重做练习」的状态：{ paperId, round, pooledCount,
+        // questionCount, signature, adopted }。面板每次改动都整块重建 innerHTML，
+        // 状态放 DOM 上会被抹掉，只能挂在 store 里。signature 用来发现「认领之后
+        // 卷面又被改过」—— 那已经是另一份卷，得重新认领。
+        redoAdopt: null,
         bankQuestions: [], // Loaded questions from DB based on filters
         questionsMap: {}, // qid -> Question Object
         answerCache: Object.create(null), // qid -> full answer_markdown, loaded on demand
@@ -2496,6 +2501,37 @@
         const medPct = totalCount > 0 ? Math.round((medCount / totalCount) * 100) : 0;
         const hardPct = totalCount > 0 ? Math.max(0, 100 - easyPct - medPct) : 0;
 
+        // 第四格：「记作重做练习」入口 / 已认领状态。
+        //
+        // 状态挂 PaperStore（面板整块重建），且用卷面指纹兜一道：认领之后又改过题，
+        // 那已经是另一份卷面，必须显示成「未认领」让老师重新认一次 —— 否则界面上
+        // 写着「已认领」，实际录进闭环的是另一份题序，纸卷与记录对不上。
+        const redoAdoptCell = (function () {
+            const adopt = window.PaperStore.redoAdopt;
+            const sig = paperSignature(cart.map(function (item) { return item.id; }));
+            const round = adopt ? Math.max(1, parseInt(adopt.round, 10) || 1) : 1;
+            if (adopt && adopt.paperId && adopt.signature === sig) {
+                return '<button type="button" id="paperRedoAdoptBtn"'
+                    + ' onclick="openRedoPaperFromLibrary(' + adopt.paperId + ')"'
+                    + ' class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800 dark:hover:bg-emerald-900/40"'
+                    + ' title="已记入错题重做闭环（第 ' + round + ' 轮，卷内 '
+                    + Math.max(0, parseInt(adopt.pooledCount, 10) || 0)
+                    + ' 道来自错题池）。点它到错题工作台逐题录入对错">'
+                    + '<i class="fa-solid fa-rotate-left"></i>'
+                    + '<span>已认领 · 第 ' + round + ' 轮</span></button>';
+            }
+            if (totalCount === 0) {
+                return '<button type="button" id="paperRedoAdoptBtn" disabled'
+                    + ' class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700"'
+                    + ' title="卷面还是空的，先加几道题">'
+                    + '<i class="fa-solid fa-rotate-left"></i><span>记作重做练习</span></button>';
+            }
+            return '<button type="button" id="paperRedoAdoptBtn" onclick="adoptPaperAsRedo()"'
+                + ' class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-white text-brand-700 border border-brand-200 hover:bg-brand-50 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-brand-200 dark:border-brand-900 dark:hover:bg-slate-700"'
+                + ' title="把这张卷记入错题重做闭环：做完后到错题工作台的「重做复习」逐题录入对错，掌握度和下次重做日才会累积。卷面顺序保持原样，跟你手上那张纸卷一致">'
+                + '<i class="fa-solid fa-rotate-left"></i><span>记作重做练习</span></button>';
+        })();
+
         container.innerHTML = `
             <!-- Part 1: Top Fixed Control Section (Non-scrolling Studio Panel) -->
             <div class="shrink-0 mb-3">
@@ -2503,9 +2539,9 @@
                     <!-- Row 1: Header Stats & Solution Space Config -->
                     <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-100 dark:border-slate-800/60">
                         <div class="flex items-center space-x-3">
-                            <div class="flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-brand-50 text-brand-700 font-bold text-xs border border-brand-200/60 dark:bg-brand-900/40 dark:text-brand-200 dark:border-brand-900">
-                                <span>总分: ${totalScore} 分</span>
-                                <span class="text-slate-400 font-normal">|</span>
+                            <div class="shrink-0 whitespace-nowrap flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-brand-50 text-brand-700 font-bold text-xs border border-brand-200/60 dark:bg-brand-900/40 dark:text-brand-200 dark:border-brand-900">
+                                <span>总分 ${totalScore}</span>
+                                <span class="text-slate-400 font-normal">·</span>
                                 <span>${totalCount} 题</span>
                             </div>
                             <!-- Difficulty ratio bar -->
@@ -2518,30 +2554,30 @@
                                 </div>
                             </div>
                             <!-- Solution Space Selector -->
-                            <div class="flex items-center space-x-1 text-xs">
-                                <span class="text-slate-500 font-semibold dark:text-slate-300 flex items-center space-x-1">
+                            <div class="shrink-0 flex items-center space-x-1 text-xs">
+                                <span class="shrink-0 whitespace-nowrap text-slate-500 font-semibold dark:text-slate-300 flex items-center space-x-1">
                                     <i class="fa-solid fa-arrows-up-down text-brand-500"></i>
                                     <span>留白:</span>
                                 </span>
                                 <select onchange="window.updateGlobalSolutionSpace(this.value)"
-                                    class="px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-brand-50/60 text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200">
+                                    class="whitespace-nowrap px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-brand-50/60 text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200">
                                     ${meta.paper_type === 'exam_19' ? `
-                                        <option value="0.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '0.0') === 0.0) ? 'selected' : ''}>0 cm (不留白)</option>
-                                        <option value="3.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '0.0') === 3.0) ? 'selected' : ''}>3 cm (紧凑留白)</option>
+                                        <option value="0.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '0.0') === 0.0) ? 'selected' : ''}>不留白</option>
+                                        <option value="3.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '0.0') === 3.0) ? 'selected' : ''}>紧凑 3cm</option>
                                     ` : `
-                                        <option value="0.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '7.0') === 0.0) ? 'selected' : ''}>0 cm (不留白)</option>
-                                        <option value="7.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '7.0') === 7.0) ? 'selected' : ''}>7 cm (标准留白)</option>
+                                        <option value="0.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '7.0') === 0.0) ? 'selected' : ''}>不留白</option>
+                                        <option value="7.0" ${(parseFloat(meta.solution_space_default !== undefined ? meta.solution_space_default : '7.0') === 7.0) ? 'selected' : ''}>标准 7cm</option>
                                     `}
                                 </select>
                             </div>
                             <!-- Batch Score by Question Type -->
-                            <div class="flex items-center space-x-1 text-xs">
-                                <span class="text-slate-500 font-semibold dark:text-slate-300 flex items-center space-x-1" title="按题型批量设置每题分值">
+                            <div class="shrink-0 flex items-center space-x-1 text-xs">
+                                <span class="shrink-0 whitespace-nowrap text-slate-500 font-semibold dark:text-slate-300 flex items-center space-x-1" title="按题型批量设置每题分值">
                                     <i class="fa-solid fa-sliders text-brand-500"></i>
-                                    <span>批量设分:</span>
+                                    <span>设分:</span>
                                 </span>
-                                <select id="batchScoreTypeSelect" onchange="window.toggleBatchScoreInput()" class="px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-brand-50/60 text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200">
-                                    <option value="">选择题型…</option>
+                                <select id="batchScoreTypeSelect" onchange="window.toggleBatchScoreInput()" class="whitespace-nowrap px-2 py-1 text-xs rounded-xl border border-brand-200/80 bg-brand-50/60 text-brand-900 font-bold focus:ring-2 focus:ring-brand-500 focus:outline-none dark:bg-brand-900/50 dark:border-brand-900 dark:text-brand-200">
+                                    <option value="">选题型…</option>
                                     <option value="single_choice">单选</option>
                                     <option value="multi_choice">多选</option>
                                     <option value="fill_in_blank">填空</option>
@@ -2587,17 +2623,21 @@
                         </button>
                     </div>
 
-                    <!-- Row 3: Preview & Export Options -->
+                    <!-- Row 3: 导出格式三格 + 「记作重做练习」一格。
+                         第四格是**动作**入口而不是格式：点它就认领这张卷，点 PDF 预览
+                         只导出、不问也不认领（认领不再挂在导出成功那一刻 —— 老师印完
+                         还要等学生做完，那时才有得录）。四格等分下「LaTeX 打包」只剩
+                         ~110px，缩为「LaTeX」，全称留在 title 里。 -->
                     <div class="flex flex-wrap items-center justify-between gap-2 sm:gap-2.5">
                         ${meta.paper_type === 'exam_19' ? `
                             <button onclick="exportPaperPdf('paper')" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="编译并打开试卷 PDF 预览">
                                 <i class="fa-solid fa-file-pdf"></i>
-                                <span>试卷 PDF 预览</span>
+                                <span>PDF 预览</span>
                             </button>
                             ${isMultiSubjectCart ? '' : `
                                 <button onclick="exportPaperPdf('sheet')" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="编译并打开 A3 双面答题卡 PDF 预览">
                                     <i class="fa-solid fa-file-lines"></i>
-                                    <span>答题卡 PDF 预览</span>
+                                    <span>答题卡</span>
                                 </button>
                             `}
                             <button onclick="exportPaperWord()" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="导出可编辑 Word 试卷正文（不含答题卡）">
@@ -2606,7 +2646,7 @@
                             </button>
                             <button onclick="exportPaperBundle()" class="flex-1 px-2.5 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="打包导出 LaTeX 源码、插图及编译好的 PDF 全套文件">
                                 <i class="fa-solid fa-box-archive"></i>
-                                <span>LaTeX 打包</span>
+                                <span>LaTeX</span>
                             </button>
                         ` : `
                             <button onclick="exportPaperPdf('paper')" class="flex-1 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="编译并打开试卷 PDF 预览">
@@ -2619,15 +2659,16 @@
                             </button>
                             <button onclick="exportPaperBundle()" class="flex-1 py-1.5 justify-center rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200/80 active:scale-95 transition-all flex items-center space-x-1.5 whitespace-nowrap dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700 dark:hover:bg-slate-700" title="打包导出 LaTeX 源码、插图及编译好的 PDF 全套文件">
                                 <i class="fa-solid fa-box-archive"></i>
-                                <span>LaTeX 打包</span>
+                                <span>LaTeX</span>
                             </button>
                         `}
+                        ${redoAdoptCell}
                     </div>
 
                     <!-- Row 4: 存档状态。草稿任何时候都在本机，只有「保存试卷」才写归档 -->
                     <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pt-1.5 mt-0.5 border-t border-dashed border-slate-100 dark:border-slate-800/60">
                         <span id="paperSaveStatus" class="min-w-0 text-[10px] font-semibold"></span>
-                        <span class="shrink-0 text-[10px] text-slate-400 dark:text-slate-500">草稿自动存本机 · 保存会新增一条归档</span>
+                        <span class="shrink-0 whitespace-nowrap text-[10px] text-slate-400 dark:text-slate-500" title="草稿随时自动暂存在本机；点「保存试卷」才会在历史试卷库里新增一条归档">草稿自动存本机</span>
                     </div>
                 </div>
             </div>
@@ -3509,9 +3550,8 @@
                     tab.location.href = url;
                 }
                 if (window.showToast) window.showToast(`${targetName} PDF 编译成功！已在新窗口打开`, 'success');
-                // 导出就是「学生要做这份卷」的时刻，顺手问一句要不要进重做闭环。
-                // 答题卡不弹（它不是拿来做的练习卷）。
-                if (target !== 'sheet') promptRedoAdoptAfterExport(cartQuestions);
+                // 认领不再挂在导出成功这一刻（2026-09-20 用户要求）：面板第四格
+                // 「记作重做练习」才是入口 —— 老师印完还要等学生做完，那时才有得录。
             } else {
                 let errLog = `${targetName} PDF 编译失败`;
                 let errData = {};
@@ -4066,37 +4106,84 @@
     }
 
     /**
-     * 导出成功后问一句「要不要记作错题重做练习」。
+     * 面板第四格「记作重做练习」：把当前卷面认领进错题重做闭环。
      *
-     * 有 paperId 就认领**原来那张卷**（从历史载入后重印的场景），没有就带上卷面数据
-     * 让后端现场落库再认领（主编辑器新组的卷面，库里本来就没这条记录）。
+     * 有 paperId 且卷面指纹对得上就认领**原来那张卷**（从历史载入后重印的场景）；否则
+     * 带上卷面数据让后端现场落库再认领（主编辑器新组的卷，库里本来就没这条记录）。
      *
-     * 卷面指纹必须对得上才敢用 loadedPaperId：老师载入卷 A 之后又改了题目，那已经是
-     * 另一份卷面了 —— 宁可新建一张，也不能把结果记到卷 A 头上。
+     * 指纹必须对得上才敢用 loadedPaperId：老师载入卷 A 之后又改了题目，那已经是另一份
+     * 卷面 —— 宁可新建一张，也不能把结果记到卷 A 头上。
+     *
+     * 成功**不跳页**：点它只为了记一笔，而老师此刻多半正要去打印。录对错走第 4 格
+     * （认领后会变成绿色入口）或组卷历史卡片上的「录入结果」。
      */
-    function promptRedoAdoptAfterExport(cartQuestions) {
-        if (typeof window.maybePromptRedoAdopt !== 'function') return;
-        const items = cartQuestions || [];
-        const ids = items.map(function (q) { return q.id; });
-        const fingerprint = paperSignature(ids);
-        const knownPaperId = (window.PaperStore.loadedPaperFingerprint === fingerprint)
+    window.adoptPaperAsRedo = async function () {
+        const cart = window.PaperStore.cart || [];
+        if (!cart.length) {
+            if (window.showToast) window.showToast('卷面还是空的，先加几道题', 'warning');
+            return;
+        }
+        const btn = document.getElementById('paperRedoAdoptBtn');
+        if (btn) btn.disabled = true;
+
+        const ids = cart.map(function (item) { return item.id; });
+        const signature = paperSignature(ids);
+        const knownPaperId = (window.PaperStore.loadedPaperFingerprint === signature)
             ? (parseInt(window.PaperStore.loadedPaperId, 10) || 0)
             : 0;
-        window.maybePromptRedoAdopt({
-            paperId: knownPaperId,
-            questionIds: ids,
-            draft: {
-                title: window.PaperStore.meta.title,
-                subtitle: window.PaperStore.meta.subtitle,
-                subject_line: window.PaperStore.meta.subject_line || '',
-                exam_duration: examDurationMinutes(window.PaperStore.meta),
-                paper_type: paperTypeForPayload(),
-                show_notice: window.PaperStore.meta.show_notice !== false,
-                show_secret: window.PaperStore.meta.show_secret !== false,
-                questions: items
+        const payload = knownPaperId ? { paper_id: knownPaperId } : {
+            title: window.PaperStore.meta.title,
+            subtitle: window.PaperStore.meta.subtitle,
+            subject_line: window.PaperStore.meta.subject_line || '',
+            exam_duration: examDurationMinutes(window.PaperStore.meta),
+            paper_type: paperTypeForPayload(),
+            show_notice: window.PaperStore.meta.show_notice !== false,
+            show_secret: window.PaperStore.meta.show_secret !== false,
+            questions: cart
+        };
+
+        try {
+            const res = await fetch('/api/redo/adopt', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            let data = {};
+            try { data = await res.json(); } catch (e) { data = {}; }
+            if (!res.ok || data.status !== 'success') {
+                if (window.showToast) window.showToast(data.message || '记作重做练习失败', 'error');
+                return;
             }
-        });
-    }
+            window.PaperStore.redoAdopt = {
+                paperId: data.paper_id,
+                round: data.redo_round,
+                pooledCount: data.pooled_count,
+                questionCount: data.question_count,
+                signature: signature,
+                adopted: true
+            };
+            // 让「当前卷面 = 库里这张卷」这条基准归位：否则再点一次会又新建一张重复卷。
+            window.PaperStore.loadedPaperId = data.paper_id;
+            window.PaperStore.loadedPaperFingerprint = signature;
+            if (window.showToast) {
+                window.showToast(
+                    data.already
+                        ? '这张卷已经在重做练习里了。'
+                        : '已记作重做练习，做完到错题工作台逐题录入对错。',
+                    'success'
+                );
+            }
+            window.renderPaperCanvas();
+            if (typeof window.refreshRedoBadge === 'function') window.refreshRedoBadge();
+        } catch (e) {
+            if (window.showToast) {
+                window.showToast('记作重做练习失败：' + ((e && e.message) || e), 'error');
+            }
+        } finally {
+            const again = document.getElementById('paperRedoAdoptBtn');
+            if (again) again.disabled = false;
+        }
+    };
 
     window.loadSavedPaper = async function (paperId) {
         try {
@@ -4132,8 +4219,8 @@
                         });
                     });
                 }
-                // 记住这份卷面是从哪条历史记录载入的 —— 导出后就近认领时要认领原来
-                // 那张卷，而不是新建一张重复的。指纹在导出时再比对一次才敢用。
+                // 记住这份卷面是从哪条历史记录载入的 —— 面板上点「记作重做练习」时要
+                // 认领原来那张卷，而不是新建一张重复的。指纹在认领时再比对一次才敢用。
                 window.PaperStore.loadedPaperId = paper.id;
                 window.PaperStore.loadedPaperFingerprint = paperSignature(
                     (paper.questions || []).map(item => item.id)
@@ -4213,13 +4300,6 @@
                     const url = URL.createObjectURL(blob);
                     if (tab && !tab.closed) {
                         tab.location.href = url;
-                    }
-                    // 有 paper_id 就走认领已有卷那条分支（declined 能落库，之后不再问）。
-                    if (typeof window.maybePromptRedoAdopt === 'function') {
-                        window.maybePromptRedoAdopt({
-                            paperId: paperId,
-                            questionIds: cartQuestions.map(q => q.id)
-                        });
                     }
                 } else {
                     let errorData = {};

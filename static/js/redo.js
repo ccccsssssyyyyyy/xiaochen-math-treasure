@@ -45,9 +45,7 @@
         index: 0,
         hideAnswer: true,
         busy: false,
-        confirmDeleteId: null,
-        // 导出后那张「要不要记作重做练习」的确认卡上下文（见 maybePromptRedoAdopt）。
-        adoptContext: null
+        confirmDeleteId: null
     };
 
     function el(id) {
@@ -176,16 +174,34 @@
         }
     }
 
+    // 错题工作台是四个并列的顶层视图（批次列表 / 重做复习 / 错题本审校 / 批次详情），
+    // 互相之间全靠每个入口自己记得隐藏别人。只藏一个的后果是：剩下两个 flex-1 视图
+    // 同屏平分高度 —— 2026-09-20 实测，从组卷台认领跳到重做复习时批次详情（切题页）
+    // 还在，重做复习页只拿到半屏，固定骨架吃掉 145px，题干区被压成 0，
+    // 表现出来就是「题卡一片空白、只剩做错 / 做对按钮」。所以进任一视图前统一收口。
+    const MISTAKE_TOP_VIEWS = [
+        'mistakeListView', 'mistakeRedoView', 'mistakeReviewView', 'mistakeDetailView'
+    ];
+
+    /** 把错题工作台收敛成「只有 keepId 这一个视图可见」。 */
+    function focusMistakeView(keepId) {
+        MISTAKE_TOP_VIEWS.forEach(function (id) {
+            if (id === keepId) return;
+            const node = el(id);
+            if (node) node.classList.add('hidden');
+        });
+    }
+
     function switchMistakeSubtab(which) {
         const listView = el('mistakeListView');
         const redoView = el('mistakeRedoView');
         if (which === 'redo') {
-            if (listView) listView.classList.add('hidden');
+            focusMistakeView('mistakeRedoView');
             if (redoView) redoView.classList.remove('hidden');
             setSubtabActive('redo');
             openMistakeRedo();
         } else {
-            if (redoView) redoView.classList.add('hidden');
+            focusMistakeView('mistakeListView');
             if (listView) listView.classList.remove('hidden');
             setSubtabActive('scan');
         }
@@ -198,6 +214,39 @@
         loadTasks();
     }
 
+    /**
+     * 从别的工作台切回错题台时的落点。
+     *
+     * 四个顶层视图必须**互斥**：``openMistakeBatch`` 开详情前就关了列表，说明这是原设计。
+     * 而初版这里只隐掉重做面板、又无条件把批次列表打开 —— 停在批次详情页时切回来，
+     * 列表与详情会各拿一半高度（2026-09-20 用户截图：切题页漏在下半屏）。
+     *
+     * 所以：重做录入页照旧收起（既有约定，别停在上一轮的录入页），其余**谁开着就落谁**
+     * （审校 > 详情 > 列表），一个都没开才落回批次列表 —— 既不叠加，也不丢正在切的题。
+     */
+    function landOnMistakeWorkspace() {
+        const redoView = el('mistakeRedoView');
+        if (redoView) redoView.classList.add('hidden');
+        setSubtabActive('scan');
+        const panel = el('redoNewPanel');
+        if (panel) panel.classList.add('hidden');
+        const board = el('redoBoardPanel');
+        if (board) board.classList.add('hidden');
+
+        let keepId = 'mistakeListView';
+        const sticky = ['mistakeReviewView', 'mistakeDetailView'];
+        for (let k = 0; k < sticky.length; k++) {
+            const node = el(sticky[k]);
+            if (node && !node.classList.contains('hidden')) { keepId = sticky[k]; break; }
+        }
+        focusMistakeView(keepId);
+        const keep = el(keepId);
+        if (keep) keep.classList.remove('hidden');
+    }
+
+    // 「← 返回批次列表」+ selectWorkspace 包装层都走这里。**刻意不碰 detailView /
+    // reviewView**：从题库切回错题台时保留用户上次停留的批次详情页是既有行为，
+    // 这里只负责收起重做面板本身。（认领跳转那条路径由 switchMistakeSubtab 收口。）
     function closeRedoReview() {
         const listView = el('mistakeListView');
         const redoView = el('mistakeRedoView');
@@ -778,134 +827,6 @@
         renderTasks();
     }
 
-    // ---------------------------------------------------------------- 认领为重做练习
-    //
-    // 错题闭环的第 1 遍练习几乎必然发生在**组卷台**那条通道（入库即送组卷 → 排版 →
-    // 印出来），可那张卷不带 is_redo，它的做题结果本来没有任何入口写回
-    // redo_attempts：老师只能去重做台重新生成一张，题序与手上纸卷对不上，轮次还会
-    // 被少算一遍（redo_round 取的是 max(attempt_no)，而这遍没记账）。
-    //
-    // 这一问就是补上那座桥，问在**导出之后** —— 那正是「学生要做这份卷」的时刻。
-    // 导出 PDF 是二进制响应，塞不进「这份卷含几道错题」，所以另发一问 eligibility。
-
-    // 同一会话里已明确说过「这是普通卷」的卷面签名。落库的卷把标记写进
-    // metadata.redo_declined（跨会话有效）；没落库的（主编辑器直接导出）只能用这个
-    // 内存集合兜住 —— 打印前一遍又一遍问同一件事会很烦。
-    var declinedDraftSignatures = {};
-
-    function draftSignature(questionIds) {
-        return (questionIds || []).slice()
-            .map(function (v) { return parseInt(v, 10) || 0; })
-            .sort(function (a, b) { return a - b; })
-            .join(',');
-    }
-
-    function showRedoAdoptPrompt() {
-        const box = el('redoAdoptPrompt');
-        if (!box) return;
-        box.classList.remove('hidden');
-        box.classList.add('flex');
-        box.setAttribute('aria-hidden', 'false');
-    }
-
-    function hideRedoAdoptPrompt() {
-        const box = el('redoAdoptPrompt');
-        if (!box) return;
-        box.classList.add('hidden');
-        box.classList.remove('flex');
-        box.setAttribute('aria-hidden', 'true');
-    }
-
-    /**
-     * 导出成功之后问一句：这份卷要不要记作重做练习？返回 true 表示弹了卡。
-     *
-     * options = { paperId?, questionIds?, draft? }
-     *   - 历史卷快速导出 → 有 paperId（declined 能落库，之后永久不再问）
-     *   - 主编辑器导出   → 没有 paperId（卷面还在试题篮里），带 draft 供认领时现场落库
-     */
-    async function maybePromptRedoAdopt(options) {
-        const opts = options || {};
-        const paperId = parseInt(opts.paperId, 10) || 0;
-        const ids = (opts.questionIds || [])
-            .map(function (v) { return parseInt(v, 10) || 0; })
-            .filter(function (v) { return v > 0; });
-        if (!paperId && !ids.length) return false;
-        if (!paperId && declinedDraftSignatures[draftSignature(ids)]) return false;
-
-        let res = null;
-        try {
-            res = await postJson(
-                '/api/redo/eligibility',
-                paperId ? { paper_id: paperId } : { question_ids: ids }
-            );
-        } catch (e) {
-            return false;
-        }
-        if (!res || !res.ok || !res.data || !res.data.eligible) return false;
-
-        state.adoptContext = {
-            paperId: paperId,
-            questionIds: ids,
-            draft: opts.draft || null,
-            pooledCount: res.data.pooled_count
-        };
-        const text = el('redoAdoptText');
-        if (text) {
-            text.innerHTML = '这份卷里有 <b>' + esc(String(res.data.pooled_count)) + '</b> 道错题。' +
-                '记作重做练习后，做完就能在错题工作台里逐题录入对错，' +
-                '掌握度和下次重做的日子才会开始累积。' +
-                '<br><span class="text-slate-400">卷面顺序保持原样、不会重新打乱 —— 跟你手上那张纸卷一致。</span>';
-        }
-        showRedoAdoptPrompt();
-        return true;
-    }
-
-    async function confirmRedoAdopt() {
-        const ctx = state.adoptContext;
-        hideRedoAdoptPrompt();
-        if (!ctx) return;
-        const btn = el('redoAdoptConfirmBtn');
-        if (btn) btn.disabled = true;
-        try {
-            const payload = ctx.paperId
-                ? { paper_id: ctx.paperId }
-                : Object.assign({}, ctx.draft || {});
-            const res = await postJson('/api/redo/adopt', payload);
-            if (!res.ok) {
-                toast((res.data && res.data.message) || '记作重做练习失败', 'error');
-                return;
-            }
-            state.adoptContext = null;
-            toast(res.data.message || '已记作重做练习', 'success');
-            await refreshRedoBadge();
-            // 顺手把这卷打开，老师可以马上对着纸卷录对错。
-            if (res.data.paper_id) {
-                if (typeof window.selectWorkspace === 'function') {
-                    window.selectWorkspace('mistake', '错题工作台');
-                }
-                switchMistakeSubtab('redo');
-                await openRedoPaper(res.data.paper_id);
-            }
-        } finally {
-            if (btn) btn.disabled = false;
-        }
-    }
-
-    async function dismissRedoAdopt() {
-        const ctx = state.adoptContext;
-        hideRedoAdoptPrompt();
-        if (!ctx) return;
-        state.adoptContext = null;
-        if (!ctx.paperId) {
-            declinedDraftSignatures[draftSignature(ctx.questionIds)] = true;
-            toast('好的，这份卷保持普通卷。', 'info');
-            return;
-        }
-        // 落库的卷把「这是普通卷」记在 metadata 上，之后重印不再问。
-        await postJson('/api/redo/decline', { paper_id: ctx.paperId });
-        toast('好的，这份卷保持普通卷，之后不再追问。', 'info');
-    }
-
     /** 组卷台历史卷卡片上的「录入结果」：切到错题台并把这张卷打开。 */
     async function openRedoPaperFromLibrary(paperId) {
         const id = parseInt(paperId, 10) || 0;
@@ -936,22 +857,20 @@
     window.deleteRedoPaper = deleteRedoPaper;
     window.cancelRedoDelete = cancelRedoDelete;
     window.refreshRedoBadge = refreshRedoBadge;
-    window.maybePromptRedoAdopt = maybePromptRedoAdopt;
-    window.confirmRedoAdopt = confirmRedoAdopt;
-    window.dismissRedoAdopt = dismissRedoAdopt;
     window.openRedoPaperFromLibrary = openRedoPaperFromLibrary;
     window.RedoStore = state;
 
     // mistake.js 已经包装过一次 selectWorkspace（保存原始引用 + 包装）。这里再包一层，
-    // 顺序上本模块后加载、包裹在最外层，所以要在调用完前一层之后把「重做面板」这一层
-    // 的显隐再修正一遍 —— 否则从题库切回错题台会停在上一轮的录入页。
+    // 顺序上本模块后加载、包裹在最外层，所以要在调用完前一层之后把错题台内部这一层的
+    // 显隐再修正一遍 —— 否则从题库切回错题台会停在上一轮的录入页，或者列表与切题详情
+    // 同屏平分高度（见 landOnMistakeWorkspace 的注释）。
     const previousSelectWorkspace = window.selectWorkspace;
     window.selectWorkspace = function (workspaceId, workspaceName) {
         if (typeof previousSelectWorkspace === 'function') {
             previousSelectWorkspace(workspaceId, workspaceName);
         }
         if (workspaceId === 'mistake') {
-            closeRedoReview();
+            landOnMistakeWorkspace();
             refreshRedoBadge();
         }
     };

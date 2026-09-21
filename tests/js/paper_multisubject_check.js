@@ -224,7 +224,8 @@ function boot(opts) {
     safeClassList: function (v, fallback) { return fallback || ''; },
     safeImageUrl: function () { return ''; }
   };
-  sandbox.MathRender = { render: function () {}, renderMathIn: function () {} };
+  // MathRender 不再放替身：题面正文的渲染口径住在 math-render.js 里，
+  // 下面由 loadBaseModules 装载真模块。
   // vm 的新上下文没有宿主全局；fetchBankQuestions 靠 URLSearchParams 拼查询串，
   // 缺了它抛 ReferenceError 是**沙箱缺口**，不是被测代码的问题。
   sandbox.URLSearchParams = URLSearchParams;
@@ -233,6 +234,9 @@ function boot(opts) {
   sandbox.showToast = function (msg) { toasts.push(String(msg)); };
 
   vm.createContext(sandbox);
+// index.html 里 math-render.js 排在所有业务脚本之前，沙箱必须同一顺序：
+// 题面正文的渲染口径就住在这个文件里，放替身等于把被测逻辑整个绕过。
+require('./sandbox_base').loadBaseModules(sandbox);
   vm.runInContext(src, sandbox, { filename: 'paper.js' });
 
   return {
@@ -418,12 +422,14 @@ function render(env, cart) {
 
   // ============================================================ [3b] 答题卡入口
   section('[3b] 混科卷收起答题卡入口（A3 答题卡是数学 19 题卷专用，套不上混科）');
-  check('混科卷的按钮行里没有「答题卡 PDF 预览」',
-    html.indexOf('答题卡 PDF 预览') < 0, html.slice(0, 200));
+  // 认按钮的 onclick 而不是文案：面板里 Word 按钮的 title 也写着「不含答题卡」，
+  // 按文案断言会误判；何况四格等分后标签已缩为「答题卡」。
+  check('混科卷的按钮行里没有答题卡入口',
+    html.indexOf("exportPaperPdf('sheet')") < 0, html.slice(0, 200));
   check('混科卷的提示里说明了答题卡入口为什么消失',
     html.indexOf('答题卡入口已隐藏') >= 0);
-  check('单科卷仍然保留「答题卡 PDF 预览」',
-    singleHtml.indexOf('答题卡 PDF 预览') >= 0, '单科卷把答题卡入口也收掉了');
+  check('单科卷仍然保留答题卡入口',
+    singleHtml.indexOf("exportPaperPdf('sheet')") >= 0, '单科卷把答题卡入口也收掉了');
 
   // ============================================================ [4] 选题侧
   section('[4] 选题侧：学科多选、角标、请求过滤');
