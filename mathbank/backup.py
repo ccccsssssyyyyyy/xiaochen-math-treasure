@@ -30,6 +30,9 @@ from mathbank.paths import (
     SYSTEM_GENERATED_DIR,
     UPLOADS_DIR,
 )
+# 引用来源清单与启动孤儿图清理共用同一份契约（mathbank.upload_refs），
+# 避免一边保留、一边删除同一张题图。
+from mathbank.upload_refs import REFERENCE_TABLES as _UPLOAD_REFERENCE_TABLES
 
 
 BACKUP_FORMAT_VERSION = 2
@@ -238,7 +241,9 @@ def _database_upload_references(
 
     references: set[str] = set()
     selected_columns = [
-        name for name in ("image_paths", "content", "answer_markdown") if name in columns
+        name
+        for name in _UPLOAD_REFERENCE_TABLES["questions"]
+        if name in columns
     ]
     if not selected_columns:
         return references

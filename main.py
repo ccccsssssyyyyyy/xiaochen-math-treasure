@@ -480,66 +480,70 @@ def api_heartbeat():
 
 # ----------------- 启动自愈：后台静默清理孤儿临时图片 -----------------
 def clean_orphaned_images():
-    """扫描 static/uploads 目录及其 tmp 子目录，安全彻底擦除未被数据库引用的孤儿图片与旧残留临时图片"""
+    """扫描 static/uploads 目录及其 tmp 子目录，安全彻底擦除未被数据库引用的孤儿图片与旧残留临时图片。
+
+    引用口径与完整备份共用（``mathbank.upload_refs.REFERENCE_TABLES``）：不只
+    ``questions.image_paths``，还包括题干/解析里的内联 ``![...](url)``，以及错题
+    记录的块图与截图。旧实现只认 ``image_paths``，会把「只被正文内联引用」的题图
+    当孤儿删掉 —— 这正是「积累的题目配图消失」的一条成因。
+    """
     try:
-        from mathbank.database import SessionLocal, Question
-        db = SessionLocal()
+        from mathbank import database as _database_module
+        from mathbank.upload_refs import collect_live_upload_paths
+
+        # 引用集读不出来时**宁可不清理**：绝不能用偏小的集合去删文件。
         try:
-            # 1. 搜集数据库中所有题目引用的图片路径
-            questions = db.query(Question._image_paths).all()
-            referenced_images = set()
-            for (img_paths_str,) in questions:
-                if img_paths_str:
+            with _database_module.engine.connect() as connection:
+                referenced_images = collect_live_upload_paths(
+                    connection, url_prefix="/" + UPLOAD_DIR_REL
+                )
+        except Exception as exc:  # noqa: BLE001 - 清理是尽力而为，不该拖垮启动
+            print(
+                "[Storage Cleanup] 跳过：无法读取图片引用集 "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return
+
+        upload_dir = UPLOAD_DIR
+        if not os.path.exists(upload_dir):
+            return
+
+        cleaned_count = 0
+        now = time.time()
+        one_hour_seconds = 3600
+
+        # 清理 static/uploads/ 根目录下未引用的孤儿图片
+        for filename in os.listdir(upload_dir):
+            full_path = os.path.join(upload_dir, filename)
+            if os.path.isfile(full_path) and not filename.startswith("."):
+                local_rel_path = f"{UPLOAD_DIR_REL}/{filename}".lower()
+                if local_rel_path not in referenced_images:
                     try:
-                        paths = json.loads(img_paths_str)
-                        for path in paths:
-                            referenced_images.add(path.lstrip("/").lower())
+                        mtime = os.path.getmtime(full_path)
+                        if now - mtime > one_hour_seconds:
+                            os.remove(full_path)
+                            cleaned_count += 1
                     except Exception:
                         pass
-                        
-            # 2. 遍历本地图片目录及 tmp 子目录
-            upload_dir = UPLOAD_DIR
-            if not os.path.exists(upload_dir):
-                return
-                
-            cleaned_count = 0
-            now = time.time()
-            one_hour_seconds = 3600
-            
-            # 清理 static/uploads/ 根目录下未引用的孤儿图片
-            for filename in os.listdir(upload_dir):
-                full_path = os.path.join(upload_dir, filename)
+
+        # 清理 static/uploads/tmp/ 子目录下残留的所有旧拆卷/OCR临时切片图
+        tmp_dir = os.path.join(upload_dir, "tmp")
+        if os.path.exists(tmp_dir):
+            for filename in os.listdir(tmp_dir):
+                full_path = os.path.join(tmp_dir, filename)
                 if os.path.isfile(full_path) and not filename.startswith("."):
-                    local_rel_path = f"{UPLOAD_DIR_REL}/{filename}".lower()
+                    local_rel_path = f"{UPLOAD_DIR_REL}/tmp/{filename}".lower()
                     if local_rel_path not in referenced_images:
                         try:
                             mtime = os.path.getmtime(full_path)
-                            if now - mtime > one_hour_seconds:
+                            if now - mtime > 600:  # 超过 10 分钟未被使用的 tmp 切片立即清理
                                 os.remove(full_path)
                                 cleaned_count += 1
                         except Exception:
                             pass
 
-            # 清理 static/uploads/tmp/ 子目录下残留的所有旧拆卷/OCR临时切片图
-            tmp_dir = os.path.join(upload_dir, "tmp")
-            if os.path.exists(tmp_dir):
-                for filename in os.listdir(tmp_dir):
-                    full_path = os.path.join(tmp_dir, filename)
-                    if os.path.isfile(full_path) and not filename.startswith("."):
-                        local_rel_path = f"{UPLOAD_DIR_REL}/tmp/{filename}".lower()
-                        if local_rel_path not in referenced_images:
-                            try:
-                                mtime = os.path.getmtime(full_path)
-                                if now - mtime > 600:  # 超过 10 分钟未被使用的 tmp 切片立即清理
-                                    os.remove(full_path)
-                                    cleaned_count += 1
-                            except Exception:
-                                pass
-                        
-            if cleaned_count > 0:
-                print(f"[Storage Cleanup] 成功检测并清除 {cleaned_count} 个残留的旧临时图片与孤儿文件，磁盘无痕瘦身成功！")
-        finally:
-            db.close()
+        if cleaned_count > 0:
+            print(f"[Storage Cleanup] 成功检测并清除 {cleaned_count} 个残留的旧临时图片与孤儿文件，磁盘无痕瘦身成功！")
     except Exception as e:
         print(f"[Storage Cleanup Error] 执行静默图片净化时发生异常: {str(e)}")
 
@@ -581,6 +585,34 @@ def start_startup_cleanup():
 # 仅在非测试环境下启动静默自愈清理后台守护线程
 if not IS_TESTING:
     threading.Thread(target=start_startup_cleanup, daemon=True).start()
+
+
+# 每日滚动备份：create_full_backup_if_due 自带「同一 24h 窗口内只备份一次 + 单次
+# 失败只记日志不抛出」，所以调度器只需周期性敲门。启动那一刻已备份过一次；此后
+# 即便服务连跑数周不重启，也能每天自动落一份经过验证的快照（保留份数由
+# DEFAULT_RETENTION 控制），不会出现「长跑无滚动备份」的空窗。
+DAILY_BACKUP_CHECK_SECONDS = 60 * 60  # 每小时敲一次门，由内部 24h 间隔决定是否真备份
+
+
+def run_daily_backup_once() -> None:
+    """按 24h 间隔策略尝试落一份完整备份；失败只记录，绝不抛出。"""
+
+    try:
+        backup_path = create_full_backup_if_due()
+        if backup_path:
+            print(f"[Backup] 已创建并验证每日完整备份: {backup_path.name}")
+    except Exception as exc:  # noqa: BLE001 - 备份失败不该影响服务
+        print(f"[Backup Error] 每日完整备份失败: {type(exc).__name__}: {exc}")
+
+
+def start_daily_backup_scheduler() -> None:
+    while True:
+        time.sleep(DAILY_BACKUP_CHECK_SECONDS)
+        run_daily_backup_once()
+
+
+if not IS_TESTING:
+    threading.Thread(target=start_daily_backup_scheduler, daemon=True).start()
 
 
 # Ensure directories exist

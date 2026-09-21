@@ -176,3 +176,116 @@ def test_clean_orphaned_images(db_session):
         for p in [ref_full_path, old_orphan_path, new_orphan_path]:
             if os.path.exists(p):
                 os.remove(p)
+
+
+def test_clean_orphaned_images_keeps_inline_referenced_figures(db_session):
+    """只被题干/解析**内联引用**的图不能被当孤儿删掉。
+
+    回归：旧实现只从 ``questions.image_paths`` 收集引用，正文里的
+    ``![...](/static/uploads/x.png)`` 不在集合里，超过 1 小时就被清掉 ——
+    表现为「积累的题目配图凭空消失」。
+    """
+    import main
+    upload_dir = main.UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+
+    rel_dir = main.UPLOAD_DIR_REL
+    inline_name = "test_inline_fig_content.png"
+    answer_name = "test_inline_fig_answer.png"
+    orphan_name = "test_inline_orphan.png"
+
+    q = Question(
+        content=f"如图 ![](/{rel_dir}/{inline_name}) 求阴影面积",
+        question_type="detailed_answer",
+        answer_markdown=f"解析见下图 ![](/{rel_dir}/{answer_name})",
+    )
+    q.image_paths = []  # 关键：结构化字段为空，引用只在正文/解析里
+    db_session.add(q)
+    db_session.commit()
+
+    paths = {
+        name: os.path.join(upload_dir, name)
+        for name in (inline_name, answer_name, orphan_name)
+    }
+    for p in paths.values():
+        with open(p, "w") as f:
+            f.write("test_image_data")
+    two_hours_ago = time.time() - 7200
+    for p in paths.values():
+        os.utime(p, (two_hours_ago, two_hours_ago))
+
+    try:
+        clean_orphaned_images()
+
+        assert os.path.exists(paths[inline_name]), "题干内联图被误删"
+        assert os.path.exists(paths[answer_name]), "解析内联图被误删"
+        assert not os.path.exists(paths[orphan_name]), "真正的孤儿图应被删除"
+    finally:
+        for p in paths.values():
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                # 沙箱可能拦截 unlink；断言已跑完，清理失败不影响结论
+                pass
+
+
+def test_clean_orphaned_images_keeps_mistake_record_figures(db_session):
+    """错题记录引用的块图/截图也不能被当孤儿删掉。"""
+    import main
+    from mathbank.database import MistakeBatch, MistakeRecord, Student
+
+    upload_dir = main.UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+    rel_dir = main.UPLOAD_DIR_REL
+
+    student = Student(name="测试学生")
+    db_session.add(student)
+    db_session.flush()
+    batch = MistakeBatch(student_id=student.id, subject="math", title="批")
+    db_session.add(batch)
+    db_session.flush()
+
+    block_name = "test_mistake_block.png"
+    record = MistakeRecord(
+        batch_id=batch.id,
+        subject="math",
+        image_block=f"/{rel_dir}/{block_name}",
+    )
+    db_session.add(record)
+    db_session.commit()
+
+    block_path = os.path.join(upload_dir, block_name)
+    with open(block_path, "w") as f:
+        f.write("test_image_data")
+    two_hours_ago = time.time() - 7200
+    os.utime(block_path, (two_hours_ago, two_hours_ago))
+
+    try:
+        clean_orphaned_images()
+        assert os.path.exists(block_path), "错题块图被误删"
+    finally:
+        try:
+            if os.path.exists(block_path):
+                os.remove(block_path)
+        except OSError:
+            pass
+
+
+def test_run_daily_backup_once_triggers_scheduler_and_swallows_errors(monkeypatch):
+    """长跑服务的滚动备份：敲一次门就走「到期才备份」的策略，失败不抛出。"""
+    import main
+
+    calls = []
+    monkeypatch.setattr(
+        main, "create_full_backup_if_due", lambda: calls.append("called")
+    )
+    main.run_daily_backup_once()
+    assert calls == ["called"]
+
+    def _boom():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(main, "create_full_backup_if_due", _boom)
+    # 备份失败只该被记录，绝不能让后台线程（或测试）崩掉
+    main.run_daily_backup_once()
