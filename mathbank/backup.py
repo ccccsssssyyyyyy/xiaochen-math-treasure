@@ -22,6 +22,7 @@ from typing import Any
 
 from mathbank import __version__
 from mathbank.asset_security import SAFE_IMAGE_EXTENSIONS, harden_private_path
+from mathbank.db_migrations import LATEST_SCHEMA_VERSION, REQUIRED_TABLES
 from mathbank.paths import (
     DATA_BACKUP_DIR,
     DATABASE_FILE,
@@ -464,6 +465,125 @@ def create_pre_restore_backup() -> Path:
     """
 
     return create_full_backup(output_dir=PRE_RESTORE_BACKUP_DIR, retention=None)
+
+
+# ---------------------------------------------------------------------------
+# 旧版库文件导入（升级换目录时把上一版的题与图接回来）
+#
+# 打包复用 create_full_backup 的既有校验链（一致性快照 + integrity + 外键 +
+# 按引用归档图片），产出的 zip 与日常备份同格式，因此可以直接交给现有还原流程
+# 换入 —— 不新增任何安全关键的还原逻辑。来源库只被**只读**打开。
+# ---------------------------------------------------------------------------
+
+LEGACY_DATABASE_FILENAMES = ("math_question_bank.db",)
+LEGACY_DATABASE_SUFFIXES = frozenset({".db", ".sqlite", ".sqlite3"})
+
+
+def resolve_legacy_source(source: str | Path) -> tuple[Path, Path | None]:
+    """把「旧版程序目录」或「旧库文件」路径解析成 (库文件, 图片目录或 None)。
+
+    接受两类输入，降低用户心智负担：指向旧程序文件夹（自动找其中的
+    ``math_question_bank.db`` 与 ``static/uploads``），或直接指向某个库文件。
+    """
+
+    raw = str(source or "").strip()
+    if not raw:
+        raise RuntimeError("请提供旧版程序目录或数据库文件路径")
+    candidate = Path(raw).expanduser()
+    try:
+        candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"路径不存在或无法访问：{raw}") from exc
+
+    if candidate.is_dir():
+        for name in LEGACY_DATABASE_FILENAMES:
+            database_path = candidate / name
+            if database_path.is_file():
+                uploads = candidate / "static" / "uploads"
+                return database_path, (uploads if uploads.is_dir() else None)
+        raise RuntimeError(
+            f"该目录里找不到 {LEGACY_DATABASE_FILENAMES[0]}：{candidate}"
+        )
+
+    uploads = candidate.parent / "static" / "uploads"
+    return candidate, (uploads if uploads.is_dir() else None)
+
+
+def validate_legacy_database(database_path: str | Path) -> dict[str, Any]:
+    """只读校验一份旧版库文件能否作为导入来源（绝不改动来源文件）。"""
+
+    path = Path(database_path)
+    if not path.is_file():
+        raise RuntimeError("旧版数据库文件不存在")
+    if path.suffix.lower() not in LEGACY_DATABASE_SUFFIXES:
+        raise RuntimeError(f"不是可识别的数据库文件：{path.name}")
+
+    try:
+        with closing(
+            sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+        ) as connection:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or integrity[0] != "ok":
+                raise RuntimeError(f"旧版数据库完整性问题：{integrity}")
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            missing = REQUIRED_TABLES - tables
+            if missing:
+                raise RuntimeError(
+                    "旧版数据库缺少必要数据表: " + ", ".join(sorted(missing))
+                )
+            row_counts = {
+                name: int(
+                    connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+                )
+                for name in sorted(REQUIRED_TABLES)
+            }
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"旧版数据库无法读取：{exc}") from exc
+
+    if version > LATEST_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"旧版数据库版本 {version} 高于当前程序支持的 "
+            f"{LATEST_SCHEMA_VERSION}，请先升级程序"
+        )
+    return {
+        "database_path": str(path),
+        "schema_version": version,
+        "row_counts": row_counts,
+    }
+
+
+def import_legacy_database(
+    source: str | Path,
+    *,
+    output_dir: Path | None = None,
+    retention: int | None = DEFAULT_RETENTION,
+) -> dict[str, Any]:
+    """把旧版库文件（含同目录图片）打包成标准完整备份并校验。
+
+    返回 dict：``archive`` 是产出的快照路径，可直接进入快照列表并被现有还原流程
+    换入。来源库引用到而磁盘上缺失的图片会让打包失败（fail-closed）—— 宁可报错
+    也不产出一个图不齐的「完整备份」。
+    """
+
+    database_path, uploads_dir = resolve_legacy_source(source)
+    summary = validate_legacy_database(database_path)
+    archive = create_full_backup(
+        output_dir=output_dir,
+        database_path=database_path,
+        uploads_dir=uploads_dir or (database_path.parent / "static" / "uploads"),
+        retention=retention,
+    )
+    manifest = verify_full_backup(archive)
+    summary["archive"] = archive
+    summary["uploads_dir"] = str(uploads_dir) if uploads_dir else None
+    summary["upload_file_count"] = manifest.get("upload_file_count")
+    return summary
 
 
 def create_full_backup_if_due(

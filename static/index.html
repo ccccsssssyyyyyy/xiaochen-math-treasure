@@ -2163,6 +2163,23 @@
                             <i class="fa-solid fa-clock-rotate-left text-[10px]"></i><span>还原到选中的快照</span>
                         </button>
                     </div>
+
+                    <div class="p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40 space-y-2">
+                        <p class="text-[11px] font-bold text-slate-700 dark:text-slate-200 flex items-center space-x-1.5">
+                            <i class="fa-solid fa-file-import text-brand-500 text-[10px]"></i>
+                            <span>从旧版程序目录导入题库</span>
+                        </p>
+                        <p class="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                            换了新文件夹后看不到以前的题？把<strong>旧版程序文件夹</strong>的完整路径粘进来（里面应有 math_question_bank.db 与 static/uploads），或直接粘那个 .db 文件的路径。与还原一样：会先备份当前题库，<strong>重启后</strong>才生效。
+                        </p>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <input type="text" id="backupLegacyPath" autocomplete="off" spellcheck="false" placeholder="例如 /Users/你的用户名/旧版数学题库"
+                                class="flex-1 min-w-[12rem] text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-100 font-mono focus:outline-none focus:ring-2 focus:ring-brand-400">
+                            <button type="button" id="btnBackupImportLegacy" onclick="importLegacyDatabase()" class="shrink-0 text-[11px] px-3 py-1.5 rounded-lg bg-brand-600 text-white font-semibold hover:bg-brand-700 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center space-x-1.5">
+                                <i class="fa-solid fa-file-import text-[10px]"></i><span>导入旧版题库</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
                 <!-- End of settings-tab-backup -->
                 </div>

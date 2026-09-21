@@ -23,6 +23,7 @@
     const ENDPOINT_CREATE = '/api/backup';
     const ENDPOINT_VERIFY = '/api/backup/verify';
     const ENDPOINT_RESTORE = '/api/backup/restore';
+    const ENDPOINT_IMPORT_LEGACY = '/api/backup/import-legacy-database';
 
     // 快照 manifest 里 row_counts 的真实键名 → 界面标签
     const ROW_LABELS = {
@@ -549,9 +550,60 @@
     }
 
     // ------------------------------------------------------------------
-    // 事件绑定与导出
+    // 从旧版程序目录导入题库
     // ------------------------------------------------------------------
 
+    async function importLegacyDatabase() {
+        const input = $('backupLegacyPath');
+        const sourcePath = input ? String(input.value || '').trim() : '';
+        if (!sourcePath) {
+            toast('先填入旧版程序文件夹或数据库文件的路径', 'info');
+            if (input) input.focus();
+            return;
+        }
+        const confirmed = window.confirm(
+            '将从以下位置导入题库：\n' + sourcePath
+            + '\n\n会先备份当前题库，然后登记换库请求；关闭并重新启动题库后生效。继续？'
+        );
+        if (!confirmed) return;
+
+        const button = $('btnBackupImportLegacy');
+        const originalHtml = button ? button.innerHTML : '';
+        if (button) {
+            button.disabled = true;
+            button.classList.add('opacity-60');
+            button.innerHTML = '<i class="fa-solid fa-circle-notch animate-spin text-[9px]"></i><span>导入中…</span>';
+        }
+        setState('正在读取并打包旧题库…', 'busy');
+        try {
+            const result = await requestJson(ENDPOINT_IMPORT_LEGACY, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: sourcePath, confirm: true })
+            });
+            const data = result.data || {};
+            if (!result.ok || data.status !== 'success') {
+                throw new Error(data.message || ('HTTP ' + result.status));
+            }
+            toast(data.message || '已导入旧题库，请重启生效', 'info');
+            if (input) input.value = '';
+            await loadBackupPanel();
+        } catch (error) {
+            const message = (error && error.message) ? error.message : error;
+            setState('导入失败：' + message, 'error');
+            toast('导入旧题库失败：' + message, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('opacity-60');
+                button.innerHTML = originalHtml;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 事件绑定与导出
+    // ------------------------------------------------------------------
     function bindListEvents() {
         const container = $('backupSnapshotList');
         if (!container || listBound) return;
@@ -585,6 +637,7 @@
     window.closeBackupRestoreConfirm = closeBackupRestoreConfirm;
     window.cancelPendingRestore = cancelPendingRestore;
     window.verifyBackupSnapshot = verifySnapshot;
+    window.importLegacyDatabase = importLegacyDatabase;
     window.__backupPanelState = function () {
         // 供自动化夹具读取内部状态，不参与界面逻辑
         return {

@@ -367,3 +367,113 @@ def test_restore_endpoint_keeps_the_delayed_contract():
     assert "restore_full_backup" not in handler
     assert "_restore_full_backup_unlocked" not in handler
     assert "write_pending_restore" in handler
+
+
+# ---------------------------------------------------------------------------
+# POST /api/backup/import-legacy-database —— 换目录升级后把旧题库接回来
+# ---------------------------------------------------------------------------
+
+
+def _make_legacy_folder(root: Path, question_count: int, marker: str) -> Path:
+    """造一个「上一版程序目录」：含 math_question_bank.db 与 static/uploads。"""
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "static" / "uploads").mkdir(parents=True, exist_ok=True)
+    _make_database(root / "math_question_bank.db", question_count, marker)
+    return root
+
+
+def test_import_legacy_database_requires_confirm(client, backup_sandbox, tmp_path):
+    old = _make_legacy_folder(tmp_path / "old_app", 3, "old")
+
+    response = client.post(
+        "/api/backup/import-legacy-database", json={"path": str(old)}, headers=AUTH
+    )
+
+    assert response.status_code == 400
+    assert "二次确认" in response.json()["message"]
+    assert not backup_sandbox["pending"].exists()
+
+
+def test_import_legacy_database_rejects_missing_path(client, backup_sandbox, tmp_path):
+    response = client.post(
+        "/api/backup/import-legacy-database",
+        json={"path": str(tmp_path / "does-not-exist"), "confirm": True},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 422
+    assert "路径不存在" in response.json()["message"]
+    assert not backup_sandbox["pending"].exists()
+
+
+def test_import_legacy_database_rejects_non_mathbank_database(
+    client, backup_sandbox, tmp_path
+):
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    with sqlite3.connect(stray / "math_question_bank.db") as connection:
+        connection.execute("CREATE TABLE nope (id INTEGER PRIMARY KEY)")
+
+    response = client.post(
+        "/api/backup/import-legacy-database",
+        json={"path": str(stray), "confirm": True},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 422
+    assert "必要数据表" in response.json()["message"]
+    assert not backup_sandbox["pending"].exists()
+
+
+def test_import_legacy_database_packages_folder_and_queues_switch(
+    client, backup_sandbox, tmp_path
+):
+    # 当前（新目录）是空的；旧目录里躺着 4 道题。
+    _make_database(backup_sandbox["database"], 0, "live")
+    old = _make_legacy_folder(tmp_path / "上一版程序", 4, "old")
+
+    response = client.post(
+        "/api/backup/import-legacy-database",
+        json={"path": str(old), "confirm": True},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["row_counts"]["questions"] == 4
+    assert data["source"] == str((old / "math_question_bank.db").resolve())
+    assert "重新启动" in data["message"]
+
+    # 打包出的快照真的进了快照目录、且可读
+    archive = backup_sandbox["snapshots"] / data["file"]
+    assert archive.is_file()
+    listing = client.get("/api/backups").json()
+    assert data["file"] in [item["file"] for item in listing["snapshots"]]
+
+    # 换库请求已登记，且换库前的当前库留了安全备份
+    pending = json.loads(backup_sandbox["pending"].read_text(encoding="utf-8"))
+    assert pending["archive"] == data["file"]
+    assert Path(pending["safety_backup"]).is_file()
+
+    # 关键：现在这一刻数据还没动
+    assert _question_count(backup_sandbox["database"]) == 0
+
+    # 模拟「关服务再启动」：旧题库被换入
+    result = apply_pending_restore()
+    assert result["archive"] == data["file"]
+    assert _question_count(backup_sandbox["database"]) == 4
+    assert not backup_sandbox["pending"].exists()
+
+
+def test_import_legacy_database_requires_local_token(client, backup_sandbox, tmp_path):
+    old = _make_legacy_folder(tmp_path / "old_app", 1, "old")
+
+    response = client.post(
+        "/api/backup/import-legacy-database",
+        json={"path": str(old), "confirm": True},
+    )
+
+    assert response.status_code == 403
+    assert not backup_sandbox["pending"].exists()

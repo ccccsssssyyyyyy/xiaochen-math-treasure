@@ -71,6 +71,7 @@ from mathbank.backup import (
     create_full_backup,
     create_full_backup_if_due,
     create_pre_restore_backup,
+    import_legacy_database,
     list_full_backups,
     read_pending_restore,
     resolve_full_backup,
@@ -1977,6 +1978,72 @@ def cancel_backup_restore():
         "status": "success",
         "removed": True,
         "message": "已取消待还原请求；下次重启不会再改动数据",
+    }
+
+
+@app.post("/api/backup/import-legacy-database")
+def import_legacy_database_endpoint(payload: dict):
+    """把旧版程序目录（或旧库文件）里的题库接回来：打包成标准快照并登记换库。
+
+    典型场景：新版本被解压到了新文件夹，打开后看到空题库，旧数据还在老文件夹。
+    指向老文件夹即可。真正的换库仍走「重启后落地」的安全窗口，且换库前会先把
+    当前库完整备份一份（pre_restore），可随时还原。
+    """
+
+    data = payload if isinstance(payload, dict) else {}
+    if data.get("confirm") is not True:
+        return JSONResponse(
+            content={"status": "error", "message": "缺少二次确认，已忽略该请求"},
+            status_code=400,
+        )
+
+    source = str(data.get("path", "")).strip()
+    try:
+        result = import_legacy_database(source)
+    except Exception as exc:  # noqa: BLE001 - 路径/校验问题要回传可读原因
+        return JSONResponse(
+            content={"status": "error", "message": f"导入旧题库失败：{exc}"},
+            status_code=422,
+        )
+
+    archive = result["archive"]
+    try:
+        safety_backup = create_pre_restore_backup()
+    except Exception as exc:  # noqa: BLE001 - 备份不出来就不允许进入换库
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": f"换库前的当前题库备份失败，已中止：{exc}",
+            },
+            status_code=500,
+        )
+
+    try:
+        request = write_pending_restore(archive.name, safety_backup=safety_backup)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            content={"status": "error", "message": f"登记待还原请求失败：{exc}"},
+            status_code=500,
+        )
+
+    minutes = max(1, PENDING_RESTORE_TTL_SECONDS // 60)
+    question_count = (result.get("row_counts") or {}).get("questions", 0)
+    return {
+        "status": "success",
+        "file": archive.name,
+        "source": result["database_path"],
+        "uploads_dir": result.get("uploads_dir"),
+        "schema_version": result["schema_version"],
+        "row_counts": result["row_counts"],
+        "upload_file_count": result.get("upload_file_count"),
+        "safety_backup": request["safety_backup"],
+        "expires_at": request["expires_at"],
+        "ttl_seconds": PENDING_RESTORE_TTL_SECONDS,
+        "message": (
+            f"已从旧题库打包 {question_count} 道题并登记换库请求。"
+            f"请关闭题库并重新启动，{minutes} 分钟内启动即会自动完成导入"
+            "（当前题库已先行备份，可随时还原）。"
+        ),
     }
 
 
