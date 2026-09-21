@@ -277,7 +277,10 @@ def test_placeholder_becomes_a_static_marker(js):
 
     body = _function_body(js, "contentPreviewHtml")
     assert "figures" in body
-    assert "figureList[figureCursor]" in body, "老配图仍按出现顺序配对，序号要对得上"
+    assert "figureList[cursor]" in body, "老配图仍按出现顺序配对，序号要对得上"
+    # 正文 → HTML 那一段已搬到 MathRender.renderQuestionBody，占位符作为 beforeChoices
+    # 回调插进去 —— 必须早于选项块，否则标记会被挤到 A./B./C./D. 后面。
+    assert "beforeChoices" in body, "占位符要在选项块之前插"
     assert "mrPlaceholderChipHtml(label)" in body
     assert "插图待补" in body, "没配图时要显示标记，不能凭空长图"
     assert "openMistakeCropModalFromPlaceholder" not in body, "补图入口已搬去源码区"

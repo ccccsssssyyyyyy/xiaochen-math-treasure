@@ -199,10 +199,14 @@ sandbox.MathBankSafe = {
   safeClassList: function (v, fallback) { return fallback || ''; },
   safeImageUrl: function () { return ''; }
 };
-sandbox.MathRender = { render: function () {}, renderMathIn: function () {} };
+// MathRender 不放替身：题面正文的渲染口径住在 math-render.js 里，
+// 由下面 loadBaseModules 装载真模块。
 sandbox.showToast = function () {};
 
 vm.createContext(sandbox);
+// index.html 里 math-render.js 排在所有业务脚本之前，沙箱必须同一顺序：
+// 题面正文的渲染口径就住在这个文件里，放替身等于把被测逻辑整个绕过。
+require('./sandbox_base').loadBaseModules(sandbox);
 vm.runInContext(src, sandbox, { filename: 'paper.js' });
 
 const M = sandbox.PaperVirtualMath;

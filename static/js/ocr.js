@@ -664,15 +664,10 @@
 
         function syncAnswerImagesFromMarkdown() {
             const val = document.getElementById('editAnswerMarkdown').value || '';
-            const regex = /!\[.*?\]\((.*?)\)/g;
-            let match;
-            const foundImages = [];
-            while ((match = regex.exec(val)) !== null) {
-                if (match[1] && match[1].includes('/static/uploads/')) {
-                    foundImages.push(match[1]);
-                }
-            }
-            uploadedAnswerImages = foundImages;
+            // 「什么算一张内联图」由 MathRender 判定（2026-09-21）。原先这里只检查
+            // 字符串里含不含 `/static/uploads/`，既不过安全过滤也不去重 ——
+            // 与别处不是同一口径，这里扫出来的图可能和预览里看到的不是同一批。
+            uploadedAnswerImages = window.MathRender.inlineFigureUrls(val);
             renderAnswerImageBadges();
         }
 

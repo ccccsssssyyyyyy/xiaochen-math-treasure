@@ -31,13 +31,47 @@ if (startIdx < 0 || endMarker < 0) {
 }
 const fnSrc = lines.slice(startIdx, endMarker).join('\n');
 
+// 2026-09-21：题面内联图的判定统一住进 math-render.js（页面里它排在所有业务脚本之前）。
+// 这个夹具的「自动补桩」只会按 ReferenceError 把缺失的标识符补成 identity 函数，
+// 补不出真的 MathRender —— 所以基础模块必须显式装载，不能指望补桩。
+const MATH_RENDER_SRC = fs.readFileSync(
+  path.join(__dirname, '..', '..', 'static', 'js', 'math-render.js'), 'utf8');
+
 // 自动补桩：缺失的外部依赖一律 identity，直到跑通
-const ctx = { console };
+const ctx = {
+  console,
+  // 与 api.js 同契约（同域 + /static/uploads/ 前缀 + 位图后缀），否则内联图那条分支测不出来
+  MathBankSafe: {
+    escapeText: (value) => String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#039;'),
+    escapeAttribute: (value) => String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#039;').replace(/\r?\n/g, ' '),
+    safeImageUrl: (value) => {
+      const raw = String(value == null ? '' : value).trim();
+      if (!raw || raw.indexOf('\\') !== -1) return '';
+      if (!/^\/static\/(uploads|test_uploads)\//.test(raw)) return '';
+      if (!/\.(png|jpe?g|gif|webp)$/i.test(raw)) return '';
+      return raw;
+    }
+  }
+};
+
+function buildSandbox() {
+  const sandbox = Object.assign({}, ctx);
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(MATH_RENDER_SRC, sandbox, { filename: 'math-render.js' });
+  return sandbox;
+}
+
 function run(input) {
   for (let i = 0; i < 30; i++) {
     try {
-      const sandbox = Object.assign({}, ctx, { __in: input });
-      vm.runInNewContext(fnSrc + '\n;__out = preprocessFormulaForKaTeX(__in);',
+      const sandbox = Object.assign(buildSandbox(), { __in: input });
+      vm.runInContext(fnSrc + '\n;__out = preprocessFormulaForKaTeX(__in);',
         sandbox, { filename: 'preprocessFormulaForKaTeX.slice.js' });
       return sandbox.__out;
     } catch (e) {

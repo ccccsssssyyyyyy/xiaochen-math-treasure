@@ -32,6 +32,8 @@ def test_untrusted_html_uses_dompurify_and_local_image_allowlist():
     editor_source = _read(STATIC_JS_DIR / "editor.js")
     import_source = _read(STATIC_JS_DIR / "import.js")
     paper_source = _read(STATIC_JS_DIR / "paper.js")
+    # 2026-09-21 起题面内联图的安全判定收口在 math-render.js，业务模块只拿结果
+    math_render_source = _read(STATIC_JS_DIR / "math-render.js")
 
     assert "window.MathBankSafe = MathBankSafe" in api_source
     assert "window.DOMPurify.sanitize" in api_source
@@ -41,8 +43,13 @@ def test_untrusted_html_uses_dompurify_and_local_image_allowlist():
     assert "url.origin !== window.location.origin" in api_source
 
     assert "sanitizeRichHtml(preprocessFormulaForKaTeX(text))" in editor_source
-    assert "MathBankSafe.safeImageUrl(src)" in editor_source
-    assert "MathBankSafe.safeImageUrl(m[1])" in paper_source
+    # 安全过滤不能因为「搬到公共层」就消失：业务模块必须拿公共层判过的结果，
+    # 公共层必须真的过 safeImageUrl，且过不了的（editor）不许出图。
+    assert "window.MathRender.replaceInlineFigures(tempText" in editor_source
+    assert "if (!ctx.safeUrl) return '';" in editor_source
+    assert "window.MathRender.stripInlineFigures(html)" in paper_source
+    assert "safeImageUrl(fig.rawUrl)" in math_render_source
+    assert "safeImageUrl(rawUrl)" in math_render_source
     assert "window.parseMarkdownWithMath(html)" in paper_source
     assert "MathBankSafe.sanitizeRichHtml(html)" in import_source
     assert "MathBankSafe.escapeAttribute(rawModel)" in api_source

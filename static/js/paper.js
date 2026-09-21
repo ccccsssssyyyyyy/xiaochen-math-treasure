@@ -4433,14 +4433,13 @@
         }
 
         // 1. Extract ALL Markdown image syntaxes ![](/static/uploads/xxx.png) BEFORE KaTeX processing
-        const imgSrcList = [];
-        const imgMatches = [...html.matchAll(/!\[.*?\]\(([^)]+)\)/g)];
-        imgMatches.forEach(m => {
-            const safeSrc = window.MathBankSafe.safeImageUrl(m[1]);
-            if (safeSrc && !imgSrcList.includes(safeSrc)) imgSrcList.push(safeSrc);
-        });
-        html = html.replace(/!\[.*?\]\(([^)]+)\)/g, '').trim();
-        
+        //    「什么算一张内联图」由 MathRender 统一判定（2026-09-21）—— 原先这里另有一份
+        //    正则与安全判断，抄着抄着就和别处不齐了。这里只负责版式（右侧 / 下方居中等）。
+        const stripped = window.MathRender.stripInlineFigures(html);
+        const imgSrcList = stripped.urls;
+        html = stripped.html.trim();
+
+
         // 2. Process LaTeX formulas, \underline, choices environment & LaTeX standard paragraphs via preprocessFormulaForKaTeX
         if (typeof window.parseMarkdownWithMath === 'function') {
             html = window.parseMarkdownWithMath(html);

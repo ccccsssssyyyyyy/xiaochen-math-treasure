@@ -87,16 +87,8 @@
             window.syncAnswerImagesFromMarkdown = function() {
                 const textarea = document.getElementById('editAnswerMarkdown');
                 const markdown = textarea ? textarea.value : '';
-                const foundImages = [];
-                const imagePattern = /!\[.*?\]\(([^)]+)\)/g;
-                let match;
-                while ((match = imagePattern.exec(markdown)) !== null) {
-                    const safePath = window.MathBankSafe.safeImageUrl(match[1]);
-                    if (safePath && !foundImages.includes(safePath)) {
-                        foundImages.push(safePath);
-                    }
-                }
-                uploadedAnswerImages = foundImages;
+                // 「什么算一张内联图」由 MathRender 判定（2026-09-21），这里不再另写正则
+                uploadedAnswerImages = window.MathRender.inlineFigureUrls(markdown);
                 if (typeof window.renderAnswerImageBadges === 'function') {
                     window.renderAnswerImageBadges();
                 }

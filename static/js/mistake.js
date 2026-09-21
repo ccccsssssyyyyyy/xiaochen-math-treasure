@@ -164,72 +164,56 @@
         return now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
     }
 
+    const MR_PREVIEW_FIGURE_CLASS = 'max-w-full max-h-40 rounded-lg border border-slate-200 dark:border-slate-700';
+
     /**
      * 把识别出来的题面转成可读预览。
      *
-     * 只处理错题工作台会遇到的三种结构：choices 环境、\fillin、\paren。其余交给 KaTeX
-     * 的 auto-render 处理 `$...$`。刻意不做完整 Markdown 渲染 —— 这里只是「让老师一眼
-     * 看出识别对不对」，真正的编辑在 textarea 里。
+     * 正文 → HTML 的那一半（choices 环境、\fillin、\paren、折行、内联图）由
+     * `MathRender.renderQuestionBody` 统一负责 —— 与重做录入页同一口径，
+     * 否则同一道题两个工作台长得不一样。这里只管错题台特有的版式：
+     * 每张图上挂移除按钮、缺图处插占位符芯片。
+     *
+     * 其余交给 KaTeX 的 auto-render 处理 `$...$`。刻意不做完整 Markdown 渲染 ——
+     * 这里只是「让老师一眼看出识别对不对」，真正的编辑在 textarea 里。
      */
     function contentPreviewHtml(content, figures, placeholderTarget) {
-        let text = String(content || '').trim();
-        let choices = [];
-        text = text.replace(/\\begin\{choices\}([\s\S]*?)\\end\{choices\}/g, function (_m, inner) {
-            const items = inner.split(/\\item\b/).map(function (piece) { return piece.trim(); })
-                .filter(function (piece) { return piece.length > 0; });
-            choices = choices.concat(items);
-            return '';
-        }).trim();
-        let html = esc(text)
-            .replace(/\\fillin\b/g, '<span class="inline-block min-w-[3rem] border-b border-slate-400">&nbsp;</span>')
-            .replace(/\\paren\b/g, '<span class="inline-block">&nbsp;（&nbsp;&nbsp;&nbsp;）</span>');
-        // 换行还原（2026-09-19 用户反馈「右边的排版没有换行」）：源文本里 \n\n 是段落、
-        // \n 是折行——题干 / (1) / (2) 就是这么分的。预览必须跟着断，否则整题糊成一段。
-        // 用定高块做段距、<br> 做折行：结构保持扁平，不引入 <p> 嵌套，
-        // 与 fillin/paren 的行内块、下面的插图块互不干扰。
-        html = html
-            .replace(/\n{2,}/g, '<span class="block h-2"></span>')
-            .replace(/\n/g, '<br>');
-        // 正文内联图：位置就在正文里（框选补图写进来的就是这种），原样渲染出来。
         // 右上角挂个移除按钮 —— 补错了得能撤，不然只剩「去 textarea 里找那串 markdown」一条路。
         const inlineTarget = placeholderTarget === 'answer_images' ? 'answer_images' : 'figure_images';
-        let inlineIndex = -1;
-        html = html.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (_match, alt, url) {
-            inlineIndex += 1;
-            // 图片下方**不再**显示 markdown 的 alt（2026-09-18）：补图写进来的 alt 恒为「插图」，
-            // 每张图底下挂一行灰字「插图」纯属噪音，用户看到还以为是占位符没替换干净。
-            // alt 仍留在 <img alt> 属性里（无障碍、图片加载失败时有用），只是不当标注渲染。
-            return '<span class="relative inline-block my-1.5"><img src="' + mrCropAttr(url) + '" alt="' + alt +
-                '" class="max-w-full max-h-40 rounded-lg border border-slate-200 dark:border-slate-700">' +
-                '<button type="button" title="从正文里移除这张图"' +
-                ' onclick="removeInlineMistakeImage(\'' + inlineTarget + '\',' + inlineIndex + ')"' +
-                ' class="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 text-slate-500 text-[10px] leading-none flex items-center justify-center">' +
-                '<i class="fa-solid fa-xmark text-[9px]"></i></button></span>';
-        });
-        // 占位符：能按出现顺序配到老 figure_images 的直接出图；配不到的说明还没补 ——
-        // 渲染成一个**不可点**的琥珀色标记，只负责让人看见「这一处还缺图」。
-        // 2026-09-18 起补图入口搬到了源码区（光标点到占位符上才浮出「补这张图」）：
-        // 用户当时的注意力在源码里改字，预览里能点反而容易误触，而且「跳转」的发起位置
-        // 本来就该在正在编辑的那一侧。
         const figureList = Array.isArray(figures) ? figures : [];
-        let figureCursor = 0;
-        html = html.replace(/\[插图待补\s*[:：]\s*([^\]]+)\]/g, function (_match, label) {
-            const url = figureList[figureCursor];
-            if (url) {
-                figureCursor += 1;
-                return '<span class="block my-1.5"><img src="' + mrCropAttr(url) + '" alt="' + label +
-                    '" class="max-w-full max-h-40 rounded-lg border border-slate-200 dark:border-slate-700">' +
-                    '<span class="block text-[10px] text-slate-400 mt-0.5">' + label + '</span></span>';
+        let html = window.MathRender.renderQuestionBody(content, {
+            figureClass: MR_PREVIEW_FIGURE_CLASS,
+            choiceClass: 'text-slate-700 dark:text-slate-200',
+            // 占位符：能按出现顺序配到老 figure_images 的直接出图；配不到的说明还没补 ——
+            // 渲染成一个**不可点**的琥珀色标记，只负责让人看见「这一处还缺图」。
+            // 2026-09-18 起补图入口搬到了源码区（光标点到占位符上才浮出「补这张图」）：
+            // 用户当时的注意力在源码里改字，预览里能点反而容易误触，而且「跳转」的发起位置
+            // 本来就该在正在编辑的那一侧。
+            beforeChoices: function (bodyHtml) {
+                let cursor = 0;
+                return bodyHtml.replace(/\[插图待补\s*[:：]\s*([^\]]+)\]/g, function (_match, label) {
+                    const url = figureList[cursor];
+                    if (url) {
+                        cursor += 1;
+                        return '<span class="block my-1.5"><img src="' + mrCropAttr(url) + '" alt="' + label +
+                            '" class="' + MR_PREVIEW_FIGURE_CLASS + '">' +
+                            '<span class="block text-[10px] text-slate-400 mt-0.5">' + label + '</span></span>';
+                    }
+                    return mrPlaceholderChipHtml(label);
+                });
+            },
+            imageBuilder: function (ctx) {
+                // 图片下方**不再**显示 markdown 的 alt（2026-09-18）：补图写进来的 alt 恒为「插图」，
+                // 每张图底下挂一行灰字「插图」纯属噪音，用户看到还以为是占位符没替换干净。
+                // alt 仍留在 <img alt> 属性里（无障碍、图片加载失败时有用），只是不当标注渲染。
+                return '<span class="relative inline-block my-1.5"><img src="' + mrCropAttr(ctx.safeUrl) +
+                    '" alt="' + mrCropAttr(ctx.alt) + '" class="' + MR_PREVIEW_FIGURE_CLASS + '">' +
+                    '<button type="button" title="从正文里移除这张图"' +
+                    ' onclick="removeInlineMistakeImage(\'' + inlineTarget + '\',' + ctx.index + ')"' +
+                    ' class="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 text-slate-500 text-[10px] leading-none flex items-center justify-center">' +
+                    '<i class="fa-solid fa-xmark text-[9px]"></i></button></span>';
             }
-            return mrPlaceholderChipHtml(label);
-        });
-        if (choices.length) {
-            const letters = 'ABCDEFGH';
-            html += '<div class="mt-1.5 grid grid-cols-1 gap-0.5 text-[12px] text-slate-700 dark:text-slate-200">' +
-                choices.map(function (item, index) {
-                    return '<div><b class="text-slate-400">' + (letters[index] || (index + 1)) + '.</b> ' + esc(item) + '</div>';
-                }).join('') + '</div>';
-        }
+        }).html;
         return html;
     }
 
@@ -4331,8 +4315,12 @@
         return '![插图](' + String(url || '') + ')';
     }
 
-    // 正文里的 markdown 图片（与 contentPreviewHtml 用的是同一套语法）。
-    const MR_INLINE_IMAGE_RE = /!\[[^\]]*\]\(\s*([^)\s]+)\s*\)/g;
+    // 正文里的 markdown 图片：**必须**与预览渲染用的是同一条正则。
+    // 2026-09-21 之前这里另写了一份（多了 \s*），而预览那份不带 \s* ——
+    // 遇到 `![插图]( /a.png )` 这种带空格的写法，预览认不出、这里却认得出，
+    // 于是移除按钮的序号和预览里看到的第几张图对不上，**点掉的会是另一张图**。
+    // 现在统一引用 MathRender 里那一份，从根上掐掉对不齐。
+    const MR_INLINE_IMAGE_RE = window.MathRender.INLINE_IMAGE_RE;
 
     /** 摘掉正文里第 index 个（0 起）内联图；那个位置没有图时返回 null。 */
     function mrRemoveNthInlineImage(text, index) {

@@ -92,54 +92,66 @@
     // ---------------------------------------------------------------- 题面渲染
 
     /**
-     * 只处理错题/重做卷会遇到的几种结构：choices 环境、\fillin、\paren，其余交给 KaTeX。
-     * 与 mistake.js 的预览同口径 —— 两边对同一道题的呈现必须一致，否则老师会以为
-     * 「导出的卷子和页面看到的不一样」。
+     * 正文内联图与「配图数组」两条路必须落在同一个尺寸上 —— 同一张图从哪条路
+     * 出来长得不一样，老师会以为它们是两张图。共用一个常量就是为了掐死这件事。
      */
-    function latexPreviewHtml(content) {
-        let text = String(content || '').trim();
-        const renderStack = [];
-        text = text.replace(/\\begin\{choices\}([\s\S]*?)\\end\{choices\}/g, function (_m, inner) {
-            const items = inner.split(/\\item\b/)
-                .map(function (piece) { return piece.trim(); })
-                .filter(function (piece) { return piece.length > 0; });
-            renderStack.push(items);
-            return '';
-        }).trim();
-        let html = esc(text)
-            .replace(/\\fillin\b/g, '<span class="inline-block min-w-[3rem] border-b border-slate-400">&nbsp;</span>')
-            .replace(/\\paren\b/g, '<span class="inline-block">&nbsp;（&nbsp;&nbsp;&nbsp;）</span>');
-        html = html
-            .replace(/\n{2,}/g, '<span class="block h-2"></span>')
-            .replace(/\n/g, '<br>');
-        const choices = renderStack[0] || [];
-        if (choices.length) {
-            const letters = 'ABCDEFGH';
-            html += '<div class="mt-1.5 grid grid-cols-1 gap-0.5 text-[12px]">' +
-                choices.map(function (item, index) {
-                    return '<div><b class="text-slate-400">' + (letters[index] || (index + 1)) + '.</b> ' + esc(item) + '</div>';
-                }).join('') + '</div>';
+    const REDO_FIGURE_CLASS = 'max-h-56 rounded-lg border border-slate-200 dark:border-slate-700';
+
+    function safeImageUrl(value) {
+        const guard = window.MathBankSafe && window.MathBankSafe.safeImageUrl;
+        return guard ? guard(value) : '';
+    }
+
+    function escAttr(value) {
+        const guard = window.MathBankSafe && window.MathBankSafe.escapeAttribute;
+        return guard ? guard(value) : esc(value);
+    }
+
+    /**
+     * 题面 / 解析的正文渲染一律走 `MathRender.renderQuestionBody`（方案 B，2026-09-21）。
+     *
+     * 为什么不再自己写一份：原先 redo.js 漏了 `![alt](url)` 这一支，于是同一道题
+     * 「导出的 PDF 上有图、重做页印出一串 markdown」。漏的不是图，是「哪些语法算图」
+     * 这个决定被抄了四份。现在四份合成一份，这里只决定版式（图多大、要不要去重点）。
+     */
+    function renderBody(content, opts) {
+        return window.MathRender.renderQuestionBody(content, opts);
+    }
+
+    /**
+     * `renderedUrls` 收走这次真正渲染出来的 URL，交给 figureStripHtml 去重 ——
+     * 库里有 68 道题正文和 image_paths 指向同一个文件，不去重那批题会印出两张。
+     */
+    function latexPreviewHtml(content, renderedUrls) {
+        const out = renderBody(content, { figureClass: REDO_FIGURE_CLASS });
+        if (renderedUrls) {
+            out.urls.forEach(function (url) {
+                if (renderedUrls.indexOf(url) === -1) renderedUrls.push(url);
+            });
         }
-        return html;
+        return out.html;
     }
 
-    /** 解析/答案区：保留换行、交给 KaTeX 渲染公式，并高亮 ``【答案】`` 标记。 */
+    /** 解析/答案区：保留换行、认正文内联图，并高亮 ``【答案】`` 标记。 */
     function answerHtml(content) {
-        let html = esc(String(content || '').trim())
-            .replace(/\n/g, '<br>');
-        html = html.replace(/【答案】/g, '<b class="text-brand-700 dark:text-brand-500">【答案】</b>');
-        return html;
+        const html = renderBody(content, { figureClass: REDO_FIGURE_CLASS }).html;
+        return html.replace(/【答案】/g, '<b class="text-brand-700 dark:text-brand-500">【答案】</b>');
     }
 
-    function figureStripHtml(item) {
+    /**
+     * 配图数组（``image_paths``）那一路。
+     * `skipUrls` 是正文已经画过的图 —— 同一个文件不再出第二张。
+     */
+    function figureStripHtml(item, skipUrls) {
         const paths = Array.isArray(item.image_paths) ? item.image_paths : [];
         if (!paths.length) return '';
-        const safeUrl = (window.MathBankSafe && window.MathBankSafe.safeImageUrl)
-            ? window.MathBankSafe.safeImageUrl : function () { return ''; };
-        const usable = paths.map(safeUrl).filter(function (u) { return !!u; });
+        const skip = Array.isArray(skipUrls) ? skipUrls : [];
+        const usable = paths.map(safeImageUrl).filter(function (u) {
+            return !!u && skip.indexOf(u) === -1;
+        });
         if (!usable.length) return '';
         return '<div class="flex flex-wrap gap-2 pt-1.5">' + usable.map(function (url) {
-            return '<img src="' + esc(url) + '" alt="题图" loading="lazy" decoding="async" class="max-h-56 rounded-lg border border-slate-200 dark:border-slate-700">';
+            return '<img src="' + escAttr(url) + '" alt="题图" loading="lazy" decoding="async" class="' + REDO_FIGURE_CLASS + '">';
         }).join('') + '</div>';
     }
 
@@ -382,6 +394,10 @@
                 : '<span class="text-[10px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">已录：做错</span>')
             : '<span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">未录入</span>';
         const masteryClass = MASTERY_CLASS[redo.mastery_status] || MASTERY_CLASS.pending;
+        // 正文里画出来的图收在这里，配图数组那一路据此去重 —— 库里有 68 道题的正文
+        // 与 image_paths 指向同一个文件，不去重就会印出两张一模一样的图。
+        const inlineFigureUrls = [];
+        const stemHtml = latexPreviewHtml(item.display_content, inlineFigureUrls);
         return '<div class="glass-card rounded-2xl p-4 space-y-3">' +
             '<div class="flex items-center justify-between gap-2 flex-wrap">' +
                 '<div class="flex items-center gap-1.5 flex-wrap">' +
@@ -398,8 +414,8 @@
                     (redo.next_redo_due ? '<span class="text-slate-500">建议 ' + esc(redo.next_redo_due) + '</span>' : '') +
                 '</div>' +
             '</div>' +
-            '<div class="text-[13px] leading-relaxed text-slate-800 dark:text-slate-100">' + latexPreviewHtml(item.display_content) + '</div>' +
-            figureStripHtml(item) +
+            '<div class="text-[13px] leading-relaxed text-slate-800 dark:text-slate-100">' + stemHtml + '</div>' +
+            figureStripHtml(item, inlineFigureUrls) +
             '<div class="flex items-center justify-between gap-2 flex-wrap">' +
                 '<div class="text-[10px] text-slate-400">' + esc(MODE_HINT[mode] || '') +
                     ' · 分值 ' + (item.score != null ? item.score : 5) +

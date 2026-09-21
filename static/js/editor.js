@@ -2514,12 +2514,13 @@ window.questionCardBadges = questionCardBadges;
                                .replace(/\n/g, ' ');
                                
             // 转换 Markdown 题目插图与配图语法 ![](/static/uploads/xxx.png) 为精美自适应预览图
-            tempText = tempText.replace(/!\[(.*?)\]\(([^)]+)\)/g, function(match, alt, src) {
-                const safeSrc = window.MathBankSafe.safeImageUrl(src);
-                if (!safeSrc) return '';
-                const safeAlt = window.MathBankSafe.escapeAttribute(alt || '题目配图');
-                return `<div class="my-2.5 text-center"><img src="${window.MathBankSafe.escapeAttribute(safeSrc)}" alt="${safeAlt}" class="max-w-[220px] max-h-[180px] object-contain rounded-lg border border-slate-200 shadow-sm inline-block cursor-zoom-in hover:shadow-sm hover:scale-[1.02] transition-all" data-safe-image-open="true" title="点击在新标签页查看高清原图"></div>`;
-            });
+            // 「什么算一张内联图」由 MathRender 统一判定（2026-09-21），这里只管版式：
+            // 居中、可点开高清原图。过不了安全校验的直接不留块。
+            tempText = window.MathRender.replaceInlineFigures(tempText, function (ctx) {
+                if (!ctx.safeUrl) return '';
+                const safeAlt = window.MathBankSafe.escapeAttribute(ctx.alt || '题目配图');
+                return `<div class="my-2.5 text-center"><img src="${window.MathBankSafe.escapeAttribute(ctx.safeUrl)}" alt="${safeAlt}" class="max-w-[220px] max-h-[180px] object-contain rounded-lg border border-slate-200 shadow-sm inline-block cursor-zoom-in hover:shadow-sm hover:scale-[1.02] transition-all" data-safe-image-open="true" title="点击在新标签页查看高清原图"></div>`;
+            }).html;
                                
             // Restore math blocks with HTML escaping
             function escapeHtml(str) {
