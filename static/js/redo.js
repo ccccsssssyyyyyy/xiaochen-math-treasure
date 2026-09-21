@@ -117,38 +117,62 @@
     }
 
     /**
-     * `renderedUrls` 收走这次真正渲染出来的 URL，交给 figureStripHtml 去重 ——
-     * 库里有 68 道题正文和 image_paths 指向同一个文件，不去重那批题会印出两张。
+     * 题干的 HTML（含配图块）。
+     *
+     * 图**不留在正文流里**（`stripFigures`），而是先在**选项块之前**插成一整块 ——
+     * 这正是试卷 PDF 的排版顺序（`paper_helper.py`：stem_text → 图 → choices_part），
+     * 也是「如图，下列选项中…」这类题的读法：先题干、再图、最后才是 A./B./C./D.。
+     *
+     * 为什么值得统一：录入对错是**对着印出来的重做卷**判的。原先屏幕上图留在正文
+     * 出现的原位、纸上却被抽到题末，同一道题两个位置，看着就不像同一张卷。
      */
-    function latexPreviewHtml(content, renderedUrls) {
-        const out = renderBody(content, { figureClass: REDO_FIGURE_CLASS });
-        if (renderedUrls) {
-            out.urls.forEach(function (url) {
-                if (renderedUrls.indexOf(url) === -1) renderedUrls.push(url);
-            });
-        }
-        return out.html;
+    function questionStemHtml(item) {
+        const block = figureBlockHtml(item);
+        return renderBody(item.display_content, {
+            figureClass: REDO_FIGURE_CLASS,
+            stripFigures: true,
+            beforeChoices: function (bodyHtml) {
+                return bodyHtml + block;
+            }
+        }).html;
     }
 
-    /** 解析/答案区：保留换行、认正文内联图，并高亮 ``【答案】`` 标记。 */
+    /** 解析/答案区：就地保留换行与正文内联图，并高亮 ``【答案】`` 标记。
+     *
+     * 解析里的图**不**抽到末尾：PDF 那一路（`paper_helper.py:clean_content_for_latex`）
+     * 对 `answer_markdown` 就是就地转 `\includegraphics` 居中的，两边本来就一致；
+     * 而且「由图可知…」这类话指着图说，挪走反而看不懂。 */
     function answerHtml(content) {
         const html = renderBody(content, { figureClass: REDO_FIGURE_CLASS }).html;
         return html.replace(/【答案】/g, '<b class="text-brand-700 dark:text-brand-500">【答案】</b>');
     }
 
     /**
-     * 配图数组（``image_paths``）那一路。
-     * `skipUrls` 是正文已经画过的图 —— 同一个文件不再出第二张。
+     * 配图块：正文里出现的图（按出现顺序，含选项里的图）+ ``image_paths`` 里
+     * 剩下的图，合并去重后画成一排、居中。
+     *
+     * 两路合并时必须去重：库里有 68 道题正文与 image_paths 指向同一个文件，
+     * 不去重就会印出两张一模一样的图。
+     *
+     * 「正文里出现的图」直接用 `MathRender.inlineFigureUrls`（全站唯一的「什么算
+     * 一张内联图」判定）扫一遍原文，而不是等渲染时收集 —— 因为这一块要排在**选项
+     * 之前**，渲染到选项时再收就晚了；选项里带的图在 PDF 里同样是被抽出来提到
+     * 题末的（`paper_helper.py` 对整段 content 做 `re.sub` 摘图），这里保持同口径。
+     *
+     * 居中即 PDF 的实际口径：库里 1399 道题 ``figure_align`` 有 1398 条是 'right'，
+     * 那是**旧列默认值的残留** —— `paper_helper.py` 与 `paper.js:getQuestionFigAlign`
+     * 都把「不带 custom 标记的 right」归一成 center，所以印出来实际全是题末居中。
      */
-    function figureStripHtml(item, skipUrls) {
-        const paths = Array.isArray(item.image_paths) ? item.image_paths : [];
-        if (!paths.length) return '';
-        const skip = Array.isArray(skipUrls) ? skipUrls : [];
-        const usable = paths.map(safeImageUrl).filter(function (u) {
-            return !!u && skip.indexOf(u) === -1;
-        });
-        if (!usable.length) return '';
-        return '<div class="flex flex-wrap gap-2 pt-1.5">' + usable.map(function (url) {
+    function figureBlockHtml(item) {
+        const urls = [];
+        const add = function (value) {
+            const safeUrl = safeImageUrl(value);
+            if (safeUrl && urls.indexOf(safeUrl) === -1) urls.push(safeUrl);
+        };
+        window.MathRender.inlineFigureUrls(item.display_content || '').forEach(add);
+        (Array.isArray(item.image_paths) ? item.image_paths : []).forEach(add);
+        if (!urls.length) return '';
+        return '<div class="flex flex-wrap justify-center gap-2 pt-1.5">' + urls.map(function (url) {
             return '<img src="' + escAttr(url) + '" alt="题图" loading="lazy" decoding="async" class="' + REDO_FIGURE_CLASS + '">';
         }).join('') + '</div>';
     }
@@ -443,10 +467,8 @@
                 : '<span class="text-[10px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">已录：做错</span>')
             : '<span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">未录入</span>';
         const masteryClass = MASTERY_CLASS[redo.mastery_status] || MASTERY_CLASS.pending;
-        // 正文里画出来的图收在这里，配图数组那一路据此去重 —— 库里有 68 道题的正文
-        // 与 image_paths 指向同一个文件，不去重就会印出两张一模一样的图。
-        const inlineFigureUrls = [];
-        const stemHtml = latexPreviewHtml(item.display_content, inlineFigureUrls);
+        // 题干的气泡里含题干文字 + 配图块（图在选项之前，见 questionStemHtml）。
+        const stemHtml = questionStemHtml(item);
         return '<div class="glass-card rounded-2xl p-4 space-y-3">' +
             '<div class="flex items-center justify-between gap-2 flex-wrap">' +
                 '<div class="flex items-center gap-1.5 flex-wrap">' +
@@ -464,7 +486,6 @@
                 '</div>' +
             '</div>' +
             '<div class="text-[13px] leading-relaxed text-slate-800 dark:text-slate-100">' + stemHtml + '</div>' +
-            figureStripHtml(item, inlineFigureUrls) +
             '<div class="flex items-center justify-between gap-2 flex-wrap">' +
                 '<div class="text-[10px] text-slate-400">' + esc(MODE_HINT[mode] || '') +
                     ' · 分值 ' + (item.score != null ? item.score : 5) +

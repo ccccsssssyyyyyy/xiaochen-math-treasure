@@ -115,9 +115,22 @@
         return { html: html, urls: urls, count: index + 1 };
     }
 
-    /** 只要 URL 列表（去重、按出现顺序）。 */
+    /**
+     * 只要 URL 列表（去重、按出现顺序）。
+     *
+     * 刻意不复用 `replaceInlineFigures(...).urls`：那里判定「算不算渲染出来的图」用的是
+     * `piece !== match` —— 只统计**被换成了别的东西**的那几处。这里 build 原样返回
+     * match，会被判成「没渲染」而永远返回空数组（正是本函数此前的 bug）。这里要的是
+     * 「正文里出现了哪些能通过安全校验的图」，与替换结果无关。
+     */
     function inlineFigureUrls(text) {
-        return replaceInlineFigures(text, function (ctx) { return ctx.match; }).urls;
+        const urls = [];
+        String(text == null ? '' : text).replace(INLINE_IMAGE_RE, function (match, _alt, rawUrl) {
+            const safeUrl = safeImageUrl(rawUrl);
+            if (safeUrl && urls.indexOf(safeUrl) === -1) urls.push(safeUrl);
+            return match;
+        });
+        return urls;
     }
 
     /** 把图从正文里摘掉，交给版式层单独摆放（paper.js 的右侧/下方配图块）。 */
@@ -127,12 +140,15 @@
     }
 
     /**
-     * 题面正文 → HTML。mistake.js 与 redo.js 共用这一份：
+     * 题面正文 → HTML。mistake.js / redo.js 共用这一份：
      * choices 环境 → 选项列表、\fillin → 下划线空、\paren → 括号、\n → 折行、
      * 内联图 → <img>（版式由 opts.imageBuilder 决定）。
      *
      * 图在**转义之前**摘出来，再以占位符穿过转义，最后才拼 <img> ——
      * 否则「先转义整段、再对 URL 转义一次」会把 `&` 变成 `&amp;amp;`，图直接 404。
+     *
+     * ``opts.stripFigures``：把图从正文流里摘掉、只登记 URL（返回值 ``urls``），
+     * 由调用方在题末统一摆放 —— 与试卷 PDF / 组卷画布同一口径。
      */
     function renderQuestionBody(content, opts) {
         opts = opts || {};
@@ -159,19 +175,28 @@
             .replace(/\n/g, '<br>');
 
         const urls = [];
-        // 选项里也可能带图（`\item ![](a.png)`），所以换回 <img> 这一步要能复用，
-        // 不能只作用在题干上 —— 否则选项里会留下一串控制字符占位符。
-        const restoreFigures = function (str) {
+        const recordUrl = function (safeUrl) {
+            if (safeUrl && urls.indexOf(safeUrl) === -1) urls.push(safeUrl);
+        };
+        // 选项里也可能带图（`\item ![](a.png)`），所以这一步要能复用到选项块上，
+        // 不能只作用在题干 —— 否则选项里会留下一串控制字符占位符。
+        //
+        // 一处占位符有三种去向，全在这一个函数里决定，别拆成两份（拆开就又会走岔）：
+        //   · 过不了安全校验 → 原样保留 markdown。显示一串字顶多难看，
+        //     静默抹掉会让老师以为这题本来就没配图（`dropUnsafe` 才是显式要求抹掉）。
+        //   · ``opts.stripFigures === true`` → 只登记 URL、返回空串：图不留在正文流里，
+        //     由版式层在题末统一摆放。试卷 PDF（`paper_helper.py` 把 `![]()` 摘出来
+        //     按 `figure_align` 摆到题末）与组卷画布（`paper.js` 的配图块）都是这个口径，
+        //     录入页跟着走，屏幕上看到的和纸上印的才是同一道题。
+        //   · 其余 → 就地渲染 <img>（`opts.imageBuilder` 可换版式）。
+        const placeFigures = function (str) {
             return String(str).replace(FIGURE_TOKEN_RE, function (_m, ordinal) {
                 const fig = figures[Number(ordinal)];
                 if (!fig) return '';
                 const safeUrl = safeImageUrl(fig.rawUrl);
-                if (!safeUrl) {
-                    // 过不了校验的原样留着：显示一串 markdown 顶多难看，
-                    // 静默抹掉会让老师以为这题本来就没配图。
-                    return opts.dropUnsafe === true ? '' : escapeText(fig.match);
-                }
-                if (urls.indexOf(safeUrl) === -1) urls.push(safeUrl);
+                if (!safeUrl) return opts.dropUnsafe === true ? '' : escapeText(fig.match);
+                recordUrl(safeUrl);
+                if (opts.stripFigures === true) return '';
                 const ctx = {
                     index: Number(ordinal),
                     alt: fig.alt,
@@ -185,7 +210,7 @@
                     (opts.figureClass || '') + '"></span>';
             });
         };
-        html = restoreFigures(html);
+        html = placeFigures(html);
 
         // 选项块排在最后，所以「缺图占位符」这类属于**题干**的标记必须在这里插 ——
         // 否则它会被挤到 A./B./C./D. 后面，看着像选项的一部分。
@@ -197,7 +222,7 @@
                 (opts.choiceClass ? ' ' + opts.choiceClass : '') + '">' +
                 choiceItems.map(function (item, index) {
                     return '<div><b class="text-slate-400">' + (letters[index] || (index + 1)) +
-                        '.</b> ' + restoreFigures(escapeText(item)) + '</div>';
+                        '.</b> ' + placeFigures(escapeText(item)) + '</div>';
                 }).join('') + '</div>';
         }
 

@@ -779,7 +779,7 @@ async function main() {
     check('池内题不显示这个徽章',
         !el('redoGradeCard').innerHTML.includes('非错题 · 做错后进池'));
 
-    // ==================== 14. 题面里的图：正文内联图那一路 ====================
+    // ==================== 14. 题面里的图：抽到选项前统一摆 ====================
     //
     // 2026-09-20 用户截图：题干里的图渲染成一串 `![插图](/static/uploads/...)` 文字。
     // 错题入库时补的图**就是**这么存的（写在正文里，见 mistake.js 的补图逻辑），
@@ -788,10 +788,31 @@ async function main() {
     //
     // 库里 102 道题命中这种语法（题干或解析），其中 14 道 image_paths 是空的、
     // 图**只**能靠正文这条路渲染出来。所以这里必须真跑渲染，不能只断言函数名。
+    //
+    // 2026-09-21 再改一次**图放哪里**：原先屏幕上图留在正文出现的原位，而试卷 PDF
+    // 把图抽出来摆到「题干之后、选项之前」（`paper_helper.py`：stem_text → 图 →
+    // choices_part）。录入对错是**对着印出来的重做卷**判的，同一道题两个位置看着
+    // 不像同一张卷。现在录入页也抽图、也插在选项之前、也居中 —— 与本节第 ⑥ 项
+    // 断言（图在 A./B. 之前）以及 PDF 同口径。图只在正文里、image_paths 为空的那
+    // 批题照样要出图，所以下面的用例继续覆盖「图只长在正文」这条路径。
     const FIGURE_A = '/static/uploads/mistakes/1/figures/crop_p015_7eb99e70c0.png';
     const FIGURE_B = '/static/uploads/mistakes/1/figures/crop_p015_5c9742c26d.png';
+    const FIG_BLOCK_CLASS = 'flex flex-wrap justify-center gap-2 pt-1.5';
     const countOf = (haystack, needle) => haystack.split(needle).length - 1;
     const figureCard = () => el('redoGradeCard').innerHTML;
+    // 题干气泡（含配图块）从题干文字 div 起、到卡片末尾的配图块结束；
+    // 配图块里不嵌套 div，所以第一个 </div> 就是它的闭合。
+    const figureBlockOf = (card) => {
+        const start = card.indexOf(FIG_BLOCK_CLASS);
+        if (start === -1) return '';
+        const end = card.indexOf('</div>', start);
+        return card.slice(start, end === -1 ? card.length : end);
+    };
+    const stemOf = (card) => {
+        const start = card.indexOf('text-[13px] leading-relaxed');
+        const blockAt = card.indexOf(FIG_BLOCK_CLASS, start);
+        return card.slice(start, blockAt === -1 ? card.length : blockAt);
+    };
 
     // ① 图只在正文里（那 14 道物理错题的形态）
     const inlineOnlyQuestion = {
@@ -811,13 +832,19 @@ async function main() {
     sandbox.RedoStore.index = 0;
     sandbox.setRedoHideAnswer(true);
     const inlineCard = figureCard();
-    check('正文内联图渲染成 <img>（不再印 markdown 原文）',
+    check('正文里的图渲染成 <img>（不再印 markdown 原文）',
         inlineCard.includes('<img src="' + FIGURE_A + '"'), inlineCard.slice(0, 320));
     check('正文里不再残留 ![插图](...) 字面量', !inlineCard.includes('![插图]'));
-    check('内联图与配图数组同一尺寸（max-h-56 + 圆角描边）',
+    check('图已从正文流里摘出来（题干文字段里不再直接嵌 <img>）',
+        !stemOf(inlineCard).includes('<img'), stemOf(inlineCard).slice(0, 200));
+    check('抽出来的图落在配图块里、居中（与 PDF 题末居中间口径）',
+        figureBlockOf(inlineCard).includes('<img src="' + FIGURE_A + '"'),
+        figureBlockOf(inlineCard).slice(0, 200));
+    check('配图块与 image_paths 那条路同一尺寸（max-h-56 + 圆角描边）',
         inlineCard.includes('class="max-h-56 rounded-lg border border-slate-200 dark:border-slate-700"'));
-    check('markdown 的 alt 落在 img alt 属性里', inlineCard.includes('alt="插图"'));
-    check('图文顺序不乱：题干在前、图在后', (() => {
+    check('配图块的 img 带 alt（抽走后不再保留每条 markdown 的 alt）',
+        figureBlockOf(inlineCard).includes('alt="题图"'));
+    check('图文顺序不乱：题干文字在前、图在后', (() => {
         const stem = inlineCard.indexOf('频闪照相');
         const img = inlineCard.indexOf('<img src="' + FIGURE_A + '"');
         return stem >= 0 && img > stem;
@@ -868,7 +895,9 @@ async function main() {
     check('取消隐藏后解析里的图渲染成 <img>',
         answerCard.includes('<img src="' + FIGURE_B + '"') && !answerCard.includes('![插图]'));
 
-    // ⑥ 正文图与 \begin{choices} 选项共存：图在选项块之前，两者都不能丢
+    // ⑥ 正文图与 \begin{choices} 选项共存：图在选项块之前，两者都不能丢。
+    //    这一项同时钉住「图插在选项之前」这条排版顺序 —— 与试卷 PDF 的
+    //    stem_text → 图 → choices_part 一致（「如图，下列选项中…」的正确读法）。
     const figureWithChoices = Object.assign({}, inlineOnlyQuestion, {
         display_content: '如图，正确的是\n\n![插图](' + FIGURE_A + ')'
             + '\n\\begin{choices}\n\\item 甲\n\\item 乙\n\\end{choices}'
@@ -885,10 +914,12 @@ async function main() {
     // ⑦ 没有图时不能凭空多出一个空的配图容器
     sandbox.RedoStore.questions = [Object.assign({}, QUESTION_3)];
     sandbox.setRedoHideAnswer(true);
-    check('无图题目不渲染空的配图容器', !figureCard().includes('flex flex-wrap gap-2 pt-1.5'));
+    check('无图题目不渲染空的配图容器', !figureCard().includes(FIG_BLOCK_CLASS));
 
-    // ⑧ 图也可以长在选项里（`\item ![](a.png)`）—— 公共层把题干与选项分开处理，
-    //    选项那一侧也得把占位符换回 <img>，否则会漏下一串控制字符。
+    // ⑧ 图长在选项里（`\item ![](a.png)`）—— 与 PDF 同口径：图从选项里抽出来、
+    //    与正文图合并到配图块里（`paper_helper.py` 对整段 content 做 `re.sub` 摘图，
+    //    选项里的图同样被提到题末）。所以这里钉两件事：图**在**、且选项里不留
+    //    控制字符占位符残骸。
     sandbox.RedoStore.questions = [Object.assign({}, inlineOnlyQuestion, {
         display_content: '如图，正确的是\\begin{choices}\n\\item 甲\n\\item ![选项图](' + FIGURE_B + ')\n\\end{choices}'
     })];
@@ -896,6 +927,8 @@ async function main() {
     const optionFigureCard = figureCard();
     check('选项里带的图也渲染成 <img>',
         optionFigureCard.includes('<img src="' + FIGURE_B + '"'), optionFigureCard.slice(0, 320));
+    check('选项里的图被抽到配图块、不留在选项里（与 PDF 摘图同口径）',
+        !stemOf(optionFigureCard).includes('<img'), stemOf(optionFigureCard).slice(0, 200));
     check('选项里不留占位符残骸', !/\u0000MRIMG\d+\u0000/.test(optionFigureCard), optionFigureCard.slice(0, 320));
 
     const passed = total - failures;

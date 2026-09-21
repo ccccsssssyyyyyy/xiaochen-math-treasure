@@ -187,7 +187,7 @@ def test_redo_js_has_no_inline_confirm_dialog(js):
 def test_redo_payload_check_is_wired_into_pytest():
     """夹具必须真的进回归网 —— 它是脚本，不写包装就永远不会被拉起。
 
-    `tests/js/redo_payload_check.js`（117 项）是本功能唯一的**运行期**防线：静态断言
+    `tests/js/redo_payload_check.js`（125 项）是本功能唯一的**运行期**防线：静态断言
     只能证明字段名/函数名写对了，证明不了「点的是哪道题、发出去的 body 长什么样、
     渲染的是不是导出印在纸上的那一版」。这类夹具历史上已出现过「存在很久但没人跑」
     的漏网（见 fake-dom-module-payload-check 技能第 6 条），所以这里钉住文件存在，
@@ -199,9 +199,8 @@ def test_redo_payload_check_is_wired_into_pytest():
 
 
 #: 断言条数下限 —— 夹具被误删/掏空时这里会先红，不必等某项断言失效才发现。
-#: 当前 107 项（含人工标注掌握度、切回错题台落点两节）。留 ~10% 余量：正常增删
-#: 个别断言不会误报，
-#: 整块章节被删掉则一定会红。
+#: 当前 125 项（含人工标注掌握度、切回错题台落点、题面配图块三节）。正常增删个别
+#: 断言不会误报（余量 3 项），整块章节被删掉则一定会红。
 REDO_CHECK_MIN_ITEMS = 122
 
 
@@ -415,7 +414,7 @@ def test_grade_card_keeps_min_height(html):
 
 
 def test_grade_card_renders_markdown_body_images(js, check_js, math_render_js):
-    """题干 / 解析里的 markdown 内联图必须渲染成 <img>。
+    """题干 / 解析里的 markdown 内联图必须渲染成 <img>，且题干那批要抽到选项之前。
 
     错题入库时补的图是写成 ``![插图](/static/uploads/...)`` **内联在正文里**的
     （见 mistake.js 的补图逻辑），未必进 ``image_paths``。错题详情、组卷台画布、
@@ -426,18 +425,27 @@ def test_grade_card_renders_markdown_body_images(js, check_js, math_render_js):
     收口到 ``math-render.js``，redo.js 只决定版式。所以这里钉的是「还在调公共层」，
     不是「正则还写在本地」。
 
-    真正跑渲染的断言在 ``tests/js/redo_payload_check.js`` 第 14 节（13 项）。
+    2026-09-21 起版式也统一了：录入页把题干里的图**抽出来插在选项之前**，与试卷 PDF
+    的 ``stem_text → 图 → choices_part`` 同序（录入是照着纸质卷判对错的，两边图位
+    不同会让老师怀疑看错了题）。解析区的图仍就地显示 —— PDF 那一路对
+    ``answer_markdown`` 本来就是就地转 ``\\includegraphics``。
+
+    真正跑渲染的断言在 ``tests/js/redo_payload_check.js`` 第 14 节（16 项）。
     """
 
     # redo.js 必须走公共层，不能自己另写一份渲染
     assert "window.MathRender.renderQuestionBody(content, opts)" in js, (
         "题干/解析渲染没走公共层 —— 自己再写一份就会重新漏语法"
     )
-    assert "latexPreviewHtml(item.display_content, inlineFigureUrls)" in js, (
-        "题干渲染没把已渲染的图收出来"
+    assert "stripFigures: true" in js, (
+        "题干里的图没抽出来 —— 会留在正文原位，与 PDF 的图位对不上"
     )
-    assert "figureStripHtml(item, inlineFigureUrls)" in js, "配图数组没接上去重"
-    assert "skip.indexOf(u) === -1" in js, "去重只做了一半"
+    assert "questionStemHtml(item)" in js, "题干渲染没走「抽图 → 选项前统一摆」这条路"
+    assert "window.MathRender.inlineFigureUrls(item.display_content" in js, (
+        "配图块的图片来源没走公共层的判定"
+    )
+    assert "beforeChoices" in js, "配图块没插在选项之前（顺序应与 PDF 一致）"
+    assert "urls.indexOf(safeUrl) === -1" in js, "配图与 image_paths 去重只做了一半"
 
     # 公共层必须真的认这种语法，并且过安全过滤
     assert r"/!\[([^\]]*)\]\(\s*([^)\s]+)\s*\)/g" in math_render_js, "公共层少了内联图正则"
@@ -448,7 +456,7 @@ def test_grade_card_renders_markdown_body_images(js, check_js, math_render_js):
     # 去重要靠「这次真正渲染出来的 URL」，不能靠原始 markdown 字符串
     assert "urls.indexOf(safeUrl) === -1" in math_render_js, "公共层没做去重"
 
-    for label in ("正文内联图渲染成 <img>", "指同一文件时只渲染一张图", "解析里的图渲染成 <img>"):
+    for label in ("抽出来的图落在配图块里、居中（与 PDF 题末居中间口径）", "指同一文件时只渲染一张图", "取消隐藏后解析里的图渲染成 <img>"):
         assert label in check_js, f"夹具第 14 节少了断言：{label}"
 
 
